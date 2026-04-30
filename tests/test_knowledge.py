@@ -39,8 +39,15 @@ class TestKnowledgeModels:
     def test_knowledge_category_values(self):
         assert len(KnowledgeCategory) == 9
         expected = {
-            "research", "market", "spike", "requirement", "constraint",
-            "tradeoff", "risk_analysis", "spec", "api_design",
+            "research",
+            "market",
+            "spike",
+            "requirement",
+            "constraint",
+            "tradeoff",
+            "risk_analysis",
+            "spec",
+            "api_design",
         }
         assert {c.value for c in KnowledgeCategory} == expected
 
@@ -97,9 +104,7 @@ class TestKnowledgeStorage:
         assert records == []
 
     def test_save_and_load(self, tmp_pm_path):
-        kr = KnowledgeRecord(
-            id="KR-001", category="research", title="Test Research"
-        )
+        kr = KnowledgeRecord(id="KR-001", category="research", title="Test Research")
         save_knowledge(tmp_pm_path, [kr])
         loaded = load_knowledge(tmp_pm_path)
         assert len(loaded) == 1
@@ -107,9 +112,7 @@ class TestKnowledgeStorage:
         assert loaded[0].category == KnowledgeCategory.RESEARCH
 
     def test_add_knowledge(self, tmp_pm_path):
-        kr = KnowledgeRecord(
-            id="KR-001", category="spike", title="Spike: FastMCP v3"
-        )
+        kr = KnowledgeRecord(id="KR-001", category="spike", title="Spike: FastMCP v3")
         add_knowledge(tmp_pm_path, kr)
         loaded = load_knowledge(tmp_pm_path)
         assert len(loaded) == 1
@@ -238,15 +241,11 @@ class TestKnowledgeWorkflowIntegration:
     def test_knowledge_filter_by_workflow_id(self, tmp_pm_path):
         add_knowledge(
             tmp_pm_path,
-            KnowledgeRecord(
-                id="KR-001", category="research", title="A", workflow_id="WF-001"
-            ),
+            KnowledgeRecord(id="KR-001", category="research", title="A", workflow_id="WF-001"),
         )
         add_knowledge(
             tmp_pm_path,
-            KnowledgeRecord(
-                id="KR-002", category="research", title="B", workflow_id="WF-002"
-            ),
+            KnowledgeRecord(id="KR-002", category="research", title="B", workflow_id="WF-002"),
         )
         all_records = load_knowledge(tmp_pm_path)
         filtered = [r for r in all_records if r.workflow_id == "WF-001"]
@@ -263,20 +262,31 @@ class TestKnowledgeFilters:
     def _seed_records(self, tmp_pm_path):
         records = [
             KnowledgeRecord(
-                id="KR-001", category="research", title="Auth Research",
-                tags=["auth", "security"], task_id="PROJ-001",
+                id="KR-001",
+                category="research",
+                title="Auth Research",
+                tags=["auth", "security"],
+                task_id="PROJ-001",
                 status=KnowledgeStatus.VALIDATED,
             ),
             KnowledgeRecord(
-                id="KR-002", category="market", title="Market Analysis",
-                tags=["market"], task_id="PROJ-002",
+                id="KR-002",
+                category="market",
+                title="Market Analysis",
+                tags=["market"],
+                task_id="PROJ-002",
             ),
             KnowledgeRecord(
-                id="KR-003", category="tradeoff", title="JWT vs Session",
-                tags=["auth"], task_id="PROJ-001",
+                id="KR-003",
+                category="tradeoff",
+                title="JWT vs Session",
+                tags=["auth"],
+                task_id="PROJ-001",
             ),
             KnowledgeRecord(
-                id="KR-004", category="research", title="DB Research",
+                id="KR-004",
+                category="research",
+                title="DB Research",
                 tags=["database"],
                 status=KnowledgeStatus.SUPERSEDED,
             ),
@@ -314,8 +324,7 @@ class TestKnowledgeFilters:
         records = load_knowledge(tmp_pm_path)
         # research + auth tag
         filtered = [
-            r for r in records
-            if r.category == KnowledgeCategory.RESEARCH and "auth" in r.tags
+            r for r in records if r.category == KnowledgeCategory.RESEARCH and "auth" in r.tags
         ]
         assert len(filtered) == 1
         assert filtered[0].id == "KR-001"
@@ -333,7 +342,8 @@ class TestKnowledgeLifecycle:
             KnowledgeRecord(id="KR-001", category="research", title="Draft"),
         )
         updated = update_knowledge(
-            tmp_pm_path, "KR-001",
+            tmp_pm_path,
+            "KR-001",
             status=KnowledgeStatus.VALIDATED,
             confidence=ConfidenceLevel.HIGH,
         )
@@ -344,12 +354,15 @@ class TestKnowledgeLifecycle:
         add_knowledge(
             tmp_pm_path,
             KnowledgeRecord(
-                id="KR-001", category="research", title="Old",
+                id="KR-001",
+                category="research",
+                title="Old",
                 status=KnowledgeStatus.VALIDATED,
             ),
         )
         updated = update_knowledge(
-            tmp_pm_path, "KR-001",
+            tmp_pm_path,
+            "KR-001",
             status=KnowledgeStatus.SUPERSEDED,
         )
         assert updated.status == KnowledgeStatus.SUPERSEDED
@@ -358,11 +371,14 @@ class TestKnowledgeLifecycle:
         add_knowledge(
             tmp_pm_path,
             KnowledgeRecord(
-                id="KR-001", category="tradeoff", title="Decision Pending",
+                id="KR-001",
+                category="tradeoff",
+                title="Decision Pending",
             ),
         )
         updated = update_knowledge(
-            tmp_pm_path, "KR-001",
+            tmp_pm_path,
+            "KR-001",
             conclusion="Choose option A",
         )
         assert updated.conclusion == "Choose option A"

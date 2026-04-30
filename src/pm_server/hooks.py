@@ -205,10 +205,7 @@ def _build_commit_reminder(pm_path: Path) -> str:
 
     if active:
         task_ids = ", ".join(t.id for t in active)
-        lines.append(
-            f"1. pm_update_task — mark completed tasks as done "
-            f"(active: {task_ids})"
-        )
+        lines.append(f"1. pm_update_task — mark completed tasks as done (active: {task_ids})")
     else:
         lines.append("1. pm_update_task — update task status if needed")
 

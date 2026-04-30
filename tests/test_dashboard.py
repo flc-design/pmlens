@@ -72,19 +72,23 @@ class TestProjectDashboardWorkflow:
             template="development",
             steps=[
                 WorkflowStep(
-                    id="decision", name="Architecture Decision",
+                    id="decision",
+                    name="Architecture Decision",
                     status=WorkflowStepStatus.DONE,
                 ),
                 WorkflowStep(
-                    id="tasks", name="Task Breakdown",
+                    id="tasks",
+                    name="Task Breakdown",
                     status=WorkflowStepStatus.DONE,
                 ),
                 WorkflowStep(
-                    id="implement", name="Implementation",
+                    id="implement",
+                    name="Implementation",
                     status=WorkflowStepStatus.ACTIVE,
                 ),
                 WorkflowStep(
-                    id="test", name="Testing",
+                    id="test",
+                    name="Testing",
                     status=WorkflowStepStatus.PENDING,
                 ),
             ],
@@ -101,15 +105,18 @@ class TestProjectDashboardWorkflow:
         save_tasks(pm_path, sample_tasks)
         records = [
             KnowledgeRecord(
-                id="KR-001", category=KnowledgeCategory.RESEARCH,
+                id="KR-001",
+                category=KnowledgeCategory.RESEARCH,
                 title="Auth research",
             ),
             KnowledgeRecord(
-                id="KR-002", category=KnowledgeCategory.TRADEOFF,
+                id="KR-002",
+                category=KnowledgeCategory.TRADEOFF,
                 title="JWT vs Session",
             ),
             KnowledgeRecord(
-                id="KR-003", category=KnowledgeCategory.RESEARCH,
+                id="KR-003",
+                category=KnowledgeCategory.RESEARCH,
                 title="OAuth providers",
             ),
         ]

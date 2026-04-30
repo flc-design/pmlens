@@ -79,9 +79,7 @@ def _step_guidance(step: WorkflowStep) -> dict:
 def _progress(wf: Workflow) -> str:
     """Calculate progress string like '3/6'."""
     done = sum(
-        1
-        for s in wf.steps
-        if s.status in (WorkflowStepStatus.DONE, WorkflowStepStatus.SKIPPED)
+        1 for s in wf.steps if s.status in (WorkflowStepStatus.DONE, WorkflowStepStatus.SKIPPED)
     )
     return f"{done}/{len(wf.steps)}"
 
@@ -134,8 +132,7 @@ def start_workflow(
 
     if active:
         result["warning"] = (
-            f"There are {len(active)} active workflow(s): "
-            f"{', '.join(w.id for w in active)}"
+            f"There are {len(active)} active workflow(s): {', '.join(w.id for w in active)}"
         )
 
     if steps:
@@ -302,9 +299,7 @@ def advance_step(
 # ─── Internal state transitions ──────────────────────
 
 
-def _resolve_workflow(
-    workflows: list[Workflow], workflow_id: str | None
-) -> tuple[Workflow, int]:
+def _resolve_workflow(workflows: list[Workflow], workflow_id: str | None) -> tuple[Workflow, int]:
     """Find workflow by ID or auto-detect the active one."""
     if workflow_id:
         for i, w in enumerate(workflows):
@@ -337,9 +332,7 @@ def _move_to_next(wf: Workflow, result: dict) -> None:
 
         if wf.chain_to:
             result["chain_to"] = wf.chain_to
-            result["message"] = (
-                f"Workflow completed. Start '{wf.chain_to}' workflow?"
-            )
+            result["message"] = f"Workflow completed. Start '{wf.chain_to}' workflow?"
 
 
 def _loop_back(wf: Workflow, loop_group: str) -> None:
@@ -349,9 +342,7 @@ def _loop_back(wf: Workflow, loop_group: str) -> None:
     first step to ACTIVE. Artifacts and notes from previous iterations
     are preserved.
     """
-    group_indices = [
-        i for i, s in enumerate(wf.steps) if s.loop_group == loop_group
-    ]
+    group_indices = [i for i, s in enumerate(wf.steps) if s.loop_group == loop_group]
 
     if not group_indices:
         raise PmServerError(f"Loop group '{loop_group}' not found")

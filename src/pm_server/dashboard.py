@@ -60,9 +60,7 @@ def render_project_dashboard(pm_path: Path, format: str = "html") -> str:
     workflow_data = []
     for wf in workflows:
         done_steps = sum(
-            1
-            for s in wf.steps
-            if s.status in (WorkflowStepStatus.DONE, WorkflowStepStatus.SKIPPED)
+            1 for s in wf.steps if s.status in (WorkflowStepStatus.DONE, WorkflowStepStatus.SKIPPED)
         )
         total_steps = len(wf.steps)
         pct = round(done_steps / total_steps * 100) if total_steps > 0 else 0
@@ -97,9 +95,7 @@ def render_project_dashboard(pm_path: Path, format: str = "html") -> str:
         knowledge_by_category[kr.category.value] = (
             knowledge_by_category.get(kr.category.value, 0) + 1
         )
-        knowledge_by_status[kr.status.value] = (
-            knowledge_by_status.get(kr.status.value, 0) + 1
-        )
+        knowledge_by_status[kr.status.value] = knowledge_by_status.get(kr.status.value, 0) + 1
 
     context = {
         "project": project,

@@ -173,9 +173,7 @@ class TestWorkflowStorage:
                 status=WorkflowStatus.ACTIVE,
             ),
         )
-        updated = update_workflow(
-            tmp_pm_path, "WF-001", status=WorkflowStatus.COMPLETED
-        )
+        updated = update_workflow(tmp_pm_path, "WF-001", status=WorkflowStatus.COMPLETED)
         assert updated.status == WorkflowStatus.COMPLETED
         assert updated.updated == _dt.date.today()
 
@@ -280,9 +278,7 @@ class TestWorkflowTemplates:
                 {"id": "only-step", "name": "The Only Step"},
             ],
         }
-        (custom_dir / "development.yaml").write_text(
-            yaml.safe_dump(custom_data), encoding="utf-8"
-        )
+        (custom_dir / "development.yaml").write_text(yaml.safe_dump(custom_data), encoding="utf-8")
 
         tmpl = load_workflow_template("development", tmp_pm_path)
         assert tmpl.name == "Custom Development"
@@ -306,9 +302,7 @@ class TestWorkflowTemplates:
             "description": "Override",
             "steps": [{"id": "s1", "name": "S1"}],
         }
-        (custom_dir / "development.yaml").write_text(
-            yaml.safe_dump(custom_data), encoding="utf-8"
-        )
+        (custom_dir / "development.yaml").write_text(yaml.safe_dump(custom_data), encoding="utf-8")
 
         templates = list_workflow_templates(tmp_pm_path)
         dev_templates = [t for t in templates if t["name"] == "development"]

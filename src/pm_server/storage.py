@@ -479,13 +479,15 @@ def list_workflow_templates(pm_path: Path | None = None) -> list[dict]:
                 data = _load_yaml(f)
                 if data:
                     tmpl = _parse_workflow_template(data)
-                    templates.append({
-                        "name": name,
-                        "description": tmpl.description,
-                        "steps": len(tmpl.steps),
-                        "chain_to": tmpl.chain_to,
-                        "source": "custom",
-                    })
+                    templates.append(
+                        {
+                            "name": name,
+                            "description": tmpl.description,
+                            "steps": len(tmpl.steps),
+                            "chain_to": tmpl.chain_to,
+                            "source": "custom",
+                        }
+                    )
 
     # Built-in templates
     if BUILTIN_TEMPLATES_DIR.is_dir():
@@ -496,13 +498,15 @@ def list_workflow_templates(pm_path: Path | None = None) -> list[dict]:
             data = _load_yaml(f)
             if data:
                 tmpl = _parse_workflow_template(data)
-                templates.append({
-                    "name": name,
-                    "description": tmpl.description,
-                    "steps": len(tmpl.steps),
-                    "chain_to": tmpl.chain_to,
-                    "source": "builtin",
-                })
+                templates.append(
+                    {
+                        "name": name,
+                        "description": tmpl.description,
+                        "steps": len(tmpl.steps),
+                        "chain_to": tmpl.chain_to,
+                        "source": "builtin",
+                    }
+                )
 
     return templates
 
