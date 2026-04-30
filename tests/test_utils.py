@@ -273,3 +273,35 @@ class TestAtomicWriteText:
         _atomic_write_text(target, "héllo", encoding="utf-8")
 
         assert target.read_text(encoding="utf-8") == "héllo"
+
+    def test_new_file_uses_umask_aware_permissions_not_mkstemp_default(self, tmp_path):
+        """PMSERV-044 real-environment smoke regression: ``mkstemp``
+        defaults to mode 0600 (security default). New rule files must
+        follow ``open(...,"w")`` semantics (``0o666 & ~umask``) so they
+        are not accidentally owner-only."""
+        target = tmp_path / "AGENTS.md"
+
+        _atomic_write_text(target, "rules\n")
+
+        # Recompute the expected mode the same way the implementation does
+        current_umask = os.umask(0)
+        os.umask(current_umask)
+        expected_mode = 0o666 & ~current_umask
+
+        actual_mode = target.stat().st_mode & 0o777
+        assert actual_mode == expected_mode, (
+            f"new file should have umask-aware mode 0o{expected_mode:o}, "
+            f"got 0o{actual_mode:o} (mkstemp default 0o600 leaked)"
+        )
+
+    def test_existing_file_inherits_its_own_permissions(self, tmp_path):
+        """When the target already exists, atomic-write must preserve the
+        existing mode rather than imposing a default — so a user who
+        ``chmod 600`` an existing file keeps that lock."""
+        target = tmp_path / "secret.toml"
+        target.write_text("[s]\nk='v'\n", encoding="utf-8")
+        os.chmod(target, 0o600)
+
+        _atomic_write_text(target, "[s]\nk='w'\n")
+
+        assert target.stat().st_mode & 0o777 == 0o600

@@ -143,11 +143,24 @@ def _atomic_write_text(path: Path, content: str, *, encoding: str = "utf-8") -> 
     writers cannot collide on a fixed ``.tmp`` suffix. The temp file is
     created in the same directory as ``path`` to keep ``os.replace`` on
     a single filesystem. On exception the temp file is removed.
+
+    File-permission normalisation: ``mkstemp`` opens with mode 0600
+    (security default for secrets), but rule files like ``CLAUDE.md`` /
+    ``AGENTS.md`` are user content that should follow the conventional
+    ``open(...,"w")`` permissions (``0o666 & ~umask``). When the target
+    already exists we inherit its mode via ``shutil.copymode`` so users
+    who locked down a file keep that lock.
     """
     tmp_fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
     try:
         with os.fdopen(tmp_fd, "w", encoding=encoding) as f:
             f.write(content)
+        if path.exists():
+            shutil.copymode(path, tmp_name)
+        else:
+            current_umask = os.umask(0)
+            os.umask(current_umask)
+            os.chmod(tmp_name, 0o666 & ~current_umask)
         os.replace(tmp_name, path)
     except BaseException:
         Path(tmp_name).unlink(missing_ok=True)
