@@ -13,24 +13,74 @@ def cli():
     """PM Server — Claude Code Project Management."""
 
 
+_TARGET_CHOICES = ["claude-code", "codex", "auto", "all"]
+
+
+def _print_install_summary(summary) -> None:
+    """Render an InstallSummary as one ``prefix target: message`` line per host.
+
+    ``"✗"`` is used only for ``status == "failed"``; every other status
+    (``installed``, ``uninstalled``, ``already_registered``, ``skipped``)
+    is treated as success and rendered with ``"✓"``. Dry-run results
+    are tagged with ``[dry-run]`` between the prefix and the target.
+    """
+    if not summary.results:
+        click.echo("✗ No hosts processed.")
+        return
+    for r in summary.results:
+        prefix = "✗" if r.status == "failed" else "✓"
+        dry_tag = "[dry-run] " if r.is_dry_run else ""
+        click.echo(f"{prefix} {dry_tag}{r.target}: {r.message}")
+
+
 @cli.command()
-def install():
-    """Register PM Server as an MCP server in Claude Code."""
-    from .installer import install_mcp
+@click.option(
+    "--target",
+    "-t",
+    type=click.Choice(_TARGET_CHOICES),
+    default="claude-code",
+    show_default=True,
+    help="MCP host to register pm-server with. 'auto'/'all' process every known host.",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Show what would happen without making changes.",
+)
+def install(target: str, dry_run: bool):
+    """Register PM Server as an MCP server in the chosen host(s)."""
+    from . import installer
 
-    msg = install_mcp()
-    prefix = "✗" if "not found" in msg or "Failed" in msg else "✓"
-    click.echo(f"{prefix} {msg}")
+    summary = installer.install(target=target, dry_run=dry_run)
+    _print_install_summary(summary)
+    if any(r.status == "failed" for r in summary.results):
+        raise click.exceptions.Exit(1)
 
 
 @cli.command()
-def uninstall():
-    """Remove PM Server from Claude Code MCP servers."""
-    from .installer import uninstall_mcp
+@click.option(
+    "--target",
+    "-t",
+    type=click.Choice(_TARGET_CHOICES),
+    default="claude-code",
+    show_default=True,
+    help="MCP host to remove pm-server from. 'auto'/'all' process every known host.",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Show what would happen without making changes.",
+)
+def uninstall(target: str, dry_run: bool):
+    """Remove PM Server from MCP host(s)."""
+    from . import installer
 
-    msg = uninstall_mcp()
-    prefix = "✗" if "not found" in msg or "failed" in msg.lower() else "✓"
-    click.echo(f"{prefix} {msg}")
+    summary = installer.uninstall(target=target, dry_run=dry_run)
+    _print_install_summary(summary)
+    if any(r.status == "failed" for r in summary.results):
+        raise click.exceptions.Exit(1)
 
 
 @cli.command()

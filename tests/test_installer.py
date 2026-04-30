@@ -17,6 +17,7 @@ from pm_server.installer import (
     install_codex,
     install_mcp,
     uninstall,
+    uninstall_claude_code,
     uninstall_codex,
     uninstall_mcp,
 )
@@ -217,6 +218,112 @@ class TestInstallClaudeCode:
             assert r.status == "installed"
             assert "user scope" in r.message.lower()
 
+    def test_install_dry_run_when_not_registered_does_not_run_mcp_add(self):
+        """dry-run propagates pre-check but never executes ``claude mcp add`` (PMSERV-039)."""
+
+        def which(name):
+            return f"/usr/bin/{name}"
+
+        calls = []
+
+        def mock_run(cmd, **kwargs):
+            calls.append(list(cmd))
+            return _make_result(1)  # mcp get -> not registered
+
+        with (
+            patch("pm_server.installer.shutil.which", side_effect=which),
+            patch("pm_server.installer.subprocess.run", side_effect=mock_run),
+        ):
+            r = install_claude_code(dry_run=True)
+
+        assert r.status == "installed"
+        assert r.is_dry_run is True
+        assert "would register" in r.message.lower()
+        # Only the read-only `mcp get` call was made; no `mcp add`.
+        assert len(calls) == 1
+        assert calls[0][1:3] == ["mcp", "get"]
+
+    def test_install_dry_run_already_registered_returns_already_registered(self):
+        """dry-run reports already_registered without firing ``claude mcp add`` (PMSERV-039)."""
+
+        def which(name):
+            return f"/usr/bin/{name}"
+
+        with (
+            patch("pm_server.installer.shutil.which", side_effect=which),
+            patch(
+                "pm_server.installer.subprocess.run",
+                return_value=_make_result(0),
+            ),
+        ):
+            r = install_claude_code(dry_run=True)
+        assert r.status == "already_registered"
+        assert r.is_dry_run is True
+
+
+class TestUninstallClaudeCode:
+    """Structured uninstall_claude_code (PMSERV-039 W2-B: pre-check added)."""
+
+    def test_uninstall_when_not_registered_returns_skipped(self):
+        """Pre-check distinguishes "not registered" from genuine removal errors."""
+
+        with (
+            patch("pm_server.installer.shutil.which", return_value="/usr/bin/claude"),
+            patch(
+                "pm_server.installer.subprocess.run",
+                return_value=_make_result(1, stderr="not found"),
+            ),
+        ):
+            r = uninstall_claude_code()
+        assert r.status == "skipped"
+        assert "not registered" in r.message.lower()
+
+    def test_uninstall_dry_run_when_registered_does_not_run_mcp_remove(self):
+        """dry-run runs ``claude mcp get`` to detect registration but never removes."""
+
+        calls = []
+
+        def mock_run(cmd, **kwargs):
+            calls.append(list(cmd))
+            return _make_result(0)  # mcp get -> registered
+
+        with (
+            patch("pm_server.installer.shutil.which", return_value="/usr/bin/claude"),
+            patch("pm_server.installer.subprocess.run", side_effect=mock_run),
+        ):
+            r = uninstall_claude_code(dry_run=True)
+
+        assert r.status == "uninstalled"
+        assert r.is_dry_run is True
+        assert "would unregister" in r.message.lower()
+        # Only the read-only `mcp get` call was made; no `mcp remove`.
+        assert len(calls) == 1
+        assert calls[0][1:3] == ["mcp", "get"]
+
+    def test_uninstall_when_mcp_remove_fails_returns_failed(self):
+        """Genuine ``claude mcp remove`` failure (post-pre-check) yields status=failed."""
+
+        call_count = 0
+
+        def mock_run(cmd, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                # mcp get -> registered
+                return _make_result(0)
+            # mcp remove -> error
+            return _make_result(1, stderr="permission denied")
+
+        with (
+            patch("pm_server.installer.shutil.which", return_value="/usr/bin/claude"),
+            patch("pm_server.installer.subprocess.run", side_effect=mock_run),
+        ):
+            r = uninstall_claude_code()
+
+        assert r.status == "failed"
+        assert "removal failed" in r.message.lower()
+        assert "permission denied" in r.message
+
 
 class TestInstallOrchestrator:
     """install / uninstall orchestrators (PMSERV-037)."""
@@ -291,6 +398,75 @@ class TestInstallOrchestrator:
         assert summary.results[0].target == "claude-code"
         assert summary.results[0].status == "uninstalled"
 
+    def test_target_all_returns_all_known_hosts_in_order(self, fake_codex_config):
+        """target='all' synonyms 'auto', preserving _KNOWN_HOSTS order (PMSERV-039)."""
+
+        def which(name):
+            return "/usr/bin/pm-server" if name == "pm-server" else None
+
+        with patch("pm_server.installer.shutil.which", side_effect=which):
+            summary = install(target="all")
+        targets = [r.target for r in summary.results]
+        assert targets == ["claude-code", "codex"]
+
+    def test_unknown_target_error_lists_all_in_valid_choices(self):
+        """ValueError message lists ``"all"`` alongside ``"auto"`` (PMSERV-039)."""
+        with pytest.raises(ValueError, match=r"\bauto\b") as exc:
+            install(target="banana")
+        assert "all" in str(exc.value)
+
+    def test_install_dry_run_propagates_to_all_hosts(self, fake_codex_config):
+        """dry_run is passed to every per-host installer (PMSERV-039)."""
+
+        def which(name):
+            return f"/usr/bin/{name}"
+
+        # Codex config exists but pm-server is not in [mcp_servers]; installer
+        # would normally write — verify dry-run skips that.
+        fake_codex_config.write_text("# stub\n", encoding="utf-8")
+
+        with (
+            patch("pm_server.installer.shutil.which", side_effect=which),
+            patch(
+                "pm_server.installer.subprocess.run",
+                return_value=_make_result(1),  # claude mcp get -> not registered
+            ),
+            patch(
+                "pm_server.installer._resolve_pm_server_path",
+                return_value=Path("/usr/bin/pm-server"),
+            ),
+        ):
+            summary = install(target="all", dry_run=True)
+
+        assert all(r.is_dry_run is True for r in summary.results)
+        assert all("would " in r.message.lower() for r in summary.results)
+        # Codex config file must not have been mutated.
+        assert fake_codex_config.read_text(encoding="utf-8") == "# stub\n"
+
+    def test_uninstall_dry_run_propagates_to_all_hosts(self, fake_codex_config):
+        """dry_run is propagated by the uninstall orchestrator (PMSERV-039)."""
+
+        codex_content = textwrap.dedent("""
+            [mcp_servers.pm-server]
+            command = "/usr/bin/pm-server"
+            args = ["serve"]
+            startup_timeout_sec = 30
+        """).lstrip()
+        fake_codex_config.write_text(codex_content, encoding="utf-8")
+
+        with (
+            patch("pm_server.installer.shutil.which", return_value="/usr/bin/claude"),
+            patch(
+                "pm_server.installer.subprocess.run",
+                return_value=_make_result(0),  # mcp get -> registered
+            ),
+        ):
+            summary = uninstall(target="all", dry_run=True)
+
+        assert all(r.is_dry_run is True for r in summary.results)
+        # Codex config must not have been mutated.
+        assert fake_codex_config.read_text(encoding="utf-8") == codex_content
+
 
 class TestInstallSummary:
     """InstallSummary aggregation (PMSERV-037)."""
@@ -345,6 +521,15 @@ class TestInstallSummary:
             ]
         )
         assert s.overall_status == "installed"
+
+    def test_install_result_is_dry_run_default_false(self):
+        """is_dry_run defaults to False; positional construction stays compatible (PMSERV-039)."""
+        r = InstallResult("claude-code", "installed", "msg")
+        assert r.is_dry_run is False
+        assert r.backup_path is None
+        # Explicit dry-run construction is also supported.
+        r2 = InstallResult("codex", "installed", "msg", backup_path=None, is_dry_run=True)
+        assert r2.is_dry_run is True
 
 
 class TestResolvePmServerPath:
@@ -621,6 +806,74 @@ class TestInstallCodex:
         doc = tomlkit.parse(fake_codex_config.read_text())
         assert doc["mcp_servers"]["pm-server"]["startup_timeout_sec"] == 30
 
+    def test_dry_run_does_not_create_backup_or_write_file(
+        self, tmp_path, monkeypatch, fake_codex_config
+    ):
+        """dry-run skips _backup_codex_config and _atomic_write_toml (PMSERV-039)."""
+        self._make_pm_server_resolvable(tmp_path, monkeypatch)
+        original_content = "# unrelated\n[other]\nfoo = 1\n"
+        fake_codex_config.write_text(original_content, encoding="utf-8")
+
+        result = install_codex(dry_run=True)
+
+        assert result.status == "installed"
+        assert result.is_dry_run is True
+        assert result.backup_path is None
+        assert "would register" in result.message.lower()
+        # File contents must not change.
+        assert fake_codex_config.read_text(encoding="utf-8") == original_content
+        # No backup file created.
+        backups = list(fake_codex_config.parent.glob("config.toml.bak.*"))
+        assert backups == []
+
+    def test_dry_run_already_registered_returns_already_registered(
+        self, tmp_path, monkeypatch, fake_codex_config
+    ):
+        """dry-run still recognizes the idempotent already_registered case (PMSERV-039)."""
+        self._make_pm_server_resolvable(tmp_path, monkeypatch)
+        pm_server_path = tmp_path / "pm-server"
+        fake_codex_config.write_text(
+            textwrap.dedent(
+                f"""\
+                [mcp_servers.pm-server]
+                command = "{pm_server_path}"
+                args = ["serve"]
+                startup_timeout_sec = 30
+                """
+            ),
+            encoding="utf-8",
+        )
+
+        result = install_codex(dry_run=True)
+        assert result.status == "already_registered"
+        assert result.is_dry_run is True
+        assert result.backup_path is None
+
+    def test_dry_run_when_command_differs_reports_would_update(
+        self, tmp_path, monkeypatch, fake_codex_config
+    ):
+        """dry-run hits the 'command differs' branch with a 'would update' message (PMSERV-039)."""
+        self._make_pm_server_resolvable(tmp_path, monkeypatch)
+        # Existing section with a stale command path forces the update branch.
+        fake_codex_config.write_text(
+            textwrap.dedent(
+                """\
+                [mcp_servers.pm-server]
+                command = "/old/pm-server"
+                args = ["serve"]
+                startup_timeout_sec = 30
+                """
+            ),
+            encoding="utf-8",
+        )
+
+        result = install_codex(dry_run=True)
+
+        assert result.status == "installed"
+        assert result.is_dry_run is True
+        assert result.backup_path is None
+        assert "would update" in result.message.lower()
+
 
 class TestUninstallCodex:
     """uninstall_codex against a tmp_path Codex config (PMSERV-038)."""
@@ -762,6 +1015,55 @@ class TestUninstallCodex:
         assert "# Filesystem MCP server" in new_text
         assert "[mcp_servers.filesystem]" in new_text
 
+    def test_dry_run_does_not_create_backup_or_write_file(self, fake_codex_config):
+        """dry-run uninstall skips _backup_codex_config and _atomic_write_toml (PMSERV-039)."""
+        original_content = textwrap.dedent(
+            """\
+            [mcp_servers.pm-server]
+            command = "/usr/bin/pm-server"
+            args = ["serve"]
+            startup_timeout_sec = 30
+            """
+        )
+        fake_codex_config.write_text(original_content, encoding="utf-8")
+
+        result = uninstall_codex(dry_run=True)
+
+        assert result.status == "uninstalled"
+        assert result.is_dry_run is True
+        assert result.backup_path is None
+        assert "would unregister" in result.message.lower()
+        # File contents must not change.
+        assert fake_codex_config.read_text(encoding="utf-8") == original_content
+        # No backup file created.
+        backups = list(fake_codex_config.parent.glob("config.toml.bak.*"))
+        assert backups == []
+
+    def test_dry_run_when_subtables_exist_preserves_them_in_message(self, fake_codex_config):
+        """dry-run hits the sub-tables-preserved branch with the right message (PMSERV-039)."""
+        original_content = textwrap.dedent(
+            """\
+            [mcp_servers.pm-server]
+            command = "/usr/bin/pm-server"
+            args = ["serve"]
+            startup_timeout_sec = 30
+
+            [mcp_servers.pm-server.tools.pm_init]
+            approval_mode = "never"
+            """
+        )
+        fake_codex_config.write_text(original_content, encoding="utf-8")
+
+        result = uninstall_codex(dry_run=True)
+
+        assert result.status == "uninstalled"
+        assert result.is_dry_run is True
+        assert result.backup_path is None
+        assert "would remove pm server top-level fields" in result.message.lower()
+        assert "sub-tables would be preserved" in result.message.lower()
+        # Sub-tables and top-level fields untouched on disk.
+        assert fake_codex_config.read_text(encoding="utf-8") == original_content
+
 
 class TestCodexLifecycle:
     """install -> uninstall -> install roundtrip state-transition coverage (PMSERV-040)."""
@@ -798,3 +1100,156 @@ class TestCodexLifecycle:
 
         backups = list(fake_codex_config.parent.glob("config.toml.bak.*"))
         assert len(backups) >= 1
+
+
+class TestCliInstallation:
+    """CLI ↔ orchestrator wiring (PMSERV-039).
+
+    These tests use ``click.testing.CliRunner`` and patch
+    ``pm_server.installer.install`` / ``...uninstall`` directly so the
+    test exercises only the CLI surface (option parsing, exit code,
+    output rendering) — the orchestrator's behavior is covered by the
+    ``TestInstallOrchestrator`` class. The ``__main__`` module imports
+    ``installer`` as a module attribute (``from . import installer``)
+    so module-level patching reliably intercepts the call.
+    """
+
+    @staticmethod
+    def _ok_summary_single_host(target: str = "claude-code") -> InstallSummary:
+        return InstallSummary(results=[InstallResult(target, "installed", "PM Server registered")])
+
+    @staticmethod
+    def _ok_summary_all_hosts() -> InstallSummary:
+        return InstallSummary(
+            results=[
+                InstallResult("claude-code", "installed", "registered"),
+                InstallResult("codex", "skipped", "config not found"),
+            ]
+        )
+
+    def test_install_no_flags_dispatches_with_claude_code_target(self, monkeypatch):
+        from click.testing import CliRunner
+
+        from pm_server.__main__ import cli
+
+        captured = {}
+
+        def fake_install(target: str = "claude-code", *, dry_run: bool = False):
+            captured["target"] = target
+            captured["dry_run"] = dry_run
+            return self._ok_summary_single_host("claude-code")
+
+        monkeypatch.setattr("pm_server.installer.install", fake_install)
+        result = CliRunner().invoke(cli, ["install"])
+
+        assert result.exit_code == 0
+        assert captured == {"target": "claude-code", "dry_run": False}
+        # Backward-compat: target prefix added but everything else preserved.
+        assert "✓ claude-code: PM Server registered" in result.output
+
+    def test_install_target_all_renders_hosts_in_known_order(self, monkeypatch):
+        from click.testing import CliRunner
+
+        from pm_server.__main__ import cli
+
+        def fake_install(target: str = "claude-code", *, dry_run: bool = False):
+            assert target == "all"
+            return self._ok_summary_all_hosts()
+
+        monkeypatch.setattr("pm_server.installer.install", fake_install)
+        result = CliRunner().invoke(cli, ["install", "--target", "all"])
+
+        assert result.exit_code == 0
+        # Order: claude-code line precedes codex line.
+        cc_idx = result.output.index("claude-code:")
+        codex_idx = result.output.index("codex:")
+        assert cc_idx < codex_idx
+
+    def test_install_dry_run_flag_propagates_and_outputs_dry_run_tag(self, monkeypatch):
+        from click.testing import CliRunner
+
+        from pm_server.__main__ import cli
+
+        captured = {}
+
+        def fake_install(target: str = "claude-code", *, dry_run: bool = False):
+            captured["dry_run"] = dry_run
+            # Per B-1 contract: per-host messages do NOT embed the [dry-run]
+            # tag. The CLI layer adds it exactly once via _print_install_summary
+            # so the rendered line stays free of double-tagging.
+            return InstallSummary(
+                results=[
+                    InstallResult(
+                        "claude-code",
+                        "installed",
+                        "would register PM Server in Claude Code (user scope).",
+                        is_dry_run=True,
+                    )
+                ]
+            )
+
+        monkeypatch.setattr("pm_server.installer.install", fake_install)
+        result = CliRunner().invoke(cli, ["install", "--dry-run"])
+
+        assert result.exit_code == 0
+        assert captured["dry_run"] is True
+        assert "[dry-run] claude-code:" in result.output
+        # Double-tagging regression guard: the rendered line must contain
+        # exactly one occurrence of "[dry-run]".
+        assert result.output.count("[dry-run]") == 1
+
+    def test_install_failed_result_exits_non_zero(self, monkeypatch):
+        from click.testing import CliRunner
+
+        from pm_server.__main__ import cli
+
+        def fake_install(target: str = "claude-code", *, dry_run: bool = False):
+            return InstallSummary(results=[InstallResult("claude-code", "failed", "boom")])
+
+        monkeypatch.setattr("pm_server.installer.install", fake_install)
+        result = CliRunner().invoke(cli, ["install"])
+
+        assert result.exit_code == 1
+        assert "✗ claude-code: boom" in result.output
+
+    def test_install_target_all_both_hosts_failed_exits_non_zero(self, monkeypatch):
+        """Both-host failure with --target all still surfaces exit code 1 (PMSERV-039 / S2)."""
+        from click.testing import CliRunner
+
+        from pm_server.__main__ import cli
+
+        def fake_install(target: str = "claude-code", *, dry_run: bool = False):
+            return InstallSummary(
+                results=[
+                    InstallResult("claude-code", "failed", "kaboom-cc"),
+                    InstallResult("codex", "failed", "kaboom-codex"),
+                ]
+            )
+
+        monkeypatch.setattr("pm_server.installer.install", fake_install)
+        result = CliRunner().invoke(cli, ["install", "--target", "all"])
+
+        assert result.exit_code == 1
+        assert "✗ claude-code:" in result.output
+        assert "✗ codex:" in result.output
+
+    def test_uninstall_no_flags_dispatches_with_claude_code_target(self, monkeypatch):
+        from click.testing import CliRunner
+
+        from pm_server.__main__ import cli
+
+        captured = {}
+
+        def fake_uninstall(target: str = "claude-code", *, dry_run: bool = False):
+            captured["target"] = target
+            captured["dry_run"] = dry_run
+            return InstallSummary(
+                results=[InstallResult("claude-code", "uninstalled", "PM Server unregistered")]
+            )
+
+        monkeypatch.setattr("pm_server.installer.uninstall", fake_uninstall)
+        result = CliRunner().invoke(cli, ["uninstall"])
+
+        assert result.exit_code == 0
+        assert captured == {"target": "claude-code", "dry_run": False}
+        assert "✓ claude-code: PM Server unregistered" in result.output

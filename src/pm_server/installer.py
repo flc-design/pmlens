@@ -51,13 +51,19 @@ class InstallResult:
             ``"Failed to register"``) are preserved here.
         backup_path: Path to a config-file backup if the host required
             file editing. ``None`` for hosts that mutate via a CLI
-            command (such as Claude Code).
+            command (such as Claude Code), and ``None`` in dry-run mode
+            since no backup is created.
+        is_dry_run: True when produced by a dry-run invocation. The
+            ``status`` describes the action that *would* have been
+            taken; no side effects (subprocess execution, backups,
+            file writes) occurred.
     """
 
     target: str
     status: str
     message: str
     backup_path: str | None = None
+    is_dry_run: bool = False
 
 
 @dataclass(frozen=True)
@@ -89,14 +95,21 @@ class InstallSummary:
 # --- Host: Claude Code ----------------------------------------------------
 
 
-def install_claude_code() -> InstallResult:
+def install_claude_code(*, dry_run: bool = False) -> InstallResult:
     """Register pm-server as a Claude Code MCP server (user scope).
 
     Idempotent: if ``claude mcp get pm-server`` already succeeds, the
     call short-circuits with ``status="already_registered"``.
 
+    Args:
+        dry_run: When ``True``, the read-only detection (``shutil.which``
+            and ``claude mcp get``) still runs so the predicted status
+            is accurate, but ``claude mcp add`` is never executed.
+
     Returns:
-        ``InstallResult`` with ``target="claude-code"``.
+        ``InstallResult`` with ``target="claude-code"``. In dry-run mode
+        the ``is_dry_run`` field is ``True`` and the ``status`` reflects
+        the outcome that *would* have occurred.
     """
     pm_server_path = shutil.which("pm-server")
     if pm_server_path is None:
@@ -104,6 +117,7 @@ def install_claude_code() -> InstallResult:
             target="claude-code",
             status="failed",
             message="pm-server command not found in PATH",
+            is_dry_run=dry_run,
         )
 
     claude_path = shutil.which("claude")
@@ -112,6 +126,7 @@ def install_claude_code() -> InstallResult:
             target="claude-code",
             status="skipped",
             message="claude command not found. Install Claude Code first.",
+            is_dry_run=dry_run,
         )
 
     result = subprocess.run(
@@ -125,6 +140,15 @@ def install_claude_code() -> InstallResult:
             target="claude-code",
             status="already_registered",
             message="PM Server is already registered in Claude Code",
+            is_dry_run=dry_run,
+        )
+
+    if dry_run:
+        return InstallResult(
+            target="claude-code",
+            status="installed",
+            message="would register PM Server in Claude Code (user scope).",
+            is_dry_run=True,
         )
 
     result = subprocess.run(
@@ -161,8 +185,18 @@ def install_claude_code() -> InstallResult:
     )
 
 
-def uninstall_claude_code() -> InstallResult:
+def uninstall_claude_code(*, dry_run: bool = False) -> InstallResult:
     """Remove pm-server from Claude Code MCP servers (user scope).
+
+    Performs a pre-check via ``claude mcp get pm-server`` so the
+    "not registered" case yields ``status="skipped"`` instead of being
+    folded into ``status="failed"`` (which is reserved for actual
+    removal errors). This makes the live and dry-run paths share a
+    single detection step.
+
+    Args:
+        dry_run: When ``True``, the read-only ``claude mcp get`` check
+            still runs but ``claude mcp remove`` is never executed.
 
     Returns:
         ``InstallResult`` with ``target="claude-code"``.
@@ -173,6 +207,29 @@ def uninstall_claude_code() -> InstallResult:
             target="claude-code",
             status="skipped",
             message="claude command not found",
+            is_dry_run=dry_run,
+        )
+
+    pre_check = subprocess.run(
+        [claude_path, "mcp", "get", "pm-server"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if pre_check.returncode != 0:
+        return InstallResult(
+            target="claude-code",
+            status="skipped",
+            message="PM Server not registered in Claude Code",
+            is_dry_run=dry_run,
+        )
+
+    if dry_run:
+        return InstallResult(
+            target="claude-code",
+            status="uninstalled",
+            message="would unregister PM Server from Claude Code",
+            is_dry_run=True,
         )
 
     result = subprocess.run(
@@ -191,7 +248,7 @@ def uninstall_claude_code() -> InstallResult:
     return InstallResult(
         target="claude-code",
         status="failed",
-        message="PM Server was not registered or removal failed",
+        message=f"Removal failed: {result.stderr}",
     )
 
 
@@ -246,7 +303,7 @@ def _atomic_write_toml(path: Path, doc: tomlkit.TOMLDocument) -> None:
     os.replace(tmp, path)
 
 
-def install_codex() -> InstallResult:
+def install_codex(*, dry_run: bool = False) -> InstallResult:
     """Register pm-server as a Codex CLI MCP server.
 
     Edits ``~/.codex/config.toml`` via tomlkit:
@@ -259,9 +316,17 @@ def install_codex() -> InstallResult:
           customizations) and surrounding comments are preserved.
         - Atomic write: tempfile + os.replace.
 
+    Args:
+        dry_run: When ``True``, detection, parsing, path resolution, and
+            in-memory mutation still occur (so the predicted status is
+            accurate), but ``_backup_codex_config`` and
+            ``_atomic_write_toml`` are skipped — the config file on disk
+            is untouched and ``backup_path`` is ``None``.
+
     Returns:
         ``InstallResult`` with ``target="codex"``. On install/update,
-        ``backup_path`` points at the saved-aside copy.
+        ``backup_path`` points at the saved-aside copy (``None`` for
+        dry-run).
     """
     config_path = _codex_config_path()
     if not config_path.exists():
@@ -269,6 +334,7 @@ def install_codex() -> InstallResult:
             target="codex",
             status="skipped",
             message="~/.codex/config.toml not found — Codex CLI not installed",
+            is_dry_run=dry_run,
         )
 
     pm_server_path = _resolve_pm_server_path()
@@ -284,7 +350,28 @@ def install_codex() -> InstallResult:
                 target="codex",
                 status="already_registered",
                 message="PM Server is already registered in Codex",
+                is_dry_run=dry_run,
             )
+
+    if dry_run:
+        # Predict the outcome without creating a backup or writing anything.
+        if "mcp_servers" not in doc or "pm-server" not in doc.get("mcp_servers", {}):
+            message = (
+                "would register PM Server in Codex (user scope). "
+                "Would back up to ~/.codex/config.toml.bak.<ts> before write."
+            )
+        else:
+            message = (
+                "would update PM Server command in Codex (path changed). "
+                "Would back up to ~/.codex/config.toml.bak.<ts> before write."
+            )
+        return InstallResult(
+            target="codex",
+            status="installed",
+            message=message,
+            backup_path=None,
+            is_dry_run=True,
+        )
 
     backup_path = _backup_codex_config(config_path)
 
@@ -321,7 +408,7 @@ def install_codex() -> InstallResult:
     )
 
 
-def uninstall_codex() -> InstallResult:
+def uninstall_codex(*, dry_run: bool = False) -> InstallResult:
     """Remove pm-server registration from Codex CLI config.
 
     Removes only the top-level fields (``command``, ``args``,
@@ -330,6 +417,12 @@ def uninstall_codex() -> InstallResult:
     section is preserved with a notice in the result message —
     those customizations are left untouched and require manual
     cleanup if no longer wanted.
+
+    Args:
+        dry_run: When ``True``, detection and parsing still run so the
+            predicted outcome (full removal vs sub-tables-preserved) is
+            accurate, but ``_backup_codex_config`` and
+            ``_atomic_write_toml`` are skipped.
 
     Returns:
         ``InstallResult`` with ``target="codex"``.
@@ -340,6 +433,7 @@ def uninstall_codex() -> InstallResult:
             target="codex",
             status="skipped",
             message="~/.codex/config.toml not found — nothing to uninstall",
+            is_dry_run=dry_run,
         )
 
     doc = tomlkit.parse(config_path.read_text(encoding="utf-8"))
@@ -349,6 +443,32 @@ def uninstall_codex() -> InstallResult:
             target="codex",
             status="skipped",
             message="pm-server not registered in Codex",
+            is_dry_run=dry_run,
+        )
+
+    if dry_run:
+        # Predict whether the section would be fully removed or only
+        # top-level fields stripped (sub-tables preserved).
+        section = doc["mcp_servers"]["pm-server"]
+        managed = ("command", "args", "startup_timeout_sec")
+        residual_keys = [k for k in section.keys() if k not in managed]
+        if not residual_keys:
+            message = (
+                "would unregister PM Server from Codex. "
+                "Would back up to ~/.codex/config.toml.bak.<ts> before write."
+            )
+        else:
+            message = (
+                "would remove PM Server top-level fields from Codex. "
+                "Sub-tables would be preserved — remove manually if no longer needed. "
+                "Would back up to ~/.codex/config.toml.bak.<ts> before write."
+            )
+        return InstallResult(
+            target="codex",
+            status="uninstalled",
+            message=message,
+            backup_path=None,
+            is_dry_run=True,
         )
 
     backup_path = _backup_codex_config(config_path)
@@ -383,16 +503,23 @@ def uninstall_codex() -> InstallResult:
 # --- Orchestrator ---------------------------------------------------------
 
 
+# Tuple order is significant: orchestrators dispatch in this order and the
+# CLI prints results in the same sequence. Keep "claude-code" first.
 _KNOWN_HOSTS: tuple[str, ...] = ("claude-code", "codex")
 
 
 def _resolve_targets(target: str) -> list[str]:
-    """Expand a target spec into a concrete list of host identifiers."""
-    if target == "auto":
+    """Expand a target spec into a concrete list of host identifiers.
+
+    ``"auto"`` and ``"all"`` are synonyms and expand to every known
+    host (ADR-007 #1). Missing-host detection (skip vs failure) is
+    delegated to the per-host installer.
+    """
+    if target in ("auto", "all"):
         return list(_KNOWN_HOSTS)
     if target in _KNOWN_HOSTS:
         return [target]
-    valid = ("auto", *_KNOWN_HOSTS)
+    valid = ("auto", "all", *_KNOWN_HOSTS)
     raise ValueError(f"unknown target: {target!r}. Expected one of {valid}.")
 
 
@@ -411,13 +538,17 @@ def _safe_call(fn: Callable[[], InstallResult], host: str) -> InstallResult:
         )
 
 
-def install(target: str = "claude-code") -> InstallSummary:
+def install(target: str = "claude-code", *, dry_run: bool = False) -> InstallSummary:
     """Register pm-server with one or more host MCP clients.
 
     Args:
-        target: ``"claude-code"`` (default), ``"codex"``, or ``"auto"``
-            (run all known hosts; missing or unimplemented hosts return
-            a skipped result rather than raising).
+        target: ``"claude-code"`` (default), ``"codex"``, ``"auto"``, or
+            ``"all"`` (``"auto"`` and ``"all"`` are synonyms; both run
+            every known host and skip the ones that aren't installed).
+        dry_run: When ``True``, propagated to every host installer; no
+            side effects (subprocess execution, backups, file writes)
+            occur, but read-only detection still runs so each result's
+            ``status`` reflects the action that *would* have been taken.
 
     Returns:
         ``InstallSummary`` with one ``InstallResult`` per processed host.
@@ -425,23 +556,23 @@ def install(target: str = "claude-code") -> InstallSummary:
     results: list[InstallResult] = []
     for host in _resolve_targets(target):
         if host == "claude-code":
-            results.append(_safe_call(install_claude_code, host))
+            results.append(_safe_call(lambda: install_claude_code(dry_run=dry_run), host))
         elif host == "codex":
-            results.append(_safe_call(install_codex, host))
+            results.append(_safe_call(lambda: install_codex(dry_run=dry_run), host))
     return InstallSummary(results=results)
 
 
-def uninstall(target: str = "claude-code") -> InstallSummary:
+def uninstall(target: str = "claude-code", *, dry_run: bool = False) -> InstallSummary:
     """Remove pm-server registrations from one or more host MCP clients.
 
-    Symmetric to :func:`install`. Same target semantics.
+    Symmetric to :func:`install`. Same target and dry-run semantics.
     """
     results: list[InstallResult] = []
     for host in _resolve_targets(target):
         if host == "claude-code":
-            results.append(_safe_call(uninstall_claude_code, host))
+            results.append(_safe_call(lambda: uninstall_claude_code(dry_run=dry_run), host))
         elif host == "codex":
-            results.append(_safe_call(uninstall_codex, host))
+            results.append(_safe_call(lambda: uninstall_codex(dry_run=dry_run), host))
     return InstallSummary(results=results)
 
 
