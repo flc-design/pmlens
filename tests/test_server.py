@@ -378,9 +378,7 @@ class TestPmUpdateRules:
         assert "remediation" in result["warnings"][0]
 
     def test_target_codex_creates_agents_md(self, initialized_project):
-        result = pm_update_rules(
-            project_path=str(initialized_project), target="codex"
-        )
+        result = pm_update_rules(project_path=str(initialized_project), target="codex")
 
         assert (initialized_project / "AGENTS.md").exists()
         assert "AGENTS.md" in result["created"] or "AGENTS.md" in result["updated"]
@@ -389,9 +387,7 @@ class TestPmUpdateRules:
         assert result["warnings"] == []
 
     def test_target_all_processes_both_hosts(self, initialized_project):
-        result = pm_update_rules(
-            project_path=str(initialized_project), target="all"
-        )
+        result = pm_update_rules(project_path=str(initialized_project), target="all")
 
         assert (initialized_project / "CLAUDE.md").exists()
         assert (initialized_project / "AGENTS.md").exists()
@@ -403,9 +399,7 @@ class TestPmUpdateRules:
         if claude_md.exists():
             claude_md.unlink()
 
-        result = pm_update_rules(
-            project_path=str(initialized_project), target="all", dry_run=True
-        )
+        result = pm_update_rules(project_path=str(initialized_project), target="all", dry_run=True)
 
         assert result["is_dry_run"] is True
         assert all(r["is_dry_run"] for r in result["results"])
@@ -413,9 +407,7 @@ class TestPmUpdateRules:
         assert not (initialized_project / "AGENTS.md").exists()
 
     def test_response_dict_has_required_top_level_keys(self, initialized_project):
-        result = pm_update_rules(
-            project_path=str(initialized_project), target="claude-code"
-        )
+        result = pm_update_rules(project_path=str(initialized_project), target="claude-code")
 
         required = {
             "overall_status",
@@ -430,9 +422,7 @@ class TestPmUpdateRules:
         assert set(result.keys()) == required
 
     def test_per_result_has_required_fields(self, initialized_project):
-        result = pm_update_rules(
-            project_path=str(initialized_project), target="claude-code"
-        )
+        result = pm_update_rules(project_path=str(initialized_project), target="claude-code")
 
         per_result_keys = {
             "target_file",
@@ -473,9 +463,7 @@ class TestPmStatusRulesKey:
             "other_rule_sections",
         }
 
-    def test_per_host_rules_status_has_get_claudemd_status_shape(
-        self, initialized_project
-    ):
+    def test_per_host_rules_status_has_get_claudemd_status_shape(self, initialized_project):
         status = pm_status(project_path=str(initialized_project))
 
         for host_status in status["rules"].values():

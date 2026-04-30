@@ -454,8 +454,7 @@ class TestInjectPmRules:
         leaving the existing CLAUDE.md idempotent. Cross-check R7."""
         # Set up prior Claude Code state
         (tmp_path / "CLAUDE.md").write_text(
-            f"<!-- pm-server:begin v={TEMPLATE_VERSION} -->\n"
-            f"existing\n<!-- pm-server:end -->\n",
+            f"<!-- pm-server:begin v={TEMPLATE_VERSION} -->\nexisting\n<!-- pm-server:end -->\n",
         )
 
         summary = inject_pm_rules(tmp_path, target="auto")
@@ -533,6 +532,90 @@ class TestInjectPmRules:
         assert summary.overall_status == "updated"
         assert "AGENTS.md" in summary.created
         assert "CLAUDE.md" in summary.updated
+
+    def test_handles_corrupted_marker_begin_without_end(self, tmp_path):
+        """Existing file has begin marker but no end marker — inject
+        replaces from begin onward (matches update_claudemd corrupted
+        semantic). Covers rules.py:506-509."""
+        (tmp_path / "CLAUDE.md").write_text(
+            "# Header\n\n<!-- pm-server:begin v=0 -->\nold orphan\n# Tail\n"
+        )
+
+        summary = inject_pm_rules(tmp_path, target="claude-code")
+
+        assert summary.overall_status == "updated"
+        new_content = (tmp_path / "CLAUDE.md").read_text()
+        assert "# Header" in new_content
+        assert "old orphan" not in new_content  # corrupted section removed
+        assert f"v={TEMPLATE_VERSION}" in new_content
+        assert "replaced corrupted" in summary.results[0].message
+
+    def test_inject_failure_on_write_yields_failed_status(self, tmp_path, monkeypatch):
+        """Atomic-write failure surfaces as ``status="failed"`` rather
+        than propagating an exception. Covers rules.py:535-536."""
+        from pm_server import rules as rules_mod
+
+        # Create the existing file so we hit the 'write existing' path
+        (tmp_path / "CLAUDE.md").write_text(
+            "<!-- pm-server:begin v=0 -->\nold\n<!-- pm-server:end -->\n"
+        )
+
+        def failing_write(path, content, *, encoding="utf-8"):
+            raise OSError("simulated atomic write failure")
+
+        monkeypatch.setattr(rules_mod, "_atomic_write_text", failing_write)
+
+        summary = inject_pm_rules(tmp_path, target="claude-code")
+
+        assert summary.overall_status == "failed"
+        assert summary.results[0].status == "failed"
+        assert "simulated atomic write failure" in summary.results[0].message
+
+
+class TestScanRuleFileAndStatus:
+    """Coverage for ``_scan_rule_file`` body via ``get_rules_status``."""
+
+    def test_get_rules_status_reflects_existing_claude_md(self, tmp_path):
+        """Existing CLAUDE.md with marker hits the read+regex path.
+        Covers rules.py:279-290."""
+        from pm_server.rules import get_rules_status
+
+        (tmp_path / "CLAUDE.md").write_text(
+            f"# Project\n\n<!-- pm-server:begin v={TEMPLATE_VERSION} -->\n"
+            f"rules\n<!-- pm-server:end -->\n"
+            f"<!-- synaptic-ledger:begin v=1 -->\nx\n<!-- synaptic-ledger:end -->\n",
+        )
+
+        status = get_rules_status(tmp_path)
+
+        assert status["claude_code"]["exists"] is True
+        assert status["claude_code"]["has_pm_section"] is True
+        assert status["claude_code"]["version"] == TEMPLATE_VERSION
+        assert status["claude_code"]["up_to_date"] is True
+        assert status["claude_code"]["other_rule_sections"] == ["synaptic-ledger"]
+
+    def test_get_rules_status_reflects_existing_agents_md(self, tmp_path):
+        from pm_server.rules import get_rules_status
+
+        (tmp_path / "AGENTS.md").write_text(
+            "# Agents\n\n<!-- pm-server:begin v=0 -->\nlegacy\n<!-- pm-server:end -->\n",
+        )
+
+        status = get_rules_status(tmp_path)
+
+        assert status["codex"]["exists"] is True
+        assert status["codex"]["has_pm_section"] is True
+        assert status["codex"]["version"] == 0
+        assert status["codex"]["up_to_date"] is False  # below current TEMPLATE_VERSION
+
+
+class TestAggregateOverallStatus:
+    def test_empty_results_aggregates_to_skipped(self):
+        """Empty results list aggregates to ``"skipped"`` (default).
+        Covers rules.py:582."""
+        from pm_server.rules import _aggregate_overall_status
+
+        assert _aggregate_overall_status([]) == "skipped"
 
 
 class TestCliUpdateRules:
@@ -662,9 +745,7 @@ class TestCliUpdateRules:
             return self._ok_summary(dry_run=True)
 
         monkeypatch.setattr("pm_server.rules.inject_pm_rules", fake_inject)
-        result = CliRunner().invoke(
-            cli, ["update-rules", "--target", "claude-code", "--dry-run"]
-        )
+        result = CliRunner().invoke(cli, ["update-rules", "--target", "claude-code", "--dry-run"])
 
         assert result.exit_code == 0
         assert captured["dry_run"] is True
@@ -758,6 +839,9 @@ class TestCliUpdateRules:
         assert result.exit_code == 0
         assert "backup: /fake/AGENTS.md.bak.20260430-180000" in result.output
         # backup path NOT embedded in the per-host message line itself.
-        assert "AGENTS.md.bak" not in result.output.split("\n")[
-            [i for i, line in enumerate(result.output.split("\n")) if "AGENTS.md:" in line][0]
-        ]
+        assert (
+            "AGENTS.md.bak"
+            not in result.output.split("\n")[
+                [i for i, line in enumerate(result.output.split("\n")) if "AGENTS.md:" in line][0]
+            ]
+        )

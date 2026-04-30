@@ -497,10 +497,7 @@ def _inject_into_file(
         new_content = before + template + after
         old_version = int(begin_match.group(1))
         status = "updated"
-        message = (
-            f"updated PM Server rules in {target_file} "
-            f"(v{old_version} → v{TEMPLATE_VERSION})"
-        )
+        message = f"updated PM Server rules in {target_file} (v{old_version} → v{TEMPLATE_VERSION})"
     elif begin_match and end_idx == -1:
         # Corrupted: begin without end — treat as replace-from-corruption
         before = content[: begin_match.start()]
@@ -630,8 +627,7 @@ def inject_pm_rules(
 
     # Per-host injection (best-effort, isolated failures)
     results = [
-        _safe_inject(project_root / TARGET_FILES[host], host, dry_run=dry_run)
-        for host in hosts
+        _safe_inject(project_root / TARGET_FILES[host], host, dry_run=dry_run) for host in hosts
     ]
 
     # Aggregate UX-surfaced lists
