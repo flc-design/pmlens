@@ -1,9 +1,25 @@
-"""Tests for resolve_project_path guard logic (PMSERV-014)."""
+"""Tests for utils.py: project-path resolution + shared host/file helpers.
+
+The host-target / file-mutation helpers (added in PMSERV-044) are consumed
+by both ``installer.py`` and ``rules.py``. Their tests pin the contract so
+that either consumer's refactor cannot silently break the other.
+"""
+
+import os
 
 import pytest
 
 from pm_server.models import ProjectNotFoundError
-from pm_server.utils import _is_project_pm_dir, resolve_project_path
+from pm_server.utils import (
+    _KNOWN_HOSTS,
+    TARGET_CHOICES,
+    _atomic_write_text,
+    _codex_config_path,
+    _is_project_pm_dir,
+    _resolve_targets,
+    _timestamped_backup,
+    resolve_project_path,
+)
 
 
 class TestIsProjectPmDir:
@@ -141,3 +157,119 @@ class TestResolveProjectPathCwdWalkUp:
 
         with pytest.raises(ProjectNotFoundError, match="No .pm/ directory found"):
             resolve_project_path()
+
+
+class TestKnownHosts:
+    def test_order_is_significant(self):
+        """``claude-code`` must come first — orchestrator dispatch order."""
+        assert _KNOWN_HOSTS == ("claude-code", "codex")
+
+    def test_target_choices_is_auto_all_then_known_hosts(self):
+        assert TARGET_CHOICES == ("auto", "all", "claude-code", "codex")
+
+
+class TestResolveTargets:
+    def test_auto_expands_to_all_known_hosts(self):
+        assert _resolve_targets("auto") == ["claude-code", "codex"]
+
+    def test_all_is_synonym_of_auto(self):
+        assert _resolve_targets("all") == _resolve_targets("auto")
+
+    def test_specific_host_returns_singleton(self):
+        assert _resolve_targets("claude-code") == ["claude-code"]
+        assert _resolve_targets("codex") == ["codex"]
+
+    def test_unknown_target_raises(self):
+        with pytest.raises(ValueError, match="unknown target"):
+            _resolve_targets("invalid")
+
+
+class TestCodexConfigPath:
+    def test_returns_codex_config_under_home(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        assert _codex_config_path() == tmp_path / ".codex" / "config.toml"
+
+
+class TestTimestampedBackup:
+    def test_creates_backup_next_to_original(self, tmp_path):
+        original = tmp_path / "config.toml"
+        original.write_text('hello = "world"\n', encoding="utf-8")
+
+        backup = _timestamped_backup(original)
+
+        assert backup.parent == original.parent
+        assert backup.name.startswith("config.toml.bak.")
+
+    def test_preserves_content(self, tmp_path):
+        original = tmp_path / "data.txt"
+        original.write_text("line1\nline2\n", encoding="utf-8")
+
+        backup = _timestamped_backup(original)
+
+        assert backup.read_text(encoding="utf-8") == "line1\nline2\n"
+
+    def test_preserves_mtime(self, tmp_path):
+        """``shutil.copy2`` semantics: mtime is preserved."""
+        original = tmp_path / "data.txt"
+        original.write_text("x", encoding="utf-8")
+        os.utime(original, (1_700_000_000, 1_700_000_000))
+
+        backup = _timestamped_backup(original)
+
+        assert backup.stat().st_mtime == original.stat().st_mtime
+
+
+class TestAtomicWriteText:
+    def test_writes_content_correctly(self, tmp_path):
+        target = tmp_path / "out.txt"
+
+        _atomic_write_text(target, "hello\n")
+
+        assert target.read_text(encoding="utf-8") == "hello\n"
+
+    def test_replaces_existing_file(self, tmp_path):
+        target = tmp_path / "out.txt"
+        target.write_text("old\n", encoding="utf-8")
+
+        _atomic_write_text(target, "new\n")
+
+        assert target.read_text(encoding="utf-8") == "new\n"
+
+    def test_does_not_collide_with_fixed_tmp_suffix(self, tmp_path):
+        """PMSERV-044 cross-check R8: ``mkstemp`` uses a randomised name so
+        a pre-existing fixed-suffix ``.tmp`` file beside the target is left
+        untouched (no concurrent-writer collision)."""
+        target = tmp_path / "out.toml"
+        target.write_text("initial", encoding="utf-8")
+
+        # Squat on the legacy fixed-suffix path that the previous
+        # implementation would have used.
+        legacy_fixed_tmp = tmp_path / "out.toml.tmp"
+        legacy_fixed_tmp.write_text("foreign-content", encoding="utf-8")
+
+        _atomic_write_text(target, "new content\n")
+
+        assert legacy_fixed_tmp.read_text(encoding="utf-8") == "foreign-content"
+        assert target.read_text(encoding="utf-8") == "new content\n"
+
+    def test_cleans_up_temp_on_exception(self, tmp_path, monkeypatch):
+        """A failed rename must not leave a ``*.tmp`` orphan in the dir."""
+        target = tmp_path / "out.txt"
+
+        def failing_replace(src, dst):
+            raise OSError("simulated replace failure")
+
+        monkeypatch.setattr(os, "replace", failing_replace)
+
+        with pytest.raises(OSError, match="simulated replace failure"):
+            _atomic_write_text(target, "data")
+
+        leftover = list(tmp_path.glob("*.tmp*"))
+        assert leftover == []
+
+    def test_supports_custom_encoding(self, tmp_path):
+        target = tmp_path / "out.txt"
+
+        _atomic_write_text(target, "héllo", encoding="utf-8")
+
+        assert target.read_text(encoding="utf-8") == "héllo"

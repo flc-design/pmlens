@@ -61,11 +61,7 @@ class TestGetClaudemdStatus:
 class TestOtherRuleSections:
     def test_no_other_sections(self, project_dir):
         """Only pm-server markers present → empty list."""
-        content = (
-            f"<!-- pm-server:begin v={TEMPLATE_VERSION} -->\n"
-            f"rules\n"
-            f"<!-- pm-server:end -->\n"
-        )
+        content = f"<!-- pm-server:begin v={TEMPLATE_VERSION} -->\nrules\n<!-- pm-server:end -->\n"
         (project_dir / "CLAUDE.md").write_text(content)
         status = get_claudemd_status(project_dir)
         assert status["other_rule_sections"] == []
@@ -231,3 +227,44 @@ class TestIdempotency:
         update_claudemd(project_dir)
         content2 = (project_dir / "CLAUDE.md").read_text()
         assert content1 == content2
+
+
+class TestShimIdentity:
+    """Verify ``pm_server.claudemd`` is a transparent re-export shim of ``pm_server.rules``.
+
+    PMSERV-043 (commit fcce596) split claudemd.py into rules.py + a re-export
+    shim. v0.4.x callers using ``from pm_server.claudemd import X`` MUST see
+    the same object as ``pm_server.rules.X`` — verifiable via ``is`` identity.
+    Regression guard added by PMSERV-044 plan v2 (cross-check R7) so that
+    upcoming refactors (inject_pm_rules etc.) cannot accidentally rebind a
+    shim symbol to a wrapper function and silently break v0.4.x imports.
+    """
+
+    def test_ensure_claudemd_is_identical(self):
+        from pm_server import claudemd, rules
+
+        assert claudemd.ensure_claudemd is rules.ensure_claudemd
+
+    def test_update_claudemd_is_identical(self):
+        from pm_server import claudemd, rules
+
+        assert claudemd.update_claudemd is rules.update_claudemd
+
+    def test_get_claudemd_status_is_identical(self):
+        from pm_server import claudemd, rules
+
+        assert claudemd.get_claudemd_status is rules.get_claudemd_status
+
+    def test_template_version_is_identical(self):
+        from pm_server import claudemd, rules
+
+        assert claudemd.TEMPLATE_VERSION is rules.TEMPLATE_VERSION
+
+    def test_marker_constants_are_identical(self):
+        from pm_server import claudemd, rules
+
+        assert claudemd.BEGIN_MARKER is rules.BEGIN_MARKER
+        assert claudemd.END_MARKER is rules.END_MARKER
+        assert claudemd.BEGIN_PATTERN is rules.BEGIN_PATTERN
+        assert claudemd.OTHER_SECTION_PATTERN is rules.OTHER_SECTION_PATTERN
+        assert claudemd.CLAUDEMD_TEMPLATE is rules.CLAUDEMD_TEMPLATE

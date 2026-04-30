@@ -1,18 +1,33 @@
 """Project rules auto-management for PM Server.
 
-Manages a marker-delimited section in target rule files (currently
-``CLAUDE.md``; ``AGENTS.md`` for Codex CLI added in PMSERV-044). This
-module is the general-purpose foundation for multi-host rule injection
-introduced by ADR-008.
+Manages a marker-delimited section in target rule files (``CLAUDE.md``
+for Claude Code; ``AGENTS.md`` for Codex CLI). This module is the
+general-purpose foundation for multi-host rule injection introduced by
+ADR-008 and elaborated in PMSERV-044.
 
 For backward compatibility, ``pm_server.claudemd`` re-exports every
-symbol below; v0.4.x callers continue to work unchanged.
+v0.4.x-vintage symbol below; existing callers continue to work
+unchanged.
 """
 
 from __future__ import annotations
 
+import os
 import re
+import shutil
+from dataclasses import dataclass, field
 from pathlib import Path
+
+from .utils import _atomic_write_text, _codex_config_path, _timestamped_backup
+
+# Mapping from host id (used by `target` arg) to the rule-file basename
+# managed in the project root. Same marker scheme is reused across hosts
+# (ADR-008 #6) — Codex parses Markdown verbatim so HTML comments are
+# inert (validated by SynapticLedger's existing AGENTS.md marker block).
+TARGET_FILES: dict[str, str] = {
+    "claude-code": "CLAUDE.md",
+    "codex": "AGENTS.md",
+}
 
 TEMPLATE_VERSION = 7
 BEGIN_MARKER = "<!-- pm-server:begin v={version} -->"
@@ -239,3 +254,395 @@ def _replace_pm_section(claude_md: Path, content: str, template: str) -> str:
     separator = _separator_for(content)
     claude_md.write_text(content + separator + template + "\n", encoding="utf-8")
     return "appended PM Server rules to CLAUDE.md (no markers found)"
+
+
+# --- PMSERV-044: multi-host detection + injection layer -------------------
+
+
+def _scan_rule_file(path: Path) -> dict:
+    """Return marker-status dict for any rule file (same shape as
+    ``get_claudemd_status``).
+
+    Internal helper for ``get_rules_status``. Does NOT replace
+    ``get_claudemd_status``: the legacy function is preserved verbatim
+    as the v0.4.x compatibility surface (ADR-008 #9).
+    """
+    result: dict = {
+        "exists": path.exists(),
+        "has_pm_section": False,
+        "version": None,
+        "up_to_date": False,
+        "other_rule_sections": [],
+    }
+    if not path.exists():
+        return result
+    try:
+        content = path.read_text(encoding="utf-8")
+    except OSError:
+        return result
+    match = BEGIN_PATTERN.search(content)
+    if match:
+        result["has_pm_section"] = True
+        result["version"] = int(match.group(1))
+        result["up_to_date"] = result["version"] >= TEMPLATE_VERSION
+    all_sections = OTHER_SECTION_PATTERN.findall(content)
+    result["other_rule_sections"] = [s for s in all_sections if s != "pm-server"]
+    return result
+
+
+def get_rules_status(project_root: Path) -> dict[str, dict]:
+    """Return per-host rule-file status keyed by host id.
+
+    Each value has the same shape as ``get_claudemd_status``: ``exists``,
+    ``has_pm_section``, ``version``, ``up_to_date``,
+    ``other_rule_sections``. Host ids use underscore form
+    (``"claude_code"``, ``"codex"``) so the dict is ergonomic in JSON
+    and Python attribute-like access.
+    """
+    return {
+        "claude_code": _scan_rule_file(project_root / TARGET_FILES["claude-code"]),
+        "codex": _scan_rule_file(project_root / TARGET_FILES["codex"]),
+    }
+
+
+def _has_pm_marker(path: Path) -> bool:
+    """Return True iff ``path`` exists and contains a pm-server begin marker.
+
+    Used as a "positive signal" by ``detect_hosts``: a file already
+    managed by pm-server in this project is strong evidence that the
+    associated host is in active use, even if external probes (PATH /
+    config files / env vars) fail to detect it.
+    """
+    if not path.exists():
+        return False
+    try:
+        content = path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return bool(BEGIN_PATTERN.search(content))
+
+
+def detect_hosts(project_root: Path) -> tuple[list[str], str]:
+    """Detect which MCP hosts are present, returning (hosts, source).
+
+    Strategy (PMSERV-044 spec v1, validated by super-research):
+    1. **Filesystem (primary, deterministic)**: ``shutil.which("claude")``
+       for Claude Code, ``~/.codex/config.toml`` exists for Codex.
+    2. **Marker (positive signal)**: a project file already containing the
+       pm-server marker proves the host is in active use here.
+    3. **CLAUDECODE env var (positive signal only, never negative
+       judgment)**: documented Claude Code child-process inheritance.
+       No reliable Codex env var exists (Codex strips inherited env per
+       ``[shell_environment_policy]``).
+    4. **Tertiary fallback**: ``["claude-code"]`` — caller MUST surface
+       a warning so the user can opt into an explicit ``target``.
+
+    Returns:
+        A 2-tuple ``(hosts, source)`` where ``source`` is one of
+        ``"filesystem+marker+env"`` (any positive signal fired) or
+        ``"fallback"`` (no signal, defaulted to claude-code).
+    """
+    hosts: set[str] = set()
+
+    # Filesystem (primary)
+    if shutil.which("claude") is not None:
+        hosts.add("claude-code")
+    if _codex_config_path().exists():
+        hosts.add("codex")
+
+    # Marker (positive signal)
+    if _has_pm_marker(project_root / TARGET_FILES["claude-code"]):
+        hosts.add("claude-code")
+    if _has_pm_marker(project_root / TARGET_FILES["codex"]):
+        hosts.add("codex")
+
+    # Env var (positive only)
+    if os.environ.get("CLAUDECODE") == "1":
+        hosts.add("claude-code")
+
+    if hosts:
+        return sorted(hosts), "filesystem+marker+env"
+
+    return ["claude-code"], "fallback"
+
+
+@dataclass(frozen=True)
+class InjectResult:
+    """Outcome of injecting PM Server rules into a single rule file.
+
+    Backward-compat-sensitive substrings in ``message`` are kept for
+    legacy ``pm_update_claudemd`` callers (the v0.4.x dict shape is
+    preserved by ``server.pm_update_claudemd``).
+
+    Attributes:
+        target_file: ``"CLAUDE.md"`` or ``"AGENTS.md"``.
+        host: ``"claude-code"`` or ``"codex"``.
+        status: ``"created"``, ``"appended"``, ``"updated"``,
+            ``"skipped"``, or ``"failed"``.
+        message: Human-readable detail. Does NOT include backup path or
+            ``[dry-run]`` tag — those are presentation concerns owned
+            exclusively by ``__main__._print_inject_summary`` (PMSERV-044
+            cross-check R6, applies PMSERV-039 L1 lesson).
+        backup_path: Path to ``.bak.<timestamp>`` if created, else None.
+            CLAUDE.md does NOT get a backup in v0.5.0 (v0.4.0 parity);
+            AGENTS.md always does (ADR-008 #11). v0.6.0 will symmetrise.
+        is_dry_run: True if no on-disk side effects occurred.
+    """
+
+    target_file: str
+    host: str
+    status: str
+    message: str
+    backup_path: Path | None = None
+    is_dry_run: bool = False
+
+
+@dataclass(frozen=True)
+class InjectSummary:
+    """Aggregate outcome of an ``inject_pm_rules`` invocation.
+
+    Attributes:
+        results: One ``InjectResult`` per processed host.
+        detected_hosts: Hosts identified by ``detect_hosts`` (or the
+            explicit-target list if ``target != "auto"``). Surfaced for
+            UX transparency (PMSERV-044 cross-check R7/E1).
+        detection_source: ``"filesystem+marker+env"``, ``"explicit"``,
+            or ``"fallback"``.
+        created: Subset of result target files that were newly created.
+        updated: Subset of result target files whose existing pm-server
+            section was overwritten or appended.
+        overall_status: Worst case across results, with priority order
+            ``failed > skipped > updated > created`` (cross-check D1).
+    """
+
+    results: list[InjectResult] = field(default_factory=list)
+    detected_hosts: list[str] = field(default_factory=list)
+    detection_source: str = "explicit"
+    created: list[str] = field(default_factory=list)
+    updated: list[str] = field(default_factory=list)
+    overall_status: str = "skipped"
+
+
+def _inject_into_file(
+    path: Path,
+    host: str,
+    *,
+    dry_run: bool = False,
+) -> InjectResult:
+    """Inject the pm-server marker section into a single rule file.
+
+    Generalises the v0.4.x ``update_claudemd`` "always-replace"
+    semantics to any rule file. Per ADR-008 #11 a timestamped backup
+    is created for ``AGENTS.md`` only — ``CLAUDE.md`` keeps the v0.4.0
+    no-backup behaviour for compat (deprecation timeline in ADR-008
+    amendment).
+
+    Returned status reflects on-disk transition:
+        * ``"created"`` — file did not exist
+        * ``"appended"`` — file existed, no pm-server marker found
+        * ``"updated"`` — pm-server marker found and rewritten
+                           (also for corrupted begin-without-end markers)
+        * ``"failed"`` — read/write/backup raised an OSError
+    """
+    target_file = path.name
+    template = _render_template()
+
+    # Symlink-safe resolution (cross-check D3): operate on the underlying
+    # file so the backup names the real target, not the symlink itself.
+    if path.exists() or path.is_symlink():
+        resolved = path.resolve(strict=False)
+    else:
+        resolved = path
+
+    # --- Path 1: file does not exist — create it ---
+    if not resolved.exists():
+        if not dry_run:
+            try:
+                _atomic_write_text(resolved, template + "\n")
+            except OSError as e:
+                return InjectResult(
+                    target_file=target_file,
+                    host=host,
+                    status="failed",
+                    message=f"failed to create {target_file}: {e}",
+                    is_dry_run=dry_run,
+                )
+        return InjectResult(
+            target_file=target_file,
+            host=host,
+            status="created",
+            message=f"created {target_file} with PM Server rules",
+            is_dry_run=dry_run,
+        )
+
+    # --- File exists: read current content ---
+    try:
+        content = resolved.read_text(encoding="utf-8")
+    except OSError as e:
+        return InjectResult(
+            target_file=target_file,
+            host=host,
+            status="failed",
+            message=f"failed to read {target_file}: {e}",
+            is_dry_run=dry_run,
+        )
+
+    begin_match = BEGIN_PATTERN.search(content)
+    end_idx = content.find(END_MARKER)
+
+    # Compute new content + status + message
+    if begin_match and end_idx != -1:
+        before = content[: begin_match.start()]
+        after = content[end_idx + len(END_MARKER) :]
+        new_content = before + template + after
+        old_version = int(begin_match.group(1))
+        status = "updated"
+        message = (
+            f"updated PM Server rules in {target_file} "
+            f"(v{old_version} → v{TEMPLATE_VERSION})"
+        )
+    elif begin_match and end_idx == -1:
+        # Corrupted: begin without end — treat as replace-from-corruption
+        before = content[: begin_match.start()]
+        new_content = before.rstrip() + "\n\n" + template + "\n"
+        status = "updated"
+        message = f"replaced corrupted PM Server section in {target_file}"
+    else:
+        # No markers — append
+        separator = _separator_for(content)
+        new_content = content + separator + template + "\n"
+        status = "appended"
+        message = f"appended PM Server rules to {target_file}"
+
+    # Backup before write — AGENTS.md only (ADR-008 #11; v0.5.0 asymmetry)
+    backup_path: Path | None = None
+    if not dry_run and target_file == "AGENTS.md":
+        try:
+            backup_path = _timestamped_backup(resolved)
+        except OSError as e:
+            return InjectResult(
+                target_file=target_file,
+                host=host,
+                status="failed",
+                message=f"failed to back up {target_file}: {e}",
+                is_dry_run=dry_run,
+            )
+
+    # Write
+    if not dry_run:
+        try:
+            _atomic_write_text(resolved, new_content)
+        except OSError as e:
+            return InjectResult(
+                target_file=target_file,
+                host=host,
+                status="failed",
+                message=f"failed to write {target_file}: {e}",
+                backup_path=backup_path,
+                is_dry_run=dry_run,
+            )
+
+    return InjectResult(
+        target_file=target_file,
+        host=host,
+        status=status,
+        message=message,
+        backup_path=backup_path,
+        is_dry_run=dry_run,
+    )
+
+
+def _safe_inject(path: Path, host: str, *, dry_run: bool) -> InjectResult:
+    """Run ``_inject_into_file`` with a top-level exception guard.
+
+    Per-host failures must not abort sibling hosts (ADR-008 design
+    principle inherited from ADR-007 case C; cross-check D1).
+    """
+    try:
+        return _inject_into_file(path, host, dry_run=dry_run)
+    except Exception as e:  # noqa: BLE001 - intentional broad guard
+        return InjectResult(
+            target_file=TARGET_FILES[host],
+            host=host,
+            status="failed",
+            message=f"unexpected error in {host} injection: {e}",
+            is_dry_run=dry_run,
+        )
+
+
+def _aggregate_overall_status(results: list[InjectResult]) -> str:
+    """Compute ``InjectSummary.overall_status`` with priority order
+    ``failed > skipped > updated > created`` (cross-check D1)."""
+    statuses = {r.status for r in results}
+    for level in ("failed", "skipped", "updated", "appended", "created"):
+        if level in statuses:
+            # Collapse "appended" → "updated" for the aggregate, since
+            # both represent on-disk modification of an existing file.
+            return "updated" if level == "appended" else level
+    return "skipped"
+
+
+def inject_pm_rules(
+    project_root: Path,
+    *,
+    target: str = "auto",
+    dry_run: bool = False,
+) -> InjectSummary:
+    """Inject PM Server rules into per-host rule files.
+
+    Args:
+        project_root: Project root directory holding the rule files.
+        target: One of ``TARGET_CHOICES``:
+
+            * ``"auto"`` (default) — detect installed hosts via
+              ``detect_hosts`` (filesystem + marker + CLAUDECODE).
+            * ``"all"`` — process every known host unconditionally.
+            * ``"claude-code"`` / ``"codex"`` — single-host targeting.
+
+        dry_run: When True, no files are written or backed up; results
+            still describe what *would* happen and per-result
+            ``is_dry_run`` is True.
+
+    Returns:
+        ``InjectSummary`` aggregating per-host results. Per-host
+        failures are isolated so a write failure in one rule file does
+        NOT abort the sibling host (best-effort; ADR-008 + cross-check
+        D1). The aggregate ``overall_status`` follows the priority
+        order ``failed > skipped > updated > created``.
+
+    Raises:
+        ValueError: If ``target`` is not in ``TARGET_CHOICES``.
+    """
+    from .utils import TARGET_CHOICES
+
+    if target not in TARGET_CHOICES:
+        raise ValueError(f"unknown target: {target!r}. Expected one of {TARGET_CHOICES}.")
+
+    # Resolve target → list of hosts + detection source
+    if target == "auto":
+        hosts, source = detect_hosts(project_root)
+    elif target == "all":
+        hosts = list(TARGET_FILES.keys())
+        source = "explicit"
+    else:
+        hosts = [target]
+        source = "explicit"
+
+    # Per-host injection (best-effort, isolated failures)
+    results = [
+        _safe_inject(project_root / TARGET_FILES[host], host, dry_run=dry_run)
+        for host in hosts
+    ]
+
+    # Aggregate UX-surfaced lists
+    created = [r.target_file for r in results if r.status == "created"]
+    updated = [r.target_file for r in results if r.status in ("updated", "appended")]
+
+    return InjectSummary(
+        results=results,
+        detected_hosts=list(hosts),
+        detection_source=source,
+        created=created,
+        updated=updated,
+        overall_status=_aggregate_overall_status(results),
+    )

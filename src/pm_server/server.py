@@ -254,8 +254,10 @@ def pm_status(project_path: str | None = None) -> dict:
     # Active tasks (in_progress)
     active_tasks = [_task_summary(t) for t in tasks if t.status == TaskStatus.IN_PROGRESS]
 
-    # CLAUDE.md status
+    # CLAUDE.md status (legacy v0.4.x key, unchanged) +
+    # multi-host rule files status (PMSERV-044, additive).
     from .claudemd import get_claudemd_status
+    from .rules import get_rules_status
 
     root = resolve_project_path(project_path)
 
@@ -286,6 +288,7 @@ def pm_status(project_path: str | None = None) -> dict:
         "active_tasks": active_tasks,
         "health": project.health.model_dump(),
         "claudemd": get_claudemd_status(root),
+        "rules": get_rules_status(root),
         "hooks": hooks_status,
         "next_pm_actions": next_actions,
     }
@@ -1126,20 +1129,98 @@ def pm_update_claudemd(project_path: str | None = None) -> dict:
     Creates CLAUDE.md if it doesn't exist.
     Uses markers to identify and replace only the PM Server section.
     Other content in CLAUDE.md is preserved.
+
+    .. deprecated:: 0.6.0
+        Backward-compat alias preserved through the v0.5.x → v1.0.0
+        deprecation timeline (ADR-008 amendment 2026-04-30). New code
+        should use :func:`pm_update_rules` instead. The dict response
+        shape (status, message, template_version, before, after) is
+        byte-stable with v0.4.x.
     """
-    from .claudemd import TEMPLATE_VERSION, get_claudemd_status, update_claudemd
+    from .rules import TEMPLATE_VERSION, get_claudemd_status, inject_pm_rules
 
     root = resolve_project_path(project_path)
     before = get_claudemd_status(root)
-    message = update_claudemd(root)
+    summary = inject_pm_rules(root, target="claude-code")
     after = get_claudemd_status(root)
 
+    # Single-host invocation always yields exactly one result.
+    legacy_message = summary.results[0].message if summary.results else ""
+
+    # Status field hard-coded to "updated" preserves v0.4.x parity:
+    # callers rely on this exact literal regardless of whether the
+    # underlying transition was create/append/update (cross-check R3).
     return {
         "status": "updated",
-        "message": message,
+        "message": legacy_message,
         "template_version": TEMPLATE_VERSION,
         "before": before,
         "after": after,
+    }
+
+
+@mcp.tool()
+def pm_update_rules(
+    project_path: str | None = None,
+    target: str = "auto",
+    dry_run: bool = False,
+) -> dict:
+    """Inject PM Server rules into CLAUDE.md and/or AGENTS.md.
+
+    Args:
+        project_path: Project root. Auto-detected if omitted.
+        target: One of ``"auto"`` (default; detect installed hosts via
+            filesystem + marker + CLAUDECODE), ``"all"`` (force every
+            known host), ``"claude-code"`` (only CLAUDE.md), or
+            ``"codex"`` (only AGENTS.md).
+        dry_run: If True, report what would happen without writing.
+
+    Returns a dict with: ``overall_status``, ``detected_hosts``,
+    ``detection_source`` (``"filesystem+marker+env"`` |
+    ``"explicit"`` | ``"fallback"``), ``created``, ``updated``,
+    ``is_dry_run``, ``results`` (per-host detail), and ``warnings``
+    (surfaced when detection falls back to claude-code without any
+    positive signal — pass ``target="codex"`` explicitly to opt into
+    AGENTS.md when running outside a Codex-aware shell).
+    """
+    from .rules import inject_pm_rules
+
+    root = resolve_project_path(project_path)
+    summary = inject_pm_rules(root, target=target, dry_run=dry_run)
+
+    warnings: list[dict] = []
+    if summary.detection_source == "fallback":
+        warnings.append(
+            {
+                "code": "host_detection_fallback",
+                "message": (
+                    "No host could be detected from filesystem, markers, or env. "
+                    "Defaulted to claude-code only — pass target=codex explicitly "
+                    "if running under Codex CLI."
+                ),
+                "remediation": "pm_update_rules(target='codex')",
+            }
+        )
+
+    return {
+        "overall_status": summary.overall_status,
+        "detected_hosts": summary.detected_hosts,
+        "detection_source": summary.detection_source,
+        "created": summary.created,
+        "updated": summary.updated,
+        "is_dry_run": dry_run,
+        "results": [
+            {
+                "target_file": r.target_file,
+                "host": r.host,
+                "status": r.status,
+                "message": r.message,
+                "backup_path": str(r.backup_path) if r.backup_path else None,
+                "is_dry_run": r.is_dry_run,
+            }
+            for r in summary.results
+        ],
+        "warnings": warnings,
     }
 
 

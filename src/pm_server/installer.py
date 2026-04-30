@@ -24,16 +24,21 @@ Public surface:
 
 from __future__ import annotations
 
-import os
 import shutil
 import subprocess
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime
 from pathlib import Path
 
 import tomlkit
+
+from .utils import (
+    _atomic_write_text,
+    _codex_config_path,
+    _resolve_targets,
+    _timestamped_backup,
+)
 
 # --- Result types ---------------------------------------------------------
 
@@ -255,11 +260,6 @@ def uninstall_claude_code(*, dry_run: bool = False) -> InstallResult:
 # --- Host: Codex CLI ------------------------------------------------------
 
 
-def _codex_config_path() -> Path:
-    """Return the Codex CLI config path (lazy; honors monkeypatched HOME)."""
-    return Path.home() / ".codex" / "config.toml"
-
-
 def _resolve_pm_server_path() -> Path:
     """Resolve the absolute pm-server binary path for sandbox-safe registration.
 
@@ -282,25 +282,18 @@ def _resolve_pm_server_path() -> Path:
 
 
 def _backup_codex_config(config_path: Path) -> Path:
-    """Create a timestamped backup of the Codex config before mutating.
-
-    Uses ``shutil.copy2`` to preserve mtime and permissions.
-    """
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    backup_path = config_path.with_name(f"{config_path.name}.bak.{timestamp}")
-    shutil.copy2(config_path, backup_path)
-    return backup_path
+    """Backward-compat wrapper. Delegates to ``utils._timestamped_backup``."""
+    return _timestamped_backup(config_path)
 
 
 def _atomic_write_toml(path: Path, doc: tomlkit.TOMLDocument) -> None:
-    """Write a TOML document atomically (tempfile + os.replace).
+    """Write a TOML document atomically. Delegates to ``utils._atomic_write_text``.
 
-    Local helper. PMSERV-048 will introduce a project-wide atomic-write
-    utility for all config files.
+    The shared helper uses ``tempfile.mkstemp`` for a randomised temp
+    name so concurrent writers cannot collide on a fixed ``.tmp`` suffix
+    (PMSERV-044 cross-check R8 fix).
     """
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(tomlkit.dumps(doc), encoding="utf-8")
-    os.replace(tmp, path)
+    _atomic_write_text(path, tomlkit.dumps(doc))
 
 
 def install_codex(*, dry_run: bool = False) -> InstallResult:
@@ -501,26 +494,6 @@ def uninstall_codex(*, dry_run: bool = False) -> InstallResult:
 
 
 # --- Orchestrator ---------------------------------------------------------
-
-
-# Tuple order is significant: orchestrators dispatch in this order and the
-# CLI prints results in the same sequence. Keep "claude-code" first.
-_KNOWN_HOSTS: tuple[str, ...] = ("claude-code", "codex")
-
-
-def _resolve_targets(target: str) -> list[str]:
-    """Expand a target spec into a concrete list of host identifiers.
-
-    ``"auto"`` and ``"all"`` are synonyms and expand to every known
-    host (ADR-007 #1). Missing-host detection (skip vs failure) is
-    delegated to the per-host installer.
-    """
-    if target in ("auto", "all"):
-        return list(_KNOWN_HOSTS)
-    if target in _KNOWN_HOSTS:
-        return [target]
-    valid = ("auto", "all", *_KNOWN_HOSTS)
-    raise ValueError(f"unknown target: {target!r}. Expected one of {valid}.")
 
 
 def _safe_call(fn: Callable[[], InstallResult], host: str) -> InstallResult:

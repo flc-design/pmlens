@@ -21,6 +21,7 @@ from pm_server.server import (
     pm_status,
     pm_tasks,
     pm_update_claudemd,
+    pm_update_rules,
     pm_update_task,
     pm_velocity,
 )
@@ -316,6 +317,175 @@ class TestPmUpdateClaudemd:
         result = pm_update_claudemd(project_path=str(initialized_project))
         assert result["status"] == "updated"
         assert result["after"]["up_to_date"] is True
+
+    def test_pm_update_claudemd_returns_legacy_dict_shape(self, initialized_project):
+        """pm_update_claudemd returns the v0.4.x legacy dict shape.
+
+        Regression guard for PMSERV-044: when this MCP tool is refactored
+        to delegate to ``inject_pm_rules(target='claude-code')``, the
+        response dict shape MUST be preserved exactly. Locks every
+        documented top-level field and the nested ``before``/``after``
+        keys (cross-check R3).
+        """
+        result = pm_update_claudemd(project_path=str(initialized_project))
+
+        # Top-level keys (5 fields, exact set)
+        assert set(result.keys()) == {
+            "status",
+            "message",
+            "template_version",
+            "before",
+            "after",
+        }
+        assert result["status"] == "updated"
+        assert isinstance(result["message"], str)
+        assert isinstance(result["template_version"], int)
+
+        # Nested before/after dict keys (5 each, exact set)
+        for snapshot_key in ("before", "after"):
+            snapshot = result[snapshot_key]
+            assert set(snapshot.keys()) == {
+                "exists",
+                "has_pm_section",
+                "version",
+                "up_to_date",
+                "other_rule_sections",
+            }
+            assert isinstance(snapshot["exists"], bool)
+            assert isinstance(snapshot["has_pm_section"], bool)
+            assert isinstance(snapshot["other_rule_sections"], list)
+
+
+class TestPmUpdateRules:
+    """pm_update_rules MCP tool (PMSERV-044)."""
+
+    def test_default_target_auto_creates_claude_md(
+        self, initialized_project, monkeypatch, tmp_path
+    ):
+        # Force fallback path: no claude binary, no codex config, no env
+        monkeypatch.setattr("pm_server.rules.shutil.which", lambda _name: None)
+        monkeypatch.setenv("HOME", str(tmp_path / "fake_home"))
+        (tmp_path / "fake_home").mkdir(exist_ok=True)
+        monkeypatch.delenv("CLAUDECODE", raising=False)
+
+        result = pm_update_rules(project_path=str(initialized_project))
+
+        assert result["detection_source"] == "fallback"
+        assert result["detected_hosts"] == ["claude-code"]
+        # Fallback MUST surface a warning (cross-check A3)
+        assert len(result["warnings"]) == 1
+        assert result["warnings"][0]["code"] == "host_detection_fallback"
+        assert "remediation" in result["warnings"][0]
+
+    def test_target_codex_creates_agents_md(self, initialized_project):
+        result = pm_update_rules(
+            project_path=str(initialized_project), target="codex"
+        )
+
+        assert (initialized_project / "AGENTS.md").exists()
+        assert "AGENTS.md" in result["created"] or "AGENTS.md" in result["updated"]
+        assert result["detection_source"] == "explicit"
+        # No warnings for explicit target
+        assert result["warnings"] == []
+
+    def test_target_all_processes_both_hosts(self, initialized_project):
+        result = pm_update_rules(
+            project_path=str(initialized_project), target="all"
+        )
+
+        assert (initialized_project / "CLAUDE.md").exists()
+        assert (initialized_project / "AGENTS.md").exists()
+        assert {r["host"] for r in result["results"]} == {"claude-code", "codex"}
+
+    def test_dry_run_does_not_write(self, initialized_project):
+        # Remove any auto-created CLAUDE.md from pm_init
+        claude_md = initialized_project / "CLAUDE.md"
+        if claude_md.exists():
+            claude_md.unlink()
+
+        result = pm_update_rules(
+            project_path=str(initialized_project), target="all", dry_run=True
+        )
+
+        assert result["is_dry_run"] is True
+        assert all(r["is_dry_run"] for r in result["results"])
+        assert not claude_md.exists()
+        assert not (initialized_project / "AGENTS.md").exists()
+
+    def test_response_dict_has_required_top_level_keys(self, initialized_project):
+        result = pm_update_rules(
+            project_path=str(initialized_project), target="claude-code"
+        )
+
+        required = {
+            "overall_status",
+            "detected_hosts",
+            "detection_source",
+            "created",
+            "updated",
+            "is_dry_run",
+            "results",
+            "warnings",
+        }
+        assert set(result.keys()) == required
+
+    def test_per_result_has_required_fields(self, initialized_project):
+        result = pm_update_rules(
+            project_path=str(initialized_project), target="claude-code"
+        )
+
+        per_result_keys = {
+            "target_file",
+            "host",
+            "status",
+            "message",
+            "backup_path",
+            "is_dry_run",
+        }
+        assert set(result["results"][0].keys()) == per_result_keys
+
+    def test_unknown_target_raises_value_error(self, initialized_project):
+        with pytest.raises(ValueError, match="unknown target"):
+            pm_update_rules(project_path=str(initialized_project), target="bogus")
+
+
+class TestPmStatusRulesKey:
+    """pm_status.rules key (PMSERV-044, additive — does not break v0.4.x)."""
+
+    def test_pm_status_includes_rules_key(self, initialized_project):
+        status = pm_status(project_path=str(initialized_project))
+
+        assert "rules" in status
+        assert "claude_code" in status["rules"]
+        assert "codex" in status["rules"]
+
+    def test_pm_status_claudemd_key_unchanged(self, initialized_project):
+        """Legacy claudemd key MUST remain (v0.4.x compat regression guard)."""
+        status = pm_status(project_path=str(initialized_project))
+
+        assert "claudemd" in status
+        # Same shape as v0.4.x get_claudemd_status output
+        assert set(status["claudemd"].keys()) == {
+            "exists",
+            "has_pm_section",
+            "version",
+            "up_to_date",
+            "other_rule_sections",
+        }
+
+    def test_per_host_rules_status_has_get_claudemd_status_shape(
+        self, initialized_project
+    ):
+        status = pm_status(project_path=str(initialized_project))
+
+        for host_status in status["rules"].values():
+            assert set(host_status.keys()) == {
+                "exists",
+                "has_pm_section",
+                "version",
+                "up_to_date",
+                "other_rule_sections",
+            }
 
 
 class TestPmDashboard:

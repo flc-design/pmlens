@@ -33,6 +33,36 @@ def _print_install_summary(summary) -> None:
         click.echo(f"{prefix} {dry_tag}{r.target}: {r.message}")
 
 
+def _print_inject_summary(summary) -> None:
+    """Render an InjectSummary as one ``prefix target_file: message`` line per host.
+
+    Per PMSERV-044 cross-check R6: this is the **single source of truth**
+    for ``[dry-run]`` and backup-path presentation. ``InjectResult.message``
+    intentionally does not embed those — they are layered here so the
+    one-line-per-host invariant holds even when both CLI and Python API
+    consume the same data class.
+    """
+    if not summary.results:
+        click.echo("✗ No hosts processed.")
+        return
+
+    # Surface a fallback warning ahead of the per-host lines so the user
+    # sees it before scrolling past success indicators.
+    if summary.detection_source == "fallback":
+        click.echo(
+            "⚠ No host detected via filesystem / marker / env. "
+            "Defaulted to claude-code only — pass --target=codex if running "
+            "under Codex CLI."
+        )
+
+    for r in summary.results:
+        prefix = "✗" if r.status == "failed" else "✓"
+        dry_tag = "[dry-run] " if r.is_dry_run else ""
+        click.echo(f"{prefix} {dry_tag}{r.target_file}: {r.message}")
+        if r.backup_path:
+            click.echo(f"    backup: {r.backup_path}")
+
+
 @cli.command()
 @click.option(
     "--target",
@@ -203,6 +233,11 @@ def update_claudemd_cmd(all_projects: bool):
 
     Without --all: updates current project only.
     With --all: updates all registered projects.
+
+    .. deprecated:: 0.6.0
+        Backward-compat alias. Prefer ``pm-server update-rules`` which
+        supports AGENTS.md (Codex CLI) in addition to CLAUDE.md.
+        Output format is byte-stable with v0.4.x for this command.
     """
     from pathlib import Path
 
@@ -232,6 +267,76 @@ def update_claudemd_cmd(all_projects: bool):
             click.echo(f"  {result}")
         except Exception as e:
             click.echo(f"Error: {e}")
+
+
+@cli.command("update-rules")
+@click.option(
+    "--target",
+    "-t",
+    type=click.Choice(_TARGET_CHOICES),
+    default="auto",
+    show_default=True,
+    help=(
+        "Which host's rule file to update. 'auto' detects via "
+        "filesystem/marker/env; 'all' forces every known host."
+    ),
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Show what would happen without making changes.",
+)
+@click.option(
+    "--all",
+    "all_projects",
+    is_flag=True,
+    default=False,
+    help="Apply to every registered project (target/dry_run apply per-project).",
+)
+def update_rules_cmd(target: str, dry_run: bool, all_projects: bool):
+    """Inject PM Server rules into CLAUDE.md and/or AGENTS.md.
+
+    Compared to ``update-claudemd``: also handles AGENTS.md for Codex
+    CLI (ADR-008). Default ``target=auto`` detects which hosts are
+    installed on this machine and updates only those rule files.
+    """
+    from pathlib import Path
+
+    from . import rules
+    from .utils import resolve_project_path
+
+    any_failed = False
+
+    if all_projects:
+        from .storage import load_registry
+
+        registry = load_registry()
+        if not registry.projects:
+            click.echo("No registered projects found.")
+            return
+
+        for entry in registry.projects:
+            root = Path(entry.path)
+            if not root.exists():
+                click.echo(f"  {entry.name}: path not found (skipped)")
+                continue
+            click.echo(f"\n{entry.name}:")
+            summary = rules.inject_pm_rules(root, target=target, dry_run=dry_run)
+            _print_inject_summary(summary)
+            any_failed = any_failed or any(r.status == "failed" for r in summary.results)
+    else:
+        try:
+            root = resolve_project_path()
+        except Exception as e:
+            click.echo(f"Error: {e}")
+            raise click.exceptions.Exit(1) from e
+        summary = rules.inject_pm_rules(root, target=target, dry_run=dry_run)
+        _print_inject_summary(summary)
+        any_failed = any(r.status == "failed" for r in summary.results)
+
+    if any_failed:
+        raise click.exceptions.Exit(1)
 
 
 if __name__ == "__main__":

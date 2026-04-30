@@ -145,3 +145,16 @@ def sample_decision() -> Decision:
             negative=["Slower than binary formats"],
         ),
     )
+
+
+@pytest.fixture
+def clean_host_env(monkeypatch):
+    """Clear host-detection environment variables for deterministic tests.
+
+    Use this fixture in tests that exercise ``rules.detect_hosts`` or
+    related auto-target logic. It is intentionally NOT autouse to avoid
+    breaking existing installer tests that monkeypatch ``shutil.which``
+    or rely on inherited Claude Code env vars.
+    """
+    for var in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"):
+        monkeypatch.delenv(var, raising=False)
