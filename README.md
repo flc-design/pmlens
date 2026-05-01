@@ -28,7 +28,7 @@ Track tasks, visualize progress, record decisions — all through natural langua
 
 ## Features
 
-- **30 MCP tools** — task CRUD, child issues, status, blockers, velocity, dashboard, ADR, session memory, workflows, knowledge records, and more
+- **31 MCP tools** — task CRUD, child issues, status, blockers, velocity, dashboard, ADR, session memory, workflows, knowledge records, multi-host rules injection, and more
 - **Workflow engine** — template-based development workflows with loops, user gates, and chaining (Discovery → Development)
 - **Knowledge records** — structured findings between casual memory and formal ADR (research, tradeoff, spec, etc.)
 - **Super Research skill** — 3 parallel agents (Domain Expert, Critical Analyst, Lateral Thinker) + Depth Check (6 dimensions) + Fact Check + Cross-Check
@@ -64,13 +64,17 @@ pip install --upgrade pm-server
 After upgrading, the CLAUDE.md auto-action rules in each project are automatically updated:
 
 1. On the next session start, `pm_status` detects the template version mismatch
-2. Claude Code runs `pm_update_claudemd` to update the rules section
+2. Claude Code runs `pm_update_rules` to update the rules section (covers both CLAUDE.md and AGENTS.md when applicable)
 3. New features (e.g., child issue workflow) become active immediately
 
 You can also update manually:
 ```
-> CLAUDE.md を更新して    # or: pm_update_claudemd
+> CLAUDE.md を更新して    # or: pm_update_rules
 ```
+
+> The legacy `pm_update_claudemd` tool is still available as a back-compat alias
+> (CLAUDE.md only). It is slated for `DeprecationWarning` in v0.6.0 and removal
+> in v1.0.0 (PMSERV-055).
 
 ### Initialize a project
 
@@ -162,6 +166,40 @@ pm-server uninstall --target auto
 See [`docs/design.md` §5.2](docs/design.md) and ADR-007 for the detailed
 rationale (detect-then-patch, backup, dry-run, absolute-path embedding).
 
+### Project rules injection (CLAUDE.md / AGENTS.md)
+
+`pm_init` and `pm_update_rules` keep PM Server's auto-action rules synced
+into the appropriate per-host instruction file:
+
+| Host          | Instruction file |
+| ------------- | ---------------- |
+| Claude Code   | `CLAUDE.md`      |
+| Codex CLI     | `AGENTS.md`      |
+
+The rules section is bracketed by `<!-- pm-server:begin v=N -->` /
+`<!-- pm-server:end -->` markers and updated **in place** — user content
+outside the markers is never touched.
+
+`pm_update_rules` (and its CLI sibling `pm-server update-rules`) defaults
+to `--target auto`: it detects which host(s) are present on this machine
+and updates only those instruction files. Detection runs four signals
+(filesystem, marker, `CLAUDECODE` env, fallback) — see ADR-008 amendment
+A3 in [`docs/design.md` §6.4](docs/design.md).
+
+| Action                           | Tool                                                  |
+| -------------------------------- | ----------------------------------------------------- |
+| MCP (in-session)                 | `pm_update_rules(target="auto", dry_run=False)`       |
+| CLI (this project)               | `pm-server update-rules --target auto`                |
+| CLI (every registered project)   | `pm-server update-rules --target auto --all`          |
+| Legacy CLAUDE.md only            | `pm_update_claudemd` / `pm-server update-claudemd`    |
+
+`AGENTS.md` is backed up to `AGENTS.md.bak.<timestamp>` before each write.
+`CLAUDE.md` backup symmetry will land in v0.6.0 (PMSERV-058).
+
+See [`docs/design.md` §6](docs/design.md) and ADR-008 for the multi-host
+rules-injection design (claudemd → rules module rename, marker convention,
+dataclasses, atomic-write helpers).
+
 ---
 
 ## ⚠ Concurrent Session Caveat (Phase-9 In Progress)
@@ -185,7 +223,7 @@ This section will be removed once PMSERV-048 ships.
 
 ---
 
-## MCP Tools (30 tools)
+## MCP Tools (31 tools)
 
 ### Project Management
 
@@ -260,7 +298,8 @@ This section will be removed once PMSERV-048 ships.
 
 | Tool | Description |
 |---|---|
-| `pm_update_claudemd` | Update PM Server rules section in CLAUDE.md to latest version |
+| `pm_update_rules` | Update PM Server rules section in CLAUDE.md and/or AGENTS.md (multi-host, ADR-008). Default `target=auto` detects installed hosts |
+| `pm_update_claudemd` | Legacy alias of `pm_update_rules(target="claude-code")` — slated for deprecation in v0.6.0 |
 
 ---
 
@@ -294,7 +333,7 @@ YAML files are human-readable and hand-editable. Memory DB is the source of trut
 
 ## CLAUDE.md Integration
 
-Add this to your project's `CLAUDE.md` for automatic PM behavior (or run `pm-server update-claudemd`):
+Add this to your project's `CLAUDE.md` for automatic PM behavior (or run `pm-server update-rules`):
 
 ```markdown
 ## PM Server 自動行動ルール（必ず従うこと）
@@ -423,7 +462,10 @@ pm-server discover .       # Scan for projects with .pm/ directories
 pm-server status           # Show project status from terminal
 pm-server context-inject   # Print session context to stdout (for hook integration)
 pm-server migrate          # Migrate from pm-agent (rename transition)
-pm-server update-claudemd  # Update PM Server rules in CLAUDE.md
+pm-server update-rules     # Inject PM Server rules into CLAUDE.md and/or AGENTS.md (ADR-008).
+                           # --target {auto,all,claude-code,codex} (default: auto)
+                           # --dry-run / --all (apply to every registered project)
+pm-server update-claudemd  # Legacy alias of `update-rules --target=claude-code`. Deprecation in v0.6.0.
 pm-server install-hooks    # Manually install Claude Code hooks (auto-installed via pm_status)
 pm-server uninstall-hooks  # Remove PM Server hooks from Claude Code settings
 ```
@@ -442,7 +484,7 @@ Claude Code Session
   └── MCP Server (stdio)
         └── pm-server serve
               │
-              ├── server.py    → 30 MCP tools (FastMCP)
+              ├── server.py    → 31 MCP tools (FastMCP)
               ├── models.py    → Pydantic v2 data models (17 models, 15 enums)
               ├── storage.py   → YAML read/write
               ├── workflow.py  → Workflow engine (state machine)

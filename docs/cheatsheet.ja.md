@@ -32,7 +32,8 @@ Claude Code セッション:
 | `pm_list` | 登録済み全プロジェクト一覧 | _(なし)_ |
 | `pm_discover` | プロジェクトをスキャンして自動登録 | `scan_path="."` |
 | `pm_cleanup` | レジストリの健全性チェック、無効エントリ削除 | _(なし)_ |
-| `pm_update_claudemd` | CLAUDE.md のルールセクションを最新版に更新 | `project_path?` |
+| `pm_update_rules` | CLAUDE.md / AGENTS.md のルールを更新（multi-host、ADR-008） | `project_path?, target?, dry_run?` |
+| `pm_update_claudemd` | レガシー alias: `pm_update_rules(target="claude-code")` (v0.6.0 で deprecation) | `project_path?` |
 | `pm_dashboard` | HTML/テキスト ダッシュボード生成 | `format="html"` |
 
 ### タスク管理
@@ -355,7 +356,10 @@ pm-server uninstall            # MCP サーバー削除
 pm-server serve                # MCP サーバー起動（stdio）
 pm-server status               # プロジェクト状況表示
 pm-server discover [path]      # プロジェクト検出・登録
-pm-server update-claudemd      # CLAUDE.md ルール更新
+pm-server update-rules         # CLAUDE.md / AGENTS.md ルール更新（multi-host）
+pm-server update-rules -t auto --dry-run  # 検知された host をプレビュー
+pm-server update-rules --all   # 登録された全プロジェクトに適用
+pm-server update-claudemd      # レガシー: update-rules -t claude-code と等価
 pm-server hook post-tool-use   # PostToolUse フックハンドラ
 ```
 

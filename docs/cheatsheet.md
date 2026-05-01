@@ -32,7 +32,8 @@ Claude Code session:
 | `pm_list` | List all registered projects | _(none)_ |
 | `pm_discover` | Scan for projects and register them | `scan_path="."` |
 | `pm_cleanup` | Health-check registry, remove invalid entries | _(none)_ |
-| `pm_update_claudemd` | Update CLAUDE.md rules to latest version | `project_path?` |
+| `pm_update_rules` | Update CLAUDE.md and/or AGENTS.md rules (multi-host, ADR-008) | `project_path?, target?, dry_run?` |
+| `pm_update_claudemd` | Legacy alias: `pm_update_rules(target="claude-code")` (deprecation v0.6.0) | `project_path?` |
 | `pm_dashboard` | Generate HTML/text dashboard | `format="html"` |
 
 ### Tasks
@@ -354,7 +355,10 @@ pm-server uninstall            # Remove MCP server
 pm-server serve                # Start MCP server (stdio)
 pm-server status               # Show project status
 pm-server discover [path]      # Find and register projects
-pm-server update-claudemd      # Update CLAUDE.md rules
+pm-server update-rules         # Update CLAUDE.md / AGENTS.md rules (multi-host)
+pm-server update-rules -t auto --dry-run  # Preview detected hosts
+pm-server update-rules --all   # Apply to every registered project
+pm-server update-claudemd      # Legacy: equivalent to update-rules -t claude-code
 pm-server hook post-tool-use   # PostToolUse hook handler
 ```
 

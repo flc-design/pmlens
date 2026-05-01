@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.5.0] - 2026-05-XX
+
+### Added
+- **Multi-Host MCP Installer (ADR-007, PMSERV-039)**: `pm-server install` and `pm-server uninstall` accept `--target {auto,all,claude-code,codex}` and `--dry-run` flags. New per-host functions `install_claude_code()` and `install_codex()` (the latter uses `tomlkit` for comment-preserving edits of `~/.codex/config.toml` with timestamped backup). Default remains `--target=claude-code` for v0.4.x compatibility.
+- **Project Rules Injection — Multi-Host (ADR-008, PMSERV-044)**: `claudemd.py` renamed to `rules.py` (transparent re-export shim kept). New unified API `inject_pm_rules(project_root, target=...)` handles both `CLAUDE.md` and `AGENTS.md` with marker-bracketed in-place updates. New `pm_update_rules` MCP tool; default target is `auto` (filesystem + marker + `CLAUDECODE` env detection, with explicit fallback warning when no signal is found).
+- `pm-server update-rules` CLI subcommand with `--target / --dry-run / --all` flags.
+- **Multi-Session Disambiguation (ADR-009, PMSERV-049)**: `pm_recall` now returns `current_session_id` and, when several sessions overlap on the same project, a `last_session_candidates` array plus `ambiguity_detected: true` so each session can pick its own context. Memory rows gain an `updated_at` column.
+- AGENTS.md instruction-file generation with `<!-- pm-server:begin v=N -->` marker section, mirroring the existing CLAUDE.md treatment.
+- `tomlkit` dependency added (~150KB pure Python) for comment-preserving edits of `~/.codex/config.toml`.
+
+### Changed
+- MCP tool count: 30 → 31 (`pm_update_rules` added).
+- Test count: 413 → 578.
+- Dataclasses `InstallResult` / `InstallSummary` (installer.py) and `InjectResult` / `InjectSummary` (rules.py) standardise per-host outcome reporting with `target` / `target_file` / `host` / `status` / `message` / `backup_path` / `is_dry_run` fields.
+- `pm_update_claudemd` MCP tool now delegates to `pm_update_rules(target="claude-code")` while preserving its v0.4.x dict response shape verbatim (regression-guarded by `tests/test_server.py::test_pm_update_claudemd_returns_legacy_dict_shape`).
+- `pm-server update-claudemd` CLI command kept as a legacy alias of `update-rules --target=claude-code`; both slated for deprecation in v0.6.0 and removal in v1.0.0 (PMSERV-055).
+- `pm_status` response gains a `rules` key alongside the legacy `claudemd` key (additive, the latter is unchanged).
+- `installer.py` and `rules.py` now share `utils._timestamped_backup` and `utils._atomic_write_text` (mkstemp-based) helpers.
+
+### Fixed
+- **Latent atomic-write race in `installer.py`** (PMSERV-044 cross-check R8): the previous fixed `.tmp` suffix could collide between concurrent processes; replaced with `tempfile.mkstemp(dir=path.parent, suffix=".tmp")` via the new shared `utils._atomic_write_text`.
+- **Umask permission bug in `_atomic_write_text`** (PMSERV-044 smoke finding, commit `d347306`): mkstemp's default `0o600` mode was leaking into the destination file; the helper now normalises to `0o644 & ~umask` so user-readable files stay user-readable.
+
+### Documentation
+- README: new "Multi-Host Support (Claude Code + Codex CLI)" section covering both installer (`--target` flag) and rules injection (`pm_update_rules`); expanded CLI Commands; refreshed Architecture diagram showing `installer.py` multi-host paths; MCP Tools table updated for `pm_update_rules`.
+- `docs/design.md`: new chapter §5.2 (Multi-Host インストーラー戦略 / ADR-007) and chapter §6 (rules.py 設計 / ADR-008). §5.1 marked as legacy alias documentation pointing at PMSERV-055's deprecation timeline. §6–§10 renumbered to §7–§11 to make room for the new chapter.
+- `docs/cheatsheet.md` / `cheatsheet.ja.md`: Codex / `pm-server update-rules` usage examples added.
+- ADR-008 amendment 2026-04-30 records: target enum {auto, all, claude-code, codex} (A1/A2), 4-step host detection (A3), atomic-write helper unification (A6), UC8 (CLAUDE.md+marker → AGENTS.md auto-creation under Codex CLI) (A7).
+- KR-002 (Knowledge Record): Multi-Host Detection Strategy super-research synthesis (Domain Expert / Critical Analyst / Lateral Thinker).
+
+### Known caveats
+- `CLAUDE.md` backup symmetry pending: v0.5.0 only creates a timestamped backup for `AGENTS.md` (PMSERV-058 will symmetrise in v0.6.0).
+- `pm-server` MCP server processes started **before** v0.5.0 source edits may hit a stale module cache `ImportError` on `pm_status` (lazy import discovers the new `rules.py` against an old cached `utils.py`). Workaround: restart the MCP host. Defensive fingerprint logging tracked under PMSERV-060.
+- Multi-session disambiguation surfaces context but does not yet protect storage; YAML atomic write + file locking is on track for v0.5.x via PMSERV-048.
+
 ## [0.4.0] - 2026-04-17
 
 ### Added
