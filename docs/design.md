@@ -463,7 +463,13 @@ if __name__ == "__main__":
 
 ## 5. installer.py 設計
 
-### 5.1 `claude mcp add` 方式（実装済み）
+### 5.1 `claude mcp add` 方式（v0.4.x までの主 API、現在は legacy alias）
+
+> **v0.5.0 以降の primary API は §5.2 のマルチホスト戦略**。本節は
+> 後方互換 `install_mcp() / uninstall_mcp()` の歴史的記録。
+> これらは PMSERV-055 で **v0.6.0 で `DeprecationWarning`、v1.0.0 で削除** 予定。
+> 内部的には `install_claude_code() / uninstall_claude_code()` (§5.2.3) に
+> delegate するシンプルな wrapper として残置されている。
 
 設計書 v0.2.0 では `~/.claude/settings.json` を直接編集する方式だったが、
 実運用で Claude Code が MCP 設定を `~/.claude.json` で管理していることが判明。
@@ -550,6 +556,157 @@ def migrate_from_pm_agent():
     
     print("\n✓ Migration complete. Restart Claude Code to activate.")
 ```
+
+### 5.2 Multi-Host インストーラー戦略 (ADR-007)
+
+#### 5.2.1 背景
+
+2026-04-27 の運用検証で、ユーザーが Codex CLI から pm-server を呼び出そうとした際、
+`~/.codex/config.toml` に登録が無く起動できないことが判明 (実例: iterm-color プロジェクト、
+手動追記で復旧済)。Claude Code (`~/.claude/`) と Codex CLI (`~/.codex/`) は
+MCP 設定ストアが完全に分離しており、片方への登録はもう片方に伝播しない。
+
+ADR-007 では、(A) ドキュメント追記のみ / (B) 別バイナリ pm-server-codex 切り出し /
+(C) 既存 installer に target 引数追加 / (D) シェルスクリプトでの同時セットアップ
+を比較検討した結果、**案 (C)** を採用。
+
+#### 5.2.2 設計原則 (ADR-007 + ADR-008 共通)
+
+1. **detect-then-patch**: 設定ファイルの存在を検知してから処理。Codex 未インストール環境では skip (副作用ゼロ)
+2. **冪等性**: 既存セクションがあれば skip または command のみ更新。重複セクション化を防ぐ
+3. **タイムスタンプ付きバックアップ**: 編集前に `~/.codex/config.toml.bak.<YYYYMMDD-HHMMSS>` を生成
+4. **dry-run モード**: `--dry-run` で書き込まないプレビュー。実際の差分を表示
+5. **絶対パス埋め込み**: `Path(sys.executable).parent / "pm-server"` を resolve した値を書き込む。Codex のサンドボックス (PATH を絞る) でも確実に起動できる
+6. **対称的アンインストーラ**: `install` と同じ `target` 解決ロジックで逆操作
+
+#### 5.2.3 関数構成 (現行 primary API)
+
+```python
+"""Multi-host MCP installer (Claude Code + Codex CLI)."""
+
+# Claude Code 側 — claude mcp add subprocess 経由
+def install_claude_code(*, dry_run: bool = False) -> InstallResult: ...
+def uninstall_claude_code(*, dry_run: bool = False) -> InstallResult: ...
+
+# Codex 側 — ~/.codex/config.toml を tomlkit で部分編集
+def install_codex(*, dry_run: bool = False) -> InstallResult: ...
+def uninstall_codex(*, dry_run: bool = False) -> InstallResult: ...
+
+# オーケストレータ (target 解決 + 各 host 呼び出し + 失敗の構造化)
+def install(target: str = "claude-code", *, dry_run: bool = False) -> InstallSummary: ...
+def uninstall(target: str = "claude-code", *, dry_run: bool = False) -> InstallSummary: ...
+```
+
+`install` / `uninstall` の **デフォルトは `target="claude-code"`** であり、`auto` ではない。
+これは v0.4.x からの後方互換のための保守的選択 — 既存ユーザーが `pm-server install` を打ったとき、
+知らずに Codex 設定が編集されるのを防ぐ。multi-host 化したい場合は明示的に
+`--target auto` / `--target all` / `--target codex` を渡す opt-in モデル。
+
+#### 5.2.4 target 値の意味論
+
+| target          | 検知ロジック                                    | 効果                                                    |
+| --------------- | ---------------------------------------------- | ------------------------------------------------------ |
+| `claude-code`   | 単一 host (CLI default for install/uninstall)   | Codex 側を一切 open しない                              |
+| `codex`         | 単一 host                                       | Claude Code 側を一切 open しない                        |
+| `auto`          | filesystem (`~/.codex/config.toml` 存在) で判定 | 検知された host のみ register                           |
+| `all`           | 強制全 host                                     | Codex config 不在でも作成 (ホスト追加時に明示的に opt-in) |
+
+関連コマンド `pm-server update-rules` (ADR-008、§5.3 参照) は **デフォルト `target=auto`** であり、
+新規 API として最初から multi-host 検知を採用している。この非対称性は API design の
+「新 API は理想的に、既存 API は保守的に」原則の実例。
+
+#### 5.2.5 tomlkit を採用した理由
+
+Codex CLI の `~/.codex/config.toml` にはユーザー手書き設定 (model 選択、tool 設定、
+profile 等) が含まれる可能性が高く、編集時にコメント・順序・空行を保持することが必須要件。
+
+| ライブラリ           | 機能                | コメント保持 | 備考                                  |
+| -------------------- | ------------------- | ------------ | ------------------------------------- |
+| `tomllib` (標準)     | read-only           | —            | Python 3.11+ 同梱、書き込み不可       |
+| `tomli_w`            | write-only          | × (破壊)     | コメント・順序を再生成、整形が変わる  |
+| **`tomlkit`** (採用) | round-trip 部分編集 | ✓ (保持)     | ~150KB pure python、新規依存に追加    |
+
+#### 5.2.6 InstallResult / InstallSummary
+
+```python
+from dataclasses import dataclass, field
+
+@dataclass(frozen=True)
+class InstallResult:
+    """Outcome of (un)registering pm-server in a single host."""
+
+    target: str                        # "claude-code" or "codex"
+    status: str                        # "installed" | "uninstalled" | "already_registered" | "skipped" | "failed"
+    message: str                       # Human-readable detail (back-compat substrings preserved)
+    backup_path: str | None = None     # Set only when host edits a file (Codex), None for CLI-driven hosts
+    is_dry_run: bool = False           # True → status describes what *would* have happened
+
+
+@dataclass(frozen=True)
+class InstallSummary:
+    """Aggregated results across hosts processed by install / uninstall."""
+
+    results: list[InstallResult] = field(default_factory=list)
+
+    @property
+    def overall_status(self) -> str:
+        """Priority: failed > installed > uninstalled > already_registered > skipped."""
+        ...
+
+    @property
+    def message(self) -> str:
+        """One ``[target] message`` line per result, joined by newlines."""
+        ...
+```
+
+`overall_status` を property にしているのは **per-host 結果から派生する値** のため。
+固定フィールドだと per-host 状態と矛盾するリスクがあり、状態の単一ソースを `results` に集約する設計。
+
+#### 5.2.7 UI presentation の単一ソース
+
+CLI 側 (`pm-server install`) は `_print_install_summary(summary)` ヘルパで出力を構築する。
+このヘルパが **`[dry-run]` タグ表示と prefix (`✓` / `✗`) 判定の単一ソース** であり、
+`InstallResult.message` には含めない。これにより:
+
+- Python API 利用者は構造化された `InstallResult` を直接処理できる
+- CLI 利用者は人間可読な 1 行/host のフォーマットを受け取る
+- 将来 dashboard / HTML 出力を追加しても data layer に変更不要
+
+```python
+# __main__.py:_print_install_summary
+prefix = "✗" if r.status == "failed" else "✓"
+dry_tag = "[dry-run] " if r.is_dry_run else ""
+click.echo(f"{prefix} {dry_tag}{r.target}: {r.message}")
+```
+
+`failed` 以外 (`installed`, `uninstalled`, `already_registered`, `skipped`) はすべて
+**成功扱い** (`✓`)。これは「pm-server がやるべきことをやった or やる必要がなかった」を
+肯定的に表示する設計判断。
+
+#### 5.2.8 後方互換と廃止スケジュール
+
+`install_mcp() / uninstall_mcp()` (§5.1) は v0.4.x 互換 alias として残置:
+
+| Version  | Action                                                      |
+| -------- | ----------------------------------------------------------- |
+| v0.5.0   | alias 残置、新 API (`install` / `uninstall`) が primary    |
+| v0.6.0   | `DeprecationWarning` 発火開始 (PMSERV-055)                  |
+| v1.0.0   | alias 削除                                                  |
+
+**ADR-007 amendment 候補**: CLAUDE.md backup を AGENTS.md と対称化 (v0.6.0、PMSERV-058)。
+v0.5.0 では Claude Code 側は `claude mcp add` 経由のため backup_path=None、
+Codex 側のみ backup を作成する非対称が一時的に発生する。
+
+#### 5.2.9 既知の制約
+
+- **絶対パス埋め込み**: pyenv 等で Python 環境を切り替えると `which pm-server` の
+  resolve 先が変わるため、再 install が必要
+- **2 ファイル同期**: `~/.claude/settings.json` と `~/.codex/config.toml` の片方だけ
+  ユーザーが手動編集した場合の差分検知ロジックは未実装 (将来課題)
+- **`pm-server migrate` の Codex 側**: pm-agent → pm-server 移行ヘルパは Claude Code
+  側のみ対象 (旧 pm-agent は Codex CLI に登録されることがそもそも無かったため scope 外)
+- **`force_recreate` 等の高度なフラグは v0.5.0 では公開せず**、冪等性で十分なケースを
+  優先。必要に応じて follow-up タスクで段階的に公開
 
 ---
 

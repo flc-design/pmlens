@@ -100,6 +100,70 @@ pm-server automatically detects project info from `package.json`, `pyproject.tom
 
 ---
 
+## Multi-Host Support (Claude Code + Codex CLI)
+
+`pm-server` v0.5.0 supports two MCP **hosts** — Claude Code (`~/.claude/`) and
+Codex CLI (`~/.codex/config.toml`) — as registration targets. The two hosts
+keep MCP configuration in completely separate stores, so a single install
+must reach both when needed.
+
+### `--target` flag
+
+`pm-server install` and `pm-server uninstall` accept a `--target` (alias `-t`)
+flag. The default is **conservative on purpose**: existing scripts and
+documentation that say `pm-server install` continue to register only
+Claude Code, exactly as in v0.4.x.
+
+| `--target`      | Behavior                                                                    |
+| --------------- | --------------------------------------------------------------------------- |
+| `claude-code`   | (default) Register in Claude Code only. `~/.codex/config.toml` is never opened. |
+| `codex`         | Register in Codex CLI only. `~/.claude/` is never touched.                   |
+| `auto`          | Detect via filesystem (`~/.codex/config.toml` exists?) — register in detected hosts only. |
+| `all`           | Force every known host. Creates `~/.codex/config.toml` if absent.            |
+
+The companion command `pm-server update-rules` (introduced in v0.5.0 alongside
+this feature) defaults to `--target auto` because it is a brand-new command
+with no v0.4.x baseline to preserve.
+
+### Safety properties
+
+- **Idempotent**: running `install` twice is a no-op on the second call.
+- **Backed up**: `~/.codex/config.toml` is copied to a timestamped backup
+  before each write. (Claude Code uses `claude mcp add`, which has its own
+  internal handling.)
+- **Comment-preserving**: edits to `config.toml` go through `tomlkit`, so
+  user-written comments, key order, and blank lines survive verbatim.
+- **Dry-run**: `--dry-run` prints the planned actions per host without
+  writing anything. The output prefixes each line with `[dry-run]`.
+- **Per-host isolation**: a failure in one host (e.g. Codex CLI not
+  installed when `--target=all`) does not abort the other host; the
+  outcome is reported per host with status `installed` / `already_registered`
+  / `skipped` / `failed`.
+
+### Quick examples
+
+```bash
+# Default (back-compat) — Claude Code only
+pm-server install
+
+# Add pm-server to whichever host(s) are detected on this machine
+pm-server install --target auto
+
+# Force registration in both, creating ~/.codex/config.toml if needed
+pm-server install --target all
+
+# Preview what would happen, don't touch any files
+pm-server install --target auto --dry-run
+
+# Symmetric removal (same --target semantics)
+pm-server uninstall --target auto
+```
+
+See [`docs/design.md` §5.2](docs/design.md) and ADR-007 for the detailed
+rationale (detect-then-patch, backup, dry-run, absolute-path embedding).
+
+---
+
 ## ⚠ Concurrent Session Caveat (Phase-9 In Progress)
 
 `pm-server` v0.5.x introduces **multi-session disambiguation** for `pm_recall`
@@ -350,8 +414,10 @@ pm-server automatically installs Claude Code hooks at first session start (`pm_s
 ## CLI Commands
 
 ```bash
-pm-server install          # Register MCP server in Claude Code
-pm-server uninstall        # Unregister MCP server
+pm-server install          # Register MCP server (default: Claude Code only — back-compat).
+                           # Pass --target {auto,all,claude-code,codex} for multi-host.
+                           # Pass --dry-run to preview without writing. See "Multi-Host Support" below.
+pm-server uninstall        # Symmetric to install (same --target / --dry-run semantics).
 pm-server serve            # Start MCP server (called by Claude Code automatically)
 pm-server discover .       # Scan for projects with .pm/ directories
 pm-server status           # Show project status from terminal
@@ -387,11 +453,15 @@ Claude Code Session
               ├── velocity.py  → Velocity calculation & risk detection
               ├── dashboard.py → HTML/text dashboard (Jinja2) + workflow progress + knowledge map
               ├── discovery.py → Auto-detect project info
-              └── installer.py → claude mcp add wrapper
-                    │
-                    ├── project-A/.pm/ (YAML + workflows + knowledge + memory.db)
-                    ├── project-B/.pm/ (YAML + workflows + knowledge + memory.db)
-                    └── ~/.pm/registry.yaml + memory.db
+              └── installer.py → Multi-host MCP registration (ADR-007)
+                                   ├─ install_claude_code() → claude mcp add (subprocess)
+                                   ├─ install_codex()       → ~/.codex/config.toml (tomlkit)
+                                   └─ install(target=...)   → orchestrator + InstallSummary
+
+Data layer (operated on through pm-server serve):
+  ├── project-A/.pm/ (YAML + workflows + knowledge + memory.db)
+  ├── project-B/.pm/ (YAML + workflows + knowledge + memory.db)
+  └── ~/.pm/registry.yaml + memory.db
 ```
 
 ---
