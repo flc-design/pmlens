@@ -37,6 +37,11 @@ Thumbs.db
 # Claude Code (local dev config)
 .claude/
 CLAUDE.md
+CLAUDE.md.bak.*
+
+# Codex CLI (local dev config — symmetric with Claude Code, ADR-008)
+AGENTS.md
+AGENTS.md.bak.*
 
 # PM Server data (local project management)
 .pm/
