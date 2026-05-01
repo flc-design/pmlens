@@ -1,6 +1,6 @@
 # PM Server チートシート
 
-> Claude Code 用プロジェクト管理 MCP Server — **30 ツール**
+> Claude Code 用プロジェクト管理 MCP Server — **31 ツール**
 > Version 0.3.3+ | Python 3.11+ | PyPI: `pm-server`
 
 ---

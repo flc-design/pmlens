@@ -28,7 +28,10 @@
 
 ## 特徴
 
-- **23の MCP ツール** — タスク CRUD、子イシュー、ステータス、ブロッカー、ベロシティ、ダッシュボード、ADR、セッションメモリ等
+- **31 の MCP ツール** — タスク CRUD、子イシュー、ステータス、ブロッカー、ベロシティ、ダッシュボード、ADR、セッションメモリ、ワークフロー、ナレッジレコード、マルチホストルール注入 等
+- **ワークフローエンジン** — テンプレートベースの開発ワークフロー（ループ、ユーザーゲート、チェイン対応：Discovery → Development）
+- **ナレッジレコード** — カジュアルなメモリとフォーマルな ADR の中間に位置する構造化された知見記録（research、tradeoff、spec 等）
+- **Super Research スキル** — 3 並列エージェント（Domain Expert、Critical Analyst、Lateral Thinker）+ Depth Check（6 次元）+ Fact Check + Cross-Check
 - **セッションメモリ** — SQLite + FTS5 全文検索。記憶はセッションを跨いで永続化し、タスク・決定に紐付け可能
 - **横断検索** — グローバルインデックスを使って全プロジェクトの記憶を横断検索
 - **自然言語で操作** — 「進捗は？」「次にやること」と言うだけ
@@ -61,13 +64,16 @@ pip install --upgrade pm-server
 アップグレード後、各プロジェクトの CLAUDE.md 自動行動ルールは自動的に更新されます:
 
 1. 次のセッション開始時に `pm_status` がテンプレートバージョンの不一致を検出
-2. Claude Code が `pm_update_claudemd` を実行してルールセクションを更新
+2. Claude Code が `pm_update_rules` を実行してルールセクションを更新（CLAUDE.md / AGENTS.md 両対応）
 3. 新機能（子イシューワークフロー等）が即座に有効化
 
 手動で更新することもできます:
 ```
-> CLAUDE.md を更新して    # または: pm_update_claudemd
+> CLAUDE.md を更新して    # または: pm_update_rules
 ```
+
+> レガシーの `pm_update_claudemd` ツールは後方互換 alias として引き続き利用可能（CLAUDE.md 限定）。
+> v0.6.0 で `DeprecationWarning`、v1.0.0 で削除予定（PMSERV-055）。
 
 ### プロジェクト初期化
 
@@ -97,7 +103,124 @@ pip install --upgrade pm-server
 
 ---
 
-## MCP ツール一覧（23ツール）
+## マルチホスト対応 (Claude Code + Codex CLI)
+
+`pm-server` v0.5.0 は **Claude Code** (`~/.claude/`) と **Codex CLI**
+(`~/.codex/config.toml`) の 2 つの MCP **ホスト** に登録ターゲットとして対応します。
+両ホストは MCP 設定ストアが完全に分離されているため、必要なら 1 度のインストールで
+両方に届かせる必要があります。
+
+### `--target` フラグ
+
+`pm-server install` と `pm-server uninstall` は `--target` (alias `-t`) フラグを
+受け付けます。デフォルトは **意図的に保守的**: `pm-server install` のままの既存
+スクリプトやドキュメントは v0.4.x と完全に同じ「Claude Code のみ登録」の挙動を
+維持します。
+
+| `--target`      | 挙動                                                                          |
+| --------------- | ----------------------------------------------------------------------------- |
+| `claude-code`   | (default) Claude Code のみ登録。`~/.codex/config.toml` には一切触らない。     |
+| `codex`         | Codex CLI のみ登録。`~/.claude/` には一切触らない。                           |
+| `auto`          | filesystem 検知（`~/.codex/config.toml` の有無）— 検知された host のみ登録。  |
+| `all`           | 全ての既知 host を強制登録。`~/.codex/config.toml` 不在でも作成。             |
+
+姉妹コマンド `pm-server update-rules` (v0.5.0 で本機能と同時に追加) は
+`--target auto` がデフォルトです。理由は v0.4.x の baseline がない新規コマンドで、
+保守的に振る舞う必要がないため。
+
+### 安全性
+
+- **冪等性**: `install` を 2 回実行しても 2 回目は no-op。
+- **バックアップ**: 各書き込み前に `~/.codex/config.toml` をタイムスタンプ付き
+  バックアップにコピー。Claude Code 側は `claude mcp add` 経由のため、
+  そちらの内部処理に従う。
+- **コメント保持**: `config.toml` への編集は `tomlkit` を経由するため、
+  ユーザー手書きのコメント、キー順序、空行がそのまま保持される。
+- **ドライラン**: `--dry-run` は host 毎の予定アクションを表示し、書き込みは行わない。
+  各行は `[dry-run]` プレフィックス付き。
+- **ホスト独立性**: 1 つの host での失敗（例: `--target=all` 指定時に Codex CLI が
+  未インストール）は他の host を中断させない。結果は host 毎に
+  `installed` / `already_registered` / `skipped` / `failed` で報告される。
+
+### クイック例
+
+```bash
+# デフォルト（後方互換）— Claude Code のみ
+pm-server install
+
+# このマシンで検知された host にだけ pm-server を追加
+pm-server install --target auto
+
+# 両 host に強制登録（必要なら ~/.codex/config.toml を作成）
+pm-server install --target all
+
+# プレビューのみ（ファイル書き込みなし）
+pm-server install --target auto --dry-run
+
+# 対称的なアンインストール（同じ --target セマンティクス）
+pm-server uninstall --target auto
+```
+
+詳細は [`docs/design.md` §5.2](docs/design.md) と ADR-007 を参照
+（detect-then-patch、backup、dry-run、絶対パス埋め込みの設計根拠）。
+
+### プロジェクトルール注入 (CLAUDE.md / AGENTS.md)
+
+`pm_init` と `pm_update_rules` は PM Server の自動行動ルールを host 毎の
+適切な指示ファイルに同期します:
+
+| Host          | 指示ファイル     |
+| ------------- | ---------------- |
+| Claude Code   | `CLAUDE.md`      |
+| Codex CLI     | `AGENTS.md`      |
+
+ルールセクションは `<!-- pm-server:begin v=N -->` / `<!-- pm-server:end -->`
+マーカーで囲まれ、**マーカー内のみ in-place で更新** されます — マーカー外の
+ユーザー記述には一切触れません。
+
+`pm_update_rules` (および CLI 版 `pm-server update-rules`) のデフォルトは
+`--target auto`: このマシンに存在する host を検知し、該当する指示ファイルのみ
+更新します。検知は 4 種の signal（filesystem、marker、`CLAUDECODE` env、fallback）
+で行われます — 詳細は ADR-008 amendment A3 と
+[`docs/design.md` §6.4](docs/design.md) を参照。
+
+| アクション                       | ツール                                                |
+| -------------------------------- | ----------------------------------------------------- |
+| MCP（セッション中）              | `pm_update_rules(target="auto", dry_run=False)`       |
+| CLI（このプロジェクトに適用）    | `pm-server update-rules --target auto`                |
+| CLI（登録された全プロジェクト）  | `pm-server update-rules --target auto --all`          |
+| レガシー CLAUDE.md 限定          | `pm_update_claudemd` / `pm-server update-claudemd`    |
+
+`AGENTS.md` は各書き込み前に `AGENTS.md.bak.<timestamp>` にバックアップされます。
+`CLAUDE.md` の対称的バックアップは v0.6.0 で対応予定（PMSERV-058）。
+
+詳細は [`docs/design.md` §6](docs/design.md) と ADR-008 を参照（claudemd → rules
+モジュール rename、マーカー規約、データクラス、アトミック書き込みヘルパー）。
+
+---
+
+## ⚠ 並行セッション注意 (Phase-9 進行中)
+
+`pm-server` v0.5.x は `pm_recall` に **多セッション disambiguation** を導入しました
+（PMSERV-049、ADR-009）: 複数の Claude Code セッションが同一プロジェクトで並行
+動作する場合、`pm_recall` は `current_session_id` と、曖昧な場合は
+`last_session_candidates` 配列および `ambiguity_detected: true` フラグを返すため、
+各セッションが自身に紐付くコンテキストを選択できます。
+
+**PMSERV-048**（YAML アトミック書き込み + ファイルロック）が完了するまでは、
+基底のストレージレイヤーは並行書き込みに対して安全ではありません。推奨事項:
+
+- 並行セッションからの同時タスク更新は避ける（lost-update リスク）。
+- `pm_recall` が `ambiguity_detected: true` を返した場合は、
+  `last_session_candidates` を確認し `is_current_session: true` のエントリを採用。
+- メモリレイヤー（SQLite）は PMSERV-047（WAL）が着地するまで rollback-journal
+  モードで動作。
+
+このセクションは PMSERV-048 着地時に削除されます。
+
+---
+
+## MCP ツール一覧（31ツール）
 
 ### プロジェクト管理
 
@@ -151,11 +274,29 @@ pip install --upgrade pm-server
 | `pm_memory_stats` | メモリ DB の統計情報（件数・種別・DB サイズ） |
 | `pm_memory_cleanup` | 古い記憶のクリーンアップ（dry-run 対応） |
 
+### ナレッジレコード
+
+| ツール | 説明 |
+|---|---|
+| `pm_record` | 構造化された知識を記録（research / market / spike / tradeoff / spec / api_design 等） |
+| `pm_knowledge` | 知識レコードの検索・フィルタ・更新・サマリ |
+
+### ワークフローエンジン
+
+| ツール | 説明 |
+|---|---|
+| `pm_workflow_start` | テンプレートからワークフローを開始（development / discovery / super-research） |
+| `pm_workflow_status` | 現在のステップ、進捗、次に取るべきアクションのガイダンスを表示 |
+| `pm_workflow_advance` | 次のステップへ進める（ループ・スキップ対応、artifacts と notes を引き継げる） |
+| `pm_workflow_list` | ステータスフィルタ付きで全ワークフローインスタンスを一覧 |
+| `pm_workflow_templates` | 利用可能なテンプレート一覧（組み込み + カスタム） |
+
 ### メンテナンス
 
 | ツール | 説明 |
 |---|---|
-| `pm_update_claudemd` | CLAUDE.md の PM Server ルールセクションを最新版に更新 |
+| `pm_update_rules` | CLAUDE.md / AGENTS.md の PM Server ルールセクションを最新版に更新（マルチホスト対応、ADR-008）。デフォルト `target=auto` でインストール済 host を自動検出 |
+| `pm_update_claudemd` | レガシー alias of `pm_update_rules(target="claude-code")` — v0.6.0 で deprecation 予定 |
 
 ---
 
@@ -184,9 +325,9 @@ YAML ファイルは人間が読め、手動編集しても壊れません。メ
 
 ---
 
-## CLAUDE.md 統合
+## CLAUDE.md / AGENTS.md 統合
 
-プロジェクトの `CLAUDE.md` に以下を追加すると、セッション中の PM 操作が自動化されます（`pm-server update-claudemd` で自動追加も可能）:
+プロジェクトの `CLAUDE.md` に以下を追加すると、セッション中の PM 操作が自動化されます（`pm-server update-rules` で自動追加も可能）:
 
 ```markdown
 ## PM Server 自動行動ルール（必ず従うこと）
@@ -306,14 +447,19 @@ pm-server は初回セッション開始時（`pm_status`）に Claude Code の 
 ## CLI コマンド
 
 ```bash
-pm-server install          # Claude Code に MCP サーバーを登録
-pm-server uninstall        # MCP サーバー登録を解除
+pm-server install          # MCP サーバー登録 (default: Claude Code のみ — 後方互換)。
+                           # マルチホスト対応で --target {auto,all,claude-code,codex} を指定可能。
+                           # --dry-run で書き込みなしの preview。詳細は「マルチホスト対応」セクション参照。
+pm-server uninstall        # install と対称（同じ --target / --dry-run セマンティクス）
 pm-server serve            # MCP Server 起動（Claude Code が自動で呼び出す）
 pm-server discover .       # .pm/ を持つプロジェクトをスキャン
 pm-server status           # ターミナルからステータス確認
 pm-server context-inject   # セッションコンテキストを stdout に出力（hook 連携用）
 pm-server migrate          # pm-agent からの移行（MCP 登録の切り替え）
-pm-server update-claudemd  # CLAUDE.md の PM Server ルールを更新
+pm-server update-rules     # PM Server ルールを CLAUDE.md / AGENTS.md に注入（ADR-008）。
+                           # --target {auto,all,claude-code,codex} (default: auto)
+                           # --dry-run / --all (登録された全プロジェクトに適用)
+pm-server update-claudemd  # レガシー alias of `update-rules --target=claude-code`。v0.6.0 で deprecation 予定
 pm-server install-hooks    # Claude Code の hook を手動インストール（通常は pm_status で自動）
 pm-server uninstall-hooks  # PM Server の hook を削除
 ```
@@ -327,25 +473,31 @@ Claude Code Session
   │
   ├── CLAUDE.md 自動行動ルール
   ├── PostToolUse hooks（自動インストール）
+  ├── Skills（super-research 等）
   │
   └── MCP Server (stdio)
         └── pm-server serve
               │
-              ├── server.py    → 23 MCP ツール (FastMCP)
-              ├── models.py    → Pydantic v2 データモデル
+              ├── server.py    → 31 MCP ツール (FastMCP)
+              ├── models.py    → Pydantic v2 データモデル (17 models, 15 enums)
               ├── storage.py   → YAML 読み書き
+              ├── workflow.py  → ワークフローエンジン (state machine)
               ├── memory.py    → SQLite メモリストア + FTS5 検索
               ├── recall.py    → セッションコンテキスト構築（トークン予算制御）
               ├── hooks.py     → Claude Code hook ハンドラ + インストーラー
               ├── context.py   → CLI コンテキスト注入
               ├── velocity.py  → ベロシティ計算・リスク検知
-              ├── dashboard.py → HTML/テキスト ダッシュボード (Jinja2)
+              ├── dashboard.py → HTML/テキスト ダッシュボード (Jinja2) + ワークフロー進捗 + ナレッジマップ
               ├── discovery.py → プロジェクト情報自動推定
-              └── installer.py → claude mcp add ラッパー
-                    │
-                    ├── project-A/.pm/ (YAML + memory.db)
-                    ├── project-B/.pm/ (YAML + memory.db)
-                    └── ~/.pm/registry.yaml + memory.db
+              └── installer.py → マルチホスト MCP 登録 (ADR-007)
+                                   ├─ install_claude_code() → claude mcp add (subprocess)
+                                   ├─ install_codex()       → ~/.codex/config.toml (tomlkit)
+                                   └─ install(target=...)   → orchestrator + InstallSummary
+
+データレイヤー (pm-server serve 経由でアクセス):
+  ├── project-A/.pm/ (YAML + workflows + knowledge + memory.db)
+  ├── project-B/.pm/ (YAML + workflows + knowledge + memory.db)
+  └── ~/.pm/registry.yaml + memory.db
 ```
 
 ---
@@ -392,7 +544,7 @@ pm-server migrate       # MCP 登録を pm-agent → pm-server に切り替え
 git clone https://github.com/flc-design/pm-server.git
 cd pm-server
 pip install -e ".[dev]"
-pytest                  # 260+ テスト
+pytest                  # 400+ テスト
 ruff check src/         # リント
 ruff format src/        # フォーマット
 ```
