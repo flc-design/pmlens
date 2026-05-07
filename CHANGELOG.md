@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.5.1] - 2026-05-07
+
+### Security
+- **Dependency floor hardening (PMSERV-064)**: tightened lower bounds on runtime dependencies so `pip install pm-server` cannot resolve to versions with known issues. Source code is unaffected; only the dependency declaration in `pyproject.toml` changed.
+  - `jinja2 >=3.0` → `>=3.1.3` — defensive against CVE-2024-22195 (sandbox escape via `xmlattr` filter, fixed in 3.1.3). pm-server only renders local-trust dashboard HTML (`dashboard.py`), so practical exposure is low, but the floor closes the supply-chain path.
+  - `pydantic >=2.0` → `>=2.5` — skips the 2.4.x line that had ReDoS-class regex reports.
+  - `pyyaml >=6.0` → `>=6.0.1` — avoids 6.0.0 parsing regression.
+  - `click >=8.0` → `>=8.1`.
+  - `fastmcp >=2.0` → `>=2.0,<4.0` — defensive upper bound against a future 4.x with potentially breaking changes (v0.5.0 was already tested against fastmcp 3.x in dev).
+  - `tomlkit` floor unchanged at `>=0.13`.
+
+### GitHub repository hardening (operational, not packaged)
+- Enabled Dependabot vulnerability alerts + automated security fixes, secret scanning + push protection, and CodeQL default setup (Python) on the GitHub repository.
+- Added minimal branch protection on `main`: force-push and deletions disallowed, conversation resolution required (admin bypass kept enabled to avoid single-maintainer lockout).
+
 ## [0.5.0] - 2026-05-07
 
 ### Added
