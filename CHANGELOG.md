@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.5.0] - 2026-05-XX
+## [0.5.0] - 2026-05-07
 
 ### Added
 - **Multi-Host MCP Installer (ADR-007, PMSERV-039)**: `pm-server install` and `pm-server uninstall` accept `--target {auto,all,claude-code,codex}` and `--dry-run` flags. New per-host functions `install_claude_code()` and `install_codex()` (the latter uses `tomlkit` for comment-preserving edits of `~/.codex/config.toml` with timestamped backup). Default remains `--target=claude-code` for v0.4.x compatibility.
@@ -22,6 +22,7 @@
 ### Fixed
 - **Latent atomic-write race in `installer.py`** (PMSERV-044 cross-check R8): the previous fixed `.tmp` suffix could collide between concurrent processes; replaced with `tempfile.mkstemp(dir=path.parent, suffix=".tmp")` via the new shared `utils._atomic_write_text`.
 - **Umask permission bug in `_atomic_write_text`** (PMSERV-044 smoke finding, commit `d347306`): mkstemp's default `0o600` mode was leaking into the destination file; the helper now normalises to `0o644 & ~umask` so user-readable files stay user-readable.
+- **`pm_server.__version__` desync with package metadata** (PMSERV-042 release-time finding): hardcoded `__version__ = "0.4.0"` in `src/pm_server/__init__.py` was not bumped alongside `pyproject.toml`, causing `pm-server --version` to misreport from a 0.5.0 wheel even though the wheel METADATA was correct. Fixed by syncing to `"0.5.0"`; a structural improvement (derive `__version__` from `importlib.metadata.version()` so `pyproject.toml` becomes the single source of truth) is tracked as a follow-up.
 
 ### Documentation
 - README: new "Multi-Host Support (Claude Code + Codex CLI)" section covering both installer (`--target` flag) and rules injection (`pm_update_rules`); expanded CLI Commands; refreshed Architecture diagram showing `installer.py` multi-host paths; MCP Tools table updated for `pm_update_rules`.
