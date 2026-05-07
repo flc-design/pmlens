@@ -5,7 +5,7 @@
 
 **[日本語版 README はこちら](README.ja.md)**
 
-**Project management MCP Server for Claude Code.**
+**PM Server for Claude Code** — a project management MCP Server.
 
 Track tasks, visualize progress, record decisions — all through natural language in your Claude Code session.
 
@@ -565,6 +565,23 @@ ruff format src/        # Format
 4. **Human-readable** — safe to hand-edit, won't break
 5. **AI-native** — formats that Claude Code can naturally read and write
 6. **Non-invasive** — only adds `.pm/`, never modifies your project
+
+---
+
+## Trademark notice
+
+"PM Server" is a generic project-management server designation, used here as the
+display name of this Python package distributed on PyPI as `pm-server`.
+
+This project is **not affiliated with, endorsed by, or sponsored by**:
+
+- **Microsoft Project Server** / Project Online / Project for the web (Microsoft Corporation)
+- **Percona Monitoring and Management** (PMM Server) (Percona LLC)
+- **Apple Carbon Print Manager** (`PMServer` opaque type in the deprecated ApplicationServices framework) (Apple Inc.)
+- **Informatica PowerCenter** (`pmserver.exe` Integration Service daemon) (Informatica LLC)
+- Any other product, vendor, or service that may use similar terminology.
+
+All trademarks are the property of their respective owners.
 
 ---
 
