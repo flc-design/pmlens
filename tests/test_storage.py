@@ -18,6 +18,7 @@ from pm_server.models import (
     TaskStatus,
 )
 from pm_server.storage import (
+    _yaml_transaction,
     add_daily_log,
     add_decision,
     add_milestone,
@@ -229,3 +230,83 @@ class TestBrokenYaml:
         broken.write_text("tasks:\n  - id: [bad", encoding="utf-8")
         with pytest.raises(PmServerError, match="Failed to parse"):
             load_tasks(tmp_pm_path)
+
+
+class TestYamlTransactionLocking:
+    """Unit tests for the _yaml_transaction context manager (PMSERV-048)."""
+
+    def test_lock_dir_created_lazily(self, tmp_pm_path):
+        assert not (tmp_pm_path / ".locks").exists()
+        with _yaml_transaction(tmp_pm_path, "tasks.yaml"):
+            # Lock dir must exist while the lock is held
+            assert (tmp_pm_path / ".locks").is_dir()
+            assert (tmp_pm_path / ".locks" / "tasks.lock").exists()
+        # Dir persists after release; the lock file may be removed by filelock
+        assert (tmp_pm_path / ".locks").is_dir()
+
+    def test_lock_dir_seeds_gitignore(self, tmp_pm_path):
+        with _yaml_transaction(tmp_pm_path, "decisions.yaml"):
+            pass
+        gitignore = tmp_pm_path / ".locks" / ".gitignore"
+        assert gitignore.exists()
+        content = gitignore.read_text(encoding="utf-8")
+        assert "*" in content
+        assert "!.gitignore" in content
+
+    def test_lock_label_strips_yaml_suffix(self, tmp_pm_path):
+        # Verify both label forms acquire on the same lock path by checking
+        # the lock file is present inside the with-block (filelock may delete
+        # it on release in newer versions, so we observe during the hold).
+        with _yaml_transaction(tmp_pm_path, "tasks.yaml"):
+            assert (tmp_pm_path / ".locks" / "tasks.lock").exists()
+            # No "tasks.yaml.lock" — suffix must have been stripped
+            assert not (tmp_pm_path / ".locks" / "tasks.yaml.lock").exists()
+        with _yaml_transaction(tmp_pm_path, "tasks"):
+            # Same path for the bare label
+            assert (tmp_pm_path / ".locks" / "tasks.lock").exists()
+
+    def test_releases_on_exception(self, tmp_pm_path):
+        with pytest.raises(RuntimeError, match="boom"):
+            with _yaml_transaction(tmp_pm_path, "tasks.yaml"):
+                raise RuntimeError("boom")
+        # Lock must be released — second acquire must succeed quickly
+        with _yaml_transaction(tmp_pm_path, "tasks.yaml", timeout=1.0):
+            pass
+
+    def test_timeout_raises_pm_server_error(self, tmp_pm_path):
+        from filelock import FileLock
+
+        # Hold the lock externally, then try to acquire via _yaml_transaction
+        external = FileLock(str(tmp_pm_path / ".locks" / "tasks.lock"))
+        (tmp_pm_path / ".locks").mkdir(exist_ok=True)
+        external.acquire(timeout=1)
+        try:
+            with pytest.raises(PmServerError, match="timeout after 0.2s"):
+                with _yaml_transaction(tmp_pm_path, "tasks.yaml", timeout=0.2):
+                    pass
+        finally:
+            external.release()
+
+    def test_atomic_write_no_partial_on_failure(self, tmp_pm_path, monkeypatch):
+        """If atomic write fails mid-way, the original yaml stays intact."""
+        # Seed initial state
+        add_task(tmp_pm_path, Task(id="TST-001", title="orig", phase="phase-1"))
+        original_path = tmp_pm_path / "tasks.yaml"
+        original_bytes = original_path.read_bytes()
+
+        # Force os.replace to fail (simulating crash during atomic rename)
+        from pm_server import utils as _utils
+
+        original_replace = _utils.os.replace
+
+        def boom(src, dst):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(_utils.os, "replace", boom)
+
+        with pytest.raises(OSError, match="disk full"):
+            add_task(tmp_pm_path, Task(id="TST-002", title="should-fail", phase="phase-1"))
+
+        # Restore replace and verify the original is untouched (atomicity)
+        monkeypatch.setattr(_utils.os, "replace", original_replace)
+        assert original_path.read_bytes() == original_bytes

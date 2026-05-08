@@ -2,14 +2,27 @@
 
 All YAML operations use safe_load / safe_dump only (security).
 Output is human-readable with comment headers.
+
+Concurrency (PMSERV-048 / ADR-011):
+- ``_save_yaml`` writes via ``utils._atomic_write_text`` (mkstemp + os.replace),
+  preventing partial-write corruption on SIGKILL / OS crash.
+- Public mutators (``add_*`` / ``update_*``) wrap the read-modify-write cycle in
+  ``_yaml_transaction`` to prevent lost updates between concurrent processes.
+- ``save_*`` helpers are internal raw I/O with no locking; callers that bypass
+  mutators (e.g. ``workflow.advance_step``) must wrap themselves in
+  ``_yaml_transaction``.
 """
 
 from __future__ import annotations
 
 import datetime as _dt
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import yaml
+from filelock import FileLock
+from filelock import Timeout as FileLockTimeout
 
 from .models import (
     DailyLog,
@@ -30,9 +43,14 @@ from .models import (
     WorkflowStep,
     WorkflowTemplate,
 )
+from .utils import _atomic_write_text
 
 PM_DIR = ".pm"
 GLOBAL_PM_DIR = Path.home() / ".pm"
+
+DEFAULT_LOCK_TIMEOUT_S = 5.0
+_LOCKS_DIR = ".locks"
+_LOCKS_GITIGNORE = "*\n!.gitignore\n"
 
 
 # ─── Internal helpers ────────────────────────────────
@@ -60,7 +78,56 @@ def _save_yaml(path: Path, data: dict | list, header_name: str) -> None:
         allow_unicode=True,
         sort_keys=False,
     )
-    path.write_text(_yaml_header(header_name) + body, encoding="utf-8")
+    _atomic_write_text(path, _yaml_header(header_name) + body)
+
+
+def _ensure_locks_dir(base_dir: Path) -> Path:
+    """Create ``base_dir/.locks/`` and seed it with a self-ignoring .gitignore.
+
+    The seeded ``.gitignore`` (``*\\n!.gitignore\\n``) means lock files never
+    get committed, even for users who track ``.pm/`` in git.
+    """
+    lock_dir = base_dir / _LOCKS_DIR
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    gitignore = lock_dir / ".gitignore"
+    if not gitignore.exists():
+        gitignore.write_text(_LOCKS_GITIGNORE, encoding="utf-8")
+    return lock_dir
+
+
+@contextmanager
+def _yaml_transaction(
+    base_dir: Path,
+    filename: str,
+    *,
+    timeout: float = DEFAULT_LOCK_TIMEOUT_S,
+) -> Iterator[None]:
+    """Acquire an exclusive lock for a yaml file's read-modify-write cycle.
+
+    The lock file lives at ``base_dir/.locks/{stem}.lock`` where ``stem`` is
+    ``filename`` with any ``.yaml`` suffix stripped (so callers can pass either
+    ``"tasks.yaml"`` or a plain label like ``"registry"``).
+
+    Raises ``PmServerError`` if the lock cannot be acquired within ``timeout``
+    seconds.
+
+    Implementation note: ``filelock.FileLock`` is reentrant within the same
+    instance but two distinct ``FileLock(same_path)`` calls in the same process
+    deadlock. The convention for callers: do not nest mutators — i.e. inside
+    a ``with _yaml_transaction(...):`` block, do not call another public
+    mutator that would acquire the same lock.
+    """
+    lock_dir = _ensure_locks_dir(base_dir)
+    stem = filename.removesuffix(".yaml")
+    lock_path = lock_dir / f"{stem}.lock"
+    lock = FileLock(str(lock_path), timeout=timeout)
+    try:
+        with lock:
+            yield
+    except FileLockTimeout as e:
+        raise PmServerError(
+            f"Failed to acquire lock on {filename}: timeout after {timeout}s"
+        ) from e
 
 
 def _model_dump(model) -> dict:
@@ -106,23 +173,25 @@ def save_tasks(pm_path: Path, tasks: list[Task]) -> None:
 
 def add_task(pm_path: Path, task: Task) -> Task:
     """Append a new task and save."""
-    tasks = load_tasks(pm_path)
-    tasks.append(task)
-    save_tasks(pm_path, tasks)
+    with _yaml_transaction(pm_path, "tasks.yaml"):
+        tasks = load_tasks(pm_path)
+        tasks.append(task)
+        save_tasks(pm_path, tasks)
     return task
 
 
 def update_task(pm_path: Path, task_id: str, **updates) -> Task:
     """Update fields on an existing task by ID."""
-    tasks = load_tasks(pm_path)
-    for task in tasks:
-        if task.id == task_id:
-            for key, value in updates.items():
-                if value is not None and hasattr(task, key):
-                    setattr(task, key, value)
-            task.updated = _dt.date.today()
-            save_tasks(pm_path, tasks)
-            return task
+    with _yaml_transaction(pm_path, "tasks.yaml"):
+        tasks = load_tasks(pm_path)
+        for task in tasks:
+            if task.id == task_id:
+                for key, value in updates.items():
+                    if value is not None and hasattr(task, key):
+                        setattr(task, key, value)
+                task.updated = _dt.date.today()
+                save_tasks(pm_path, tasks)
+                return task
     raise TaskNotFoundError(f"Task {task_id} not found")
 
 
@@ -161,9 +230,10 @@ def save_decisions(pm_path: Path, decisions: list[Decision]) -> None:
 
 def add_decision(pm_path: Path, decision: Decision) -> Decision:
     """Append a new ADR and save."""
-    decisions = load_decisions(pm_path)
-    decisions.append(decision)
-    save_decisions(pm_path, decisions)
+    with _yaml_transaction(pm_path, "decisions.yaml"):
+        decisions = load_decisions(pm_path)
+        decisions.append(decision)
+        save_decisions(pm_path, decisions)
     return decision
 
 
@@ -202,9 +272,10 @@ def save_milestones(pm_path: Path, milestones: list[Milestone]) -> None:
 
 def add_milestone(pm_path: Path, milestone: Milestone) -> Milestone:
     """Append a new milestone and save."""
-    milestones = load_milestones(pm_path)
-    milestones.append(milestone)
-    save_milestones(pm_path, milestones)
+    with _yaml_transaction(pm_path, "milestones.yaml"):
+        milestones = load_milestones(pm_path)
+        milestones.append(milestone)
+        save_milestones(pm_path, milestones)
     return milestone
 
 
@@ -230,9 +301,10 @@ def save_risks(pm_path: Path, risks: list[Risk]) -> None:
 
 def add_risk(pm_path: Path, risk: Risk) -> Risk:
     """Append a new risk and save."""
-    risks = load_risks(pm_path)
-    risks.append(risk)
-    save_risks(pm_path, risks)
+    with _yaml_transaction(pm_path, "risks.yaml"):
+        risks = load_risks(pm_path)
+        risks.append(risk)
+        save_risks(pm_path, risks)
     return risk
 
 
@@ -271,23 +343,25 @@ def save_knowledge(pm_path: Path, records: list[KnowledgeRecord]) -> None:
 
 def add_knowledge(pm_path: Path, record: KnowledgeRecord) -> KnowledgeRecord:
     """Append a new knowledge record and save."""
-    records = load_knowledge(pm_path)
-    records.append(record)
-    save_knowledge(pm_path, records)
+    with _yaml_transaction(pm_path, "knowledge.yaml"):
+        records = load_knowledge(pm_path)
+        records.append(record)
+        save_knowledge(pm_path, records)
     return record
 
 
 def update_knowledge(pm_path: Path, record_id: str, **updates) -> KnowledgeRecord:
     """Update fields on an existing knowledge record by ID."""
-    records = load_knowledge(pm_path)
-    for rec in records:
-        if rec.id == record_id:
-            for key, value in updates.items():
-                if value is not None and hasattr(rec, key):
-                    setattr(rec, key, value)
-            rec.updated = _dt.date.today()
-            save_knowledge(pm_path, records)
-            return rec
+    with _yaml_transaction(pm_path, "knowledge.yaml"):
+        records = load_knowledge(pm_path)
+        for rec in records:
+            if rec.id == record_id:
+                for key, value in updates.items():
+                    if value is not None and hasattr(rec, key):
+                        setattr(rec, key, value)
+                rec.updated = _dt.date.today()
+                save_knowledge(pm_path, records)
+                return rec
     raise KnowledgeNotFoundError(f"Knowledge record {record_id} not found")
 
 
@@ -326,9 +400,10 @@ def add_daily_log(
     daily_dir.mkdir(exist_ok=True)
     log_file = daily_dir / f"{log_date.isoformat()}.yaml"
 
-    log = load_daily_log(pm_path, log_date)
-    log.entries.append(entry)
-    _save_yaml(log_file, _model_dump(log), f"daily/{log_date.isoformat()}.yaml")
+    with _yaml_transaction(pm_path, f"daily-{log_date.isoformat()}"):
+        log = load_daily_log(pm_path, log_date)
+        log.entries.append(entry)
+        _save_yaml(log_file, _model_dump(log), f"daily/{log_date.isoformat()}.yaml")
     return log
 
 
@@ -353,21 +428,27 @@ def save_registry(registry: Registry, registry_dir: Path | None = None) -> None:
 
 def register_project(project_path: Path, name: str, registry_dir: Path | None = None) -> Registry:
     """Register a project in the global registry. Idempotent."""
-    registry = load_registry(registry_dir)
-    resolved = str(project_path.resolve())
-    if any(p.path == resolved for p in registry.projects):
-        return registry
-    registry.projects.append(RegistryEntry(path=resolved, name=name))
-    save_registry(registry, registry_dir)
+    base_dir = registry_dir or GLOBAL_PM_DIR
+    base_dir.mkdir(parents=True, exist_ok=True)
+    with _yaml_transaction(base_dir, "registry"):
+        registry = load_registry(registry_dir)
+        resolved = str(project_path.resolve())
+        if any(p.path == resolved for p in registry.projects):
+            return registry
+        registry.projects.append(RegistryEntry(path=resolved, name=name))
+        save_registry(registry, registry_dir)
     return registry
 
 
 def unregister_project(project_path: Path, registry_dir: Path | None = None) -> Registry:
     """Remove a project from the global registry."""
-    registry = load_registry(registry_dir)
-    resolved = str(project_path.resolve())
-    registry.projects = [p for p in registry.projects if p.path != resolved]
-    save_registry(registry, registry_dir)
+    base_dir = registry_dir or GLOBAL_PM_DIR
+    base_dir.mkdir(parents=True, exist_ok=True)
+    with _yaml_transaction(base_dir, "registry"):
+        registry = load_registry(registry_dir)
+        resolved = str(project_path.resolve())
+        registry.projects = [p for p in registry.projects if p.path != resolved]
+        save_registry(registry, registry_dir)
     return registry
 
 
@@ -406,23 +487,25 @@ def save_workflows(pm_path: Path, workflows: list[Workflow]) -> None:
 
 def add_workflow(pm_path: Path, workflow: Workflow) -> Workflow:
     """Append a new workflow and save."""
-    workflows = load_workflows(pm_path)
-    workflows.append(workflow)
-    save_workflows(pm_path, workflows)
+    with _yaml_transaction(pm_path, "workflows.yaml"):
+        workflows = load_workflows(pm_path)
+        workflows.append(workflow)
+        save_workflows(pm_path, workflows)
     return workflow
 
 
 def update_workflow(pm_path: Path, workflow_id: str, **updates) -> Workflow:
     """Update fields on an existing workflow by ID."""
-    workflows = load_workflows(pm_path)
-    for wf in workflows:
-        if wf.id == workflow_id:
-            for key, value in updates.items():
-                if value is not None and hasattr(wf, key):
-                    setattr(wf, key, value)
-            wf.updated = _dt.date.today()
-            save_workflows(pm_path, workflows)
-            return wf
+    with _yaml_transaction(pm_path, "workflows.yaml"):
+        workflows = load_workflows(pm_path)
+        for wf in workflows:
+            if wf.id == workflow_id:
+                for key, value in updates.items():
+                    if value is not None and hasattr(wf, key):
+                        setattr(wf, key, value)
+                wf.updated = _dt.date.today()
+                save_workflows(pm_path, workflows)
+                return wf
     raise WorkflowNotFoundError(f"Workflow {workflow_id} not found")
 
 

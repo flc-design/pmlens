@@ -46,5 +46,9 @@ AGENTS.md.bak.*
 # PM Server data (local project management)
 .pm/
 
+# PM Server lock files (defensive — covered by .pm/ above, but explicit for users
+# who choose to commit .pm/ to git; PMSERV-048)
+.pm/.locks/
+
 # Synaptic Ledger (local knowledge data)
 .synaptic/

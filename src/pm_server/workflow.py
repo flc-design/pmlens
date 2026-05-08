@@ -23,6 +23,7 @@ from .models import (
     WorkflowStepStatus,
 )
 from .storage import (
+    _yaml_transaction,
     add_workflow,
     load_knowledge,
     load_workflow_template,
@@ -226,72 +227,73 @@ def advance_step(
     Returns:
         Result dict with status, completed/next step, progress, chain info.
     """
-    workflows = load_workflows(pm_path)
-    wf, wf_index = _resolve_workflow(workflows, workflow_id)
+    with _yaml_transaction(pm_path, "workflows.yaml"):
+        workflows = load_workflows(pm_path)
+        wf, wf_index = _resolve_workflow(workflows, workflow_id)
 
-    # Validate state
-    if wf.status != WorkflowStatus.ACTIVE:
-        return {
-            "status": "error",
-            "message": f"Workflow {wf.id} is {wf.status.value}, not active",
-        }
+        # Validate state
+        if wf.status != WorkflowStatus.ACTIVE:
+            return {
+                "status": "error",
+                "message": f"Workflow {wf.id} is {wf.status.value}, not active",
+            }
 
-    if wf.current_step_index >= len(wf.steps):
-        return {
-            "status": "error",
-            "message": f"Workflow {wf.id} has no more steps",
-        }
+        if wf.current_step_index >= len(wf.steps):
+            return {
+                "status": "error",
+                "message": f"Workflow {wf.id} has no more steps",
+            }
 
-    current = wf.steps[wf.current_step_index]
+        current = wf.steps[wf.current_step_index]
 
-    if current.status != WorkflowStepStatus.ACTIVE:
-        return {
-            "status": "error",
-            "message": f"Step '{current.id}' is {current.status.value}, not active",
-        }
+        if current.status != WorkflowStepStatus.ACTIVE:
+            return {
+                "status": "error",
+                "message": f"Step '{current.id}' is {current.status.value}, not active",
+            }
 
-    # Record artifacts and notes on current step
-    if artifacts:
-        current.artifacts.extend(artifacts)
-    if notes:
-        current.notes = notes if not current.notes else f"{current.notes}\n{notes}"
+        # Record artifacts and notes on current step
+        if artifacts:
+            current.artifacts.extend(artifacts)
+        if notes:
+            current.notes = notes if not current.notes else f"{current.notes}\n{notes}"
 
-    result: dict = {"workflow_id": wf.id}
+        result: dict = {"workflow_id": wf.id}
 
-    if skip:
-        current.status = WorkflowStepStatus.SKIPPED
-        result["status"] = "skipped"
-        result["skipped_step"] = _step_guidance(current)
-        _move_to_next(wf, result)
+        if skip:
+            current.status = WorkflowStepStatus.SKIPPED
+            result["status"] = "skipped"
+            result["skipped_step"] = _step_guidance(current)
+            _move_to_next(wf, result)
 
-    elif current.loop_group and not proceed:
-        # Loop back: reset all steps in loop_group, increment iteration
-        _loop_back(wf, current.loop_group)
-        next_step = wf.steps[wf.current_step_index]
-        result["status"] = "looped"
-        result["iteration"] = next_step.iteration
-        result["loop_group"] = current.loop_group
-        result["current_step"] = _step_guidance(next_step)
-        result["progress"] = _progress(wf)
+        elif current.loop_group and not proceed:
+            # Loop back: reset all steps in loop_group, increment iteration
+            _loop_back(wf, current.loop_group)
+            next_step = wf.steps[wf.current_step_index]
+            result["status"] = "looped"
+            result["iteration"] = next_step.iteration
+            result["loop_group"] = current.loop_group
+            result["current_step"] = _step_guidance(next_step)
+            result["progress"] = _progress(wf)
 
-    else:
-        # Normal advance: mark done, move to next
-        current.status = WorkflowStepStatus.DONE
-        result["status"] = "advanced"
-        result["completed_step"] = _step_guidance(current)
+        else:
+            # Normal advance: mark done, move to next
+            current.status = WorkflowStepStatus.DONE
+            result["status"] = "advanced"
+            result["completed_step"] = _step_guidance(current)
 
-        if current.required_artifacts and not current.artifacts:
-            result["warning"] = (
-                f"Step '{current.id}' has required_artifacts "
-                f"{current.required_artifacts} but none were provided"
-            )
+            if current.required_artifacts and not current.artifacts:
+                result["warning"] = (
+                    f"Step '{current.id}' has required_artifacts "
+                    f"{current.required_artifacts} but none were provided"
+                )
 
-        _move_to_next(wf, result)
+            _move_to_next(wf, result)
 
-    # Save
-    wf.updated = _dt.date.today()
-    workflows[wf_index] = wf
-    save_workflows(pm_path, workflows)
+        # Save
+        wf.updated = _dt.date.today()
+        workflows[wf_index] = wf
+        save_workflows(pm_path, workflows)
 
     return result
 

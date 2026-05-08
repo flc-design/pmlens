@@ -38,6 +38,8 @@ from .models import (
     WorkflowStatus,
 )
 from .storage import (
+    GLOBAL_PM_DIR,
+    _yaml_transaction,
     add_daily_log,
     add_decision,
     add_knowledge,
@@ -210,7 +212,8 @@ def pm_init(project_path: str | None = None, project_name: str | None = None) ->
             repository=info.get("repository"),
             description=info.get("description", ""),
         )
-        save_project(pm_path, project)
+        with _yaml_transaction(pm_path, "project.yaml"):
+            save_project(pm_path, project)
 
     # Register in global registry
     register_project(root, project.name)
@@ -1098,8 +1101,9 @@ def pm_cleanup() -> dict:
             invalid.append({"path": entry.path, "name": entry.name})
 
     if invalid:
-        registry.projects = valid
-        save_registry(registry)
+        with _yaml_transaction(GLOBAL_PM_DIR, "registry"):
+            registry.projects = valid
+            save_registry(registry)
 
     # Detect orphan project files in global ~/.pm/
     orphan_files: list[str] = []
