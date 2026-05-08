@@ -2,12 +2,13 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/)
+[![Multi-Host](https://img.shields.io/badge/multi--host-Claude%20Code%20%2B%20Codex%20CLI-success)](#マルチホスト対応-claude-code--codex-cli)
 
 **[English README](README.md)**
 
-**PM Server for Claude Code** — Claude Code 用プロジェクト管理 MCP Server
+**PM Server for Claude Code + Codex CLI** — 複数 AI コーディングアシスタントに跨る プロジェクト管理 MCP Server
 
-タスク管理・進捗可視化・意思決定記録を、Claude Code セッション内の自然言語で。
+タスク管理・進捗可視化・意思決定記録を、Claude Code または Codex CLI セッション内の自然言語で。1 つの PM 基盤を複数ホストで共有。
 
 ```
 > 進捗は？
@@ -28,6 +29,7 @@
 
 ## 特徴
 
+- **🔌 マルチホストファースト** — `pm-server install --target=auto` 一発で **Claude Code と Codex CLI の両方に登録**。プロジェクトのルールも `CLAUDE.md` と `AGENTS.md` の両方に自動同期 (ADR-008)。プロジェクト途中でホストを切り替えてもコンテキストを失わない — 同じ `.pm/` データ、同じワークフロー
 - **31 の MCP ツール** — タスク CRUD、子イシュー、ステータス、ブロッカー、ベロシティ、ダッシュボード、ADR、セッションメモリ、ワークフロー、ナレッジレコード、マルチホストルール注入 等
 - **ワークフローエンジン** — テンプレートベースの開発ワークフロー（ループ、ユーザーゲート、チェイン対応：Discovery → Development）
 - **ナレッジレコード** — カジュアルなメモリとフォーマルな ADR の中間に位置する構造化された知見記録（research、tradeoff、spec 等）

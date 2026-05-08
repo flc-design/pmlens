@@ -2,12 +2,13 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/)
+[![Multi-Host](https://img.shields.io/badge/multi--host-Claude%20Code%20%2B%20Codex%20CLI-success)](#multi-host-support-claude-code--codex-cli)
 
 **[日本語版 README はこちら](README.ja.md)**
 
-**PM Server for Claude Code** — a project management MCP Server.
+**PM Server for Claude Code + Codex CLI** — a project management MCP server that works across multiple AI coding assistants.
 
-Track tasks, visualize progress, record decisions — all through natural language in your Claude Code session.
+Track tasks, visualize progress, record decisions — through natural language in your Claude Code _or_ Codex CLI session. One PM substrate, multiple hosts.
 
 ```
 > 進捗は？
@@ -28,6 +29,7 @@ Track tasks, visualize progress, record decisions — all through natural langua
 
 ## Features
 
+- **🔌 Multi-host first** — registers in **Claude Code AND Codex CLI** with one command (`pm-server install --target=auto`). Project rules sync to both `CLAUDE.md` and `AGENTS.md` automatically (ADR-008). Switch hosts mid-project without losing context — same `.pm/` data, same workflows
 - **31 MCP tools** — task CRUD, child issues, status, blockers, velocity, dashboard, ADR, session memory, workflows, knowledge records, multi-host rules injection, and more
 - **Workflow engine** — template-based development workflows with loops, user gates, and chaining (Discovery → Development)
 - **Knowledge records** — structured findings between casual memory and formal ADR (research, tradeoff, spec, etc.)
