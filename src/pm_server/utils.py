@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import tempfile
@@ -9,6 +10,33 @@ from datetime import datetime
 from pathlib import Path
 
 from .models import Phase, ProjectNotFoundError, Task, TaskStatus
+
+# Computed at module import time — represents the bytes Python actually
+# loaded into memory. Used by ``get_utils_fingerprint`` to detect stale
+# module cache after editable-install source edits (PMSERV-060).
+_UTILS_FINGERPRINT: str = hashlib.sha1(Path(__file__).read_bytes()).hexdigest()[:8]
+
+
+def get_utils_fingerprint() -> dict:
+    """Return fingerprint info for stale-module-cache detection (PMSERV-060).
+
+    ``loaded`` is the sha1[:8] computed when this module was imported — i.e.
+    what the running Python process is actually executing. ``current`` is
+    re-read from disk on each call. A mismatch means the source file was
+    edited after this MCP process started; restart the server to pick up
+    the new code. See ``BUG_REPORT_2026-05-01_pm_status_stale_cache.md``
+    history (now removed) for the originating incident.
+    """
+    try:
+        current = hashlib.sha1(Path(__file__).read_bytes()).hexdigest()[:8]
+    except OSError:
+        current = "unreadable"
+    return {
+        "loaded": _UTILS_FINGERPRINT,
+        "current": current,
+        "stale": _UTILS_FINGERPRINT != current and current != "unreadable",
+        "path": str(Path(__file__).resolve()),
+    }
 
 
 def _is_project_pm_dir(pm_dir: Path) -> bool:

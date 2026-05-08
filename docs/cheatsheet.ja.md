@@ -346,6 +346,32 @@ Claude:   → pm_recall()       最新の記憶とセッション要約を復元
           作業を継続
 ```
 
+### ソース編集後の再起動 (editable install のみ)
+
+`pip install -e .` で pm-server を入れた状態でセッション中にソースを
+編集した場合、MCP ホスト (Claude Code または Codex CLI) を再起動して
+パッケージを再読込みすること。Python は長期プロセス内でモジュールを
+キャッシュするため、**遅延 import** されるモジュール (例: `pm_server.rules`)
+は初回 import 時に古いキャッシュを参照し、他モジュールがディスク上で
+新しくても整合性が崩れる。
+
+`pm_status()` は fingerprint を返すので状況が一目でわかる:
+
+```python
+pm_status()["diagnostics"]["utils_fingerprint"]
+# → {
+#     "loaded":  "a1b2c3d4",     # 実行中プロセスがロードしたバイト
+#     "current": "a1b2c3d4",     # 現在ディスク上のバイト
+#     "stale":   False,           # True なら MCP ホスト再起動が必要
+#     "path":    "/.../utils.py",
+#   }
+```
+
+`stale: true` のときはディスクとメモリが乖離しているサイン。サーバを
+再起動する。Wheel install (`pip install pm-server` from PyPI) では
+ソースが immutable なので発生しない (次回 `pip install -U` まで)。
+原因の詳細は PMSERV-060 参照。
+
 ---
 
 ## CLI コマンド

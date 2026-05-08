@@ -66,6 +66,7 @@ from .utils import (
     calculate_phase_progress,
     generate_decision_id,
     generate_task_id,
+    get_utils_fingerprint,
     resolve_project_path,
 )
 from .velocity import calculate_velocity, detect_risks
@@ -294,6 +295,9 @@ def pm_status(project_path: str | None = None) -> dict:
         "rules": get_rules_status(root),
         "hooks": hooks_status,
         "next_pm_actions": next_actions,
+        "diagnostics": {
+            "utils_fingerprint": get_utils_fingerprint(),
+        },
     }
 
 

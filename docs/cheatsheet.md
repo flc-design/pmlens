@@ -345,6 +345,31 @@ Claude: → pm_recall()           Restore latest memories and session summary
         Continues work seamlessly
 ```
 
+### Restart on source edit (editable installs only)
+
+If you installed pm-server with `pip install -e .` and edited the source
+mid-session, restart your MCP host (Claude Code or Codex CLI) to reload
+the package — Python caches modules in long-running processes and
+**lazy-imported** modules (e.g. `pm_server.rules`) will hit the stale
+cache when first imported, even if other modules are fresh on disk.
+
+`pm_status()` now exposes a fingerprint to make this easy to spot:
+
+```python
+pm_status()["diagnostics"]["utils_fingerprint"]
+# → {
+#     "loaded":  "a1b2c3d4",     # what the running process loaded
+#     "current": "a1b2c3d4",     # what is on disk right now
+#     "stale":   False,           # True ⇒ restart the MCP host
+#     "path":    "/.../utils.py",
+#   }
+```
+
+If `stale: true`, the loaded code differs from the file on disk — restart
+the server. Wheel installs (`pip install pm-server` from PyPI) are
+unaffected because the source is immutable until the next `pip install -U`.
+See PMSERV-060 for the originating incident.
+
 ---
 
 ## CLI Commands

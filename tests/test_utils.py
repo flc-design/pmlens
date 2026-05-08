@@ -18,6 +18,7 @@ from pm_server.utils import (
     _is_project_pm_dir,
     _resolve_targets,
     _timestamped_backup,
+    get_utils_fingerprint,
     resolve_project_path,
 )
 
@@ -305,3 +306,55 @@ class TestAtomicWriteText:
         _atomic_write_text(target, "[s]\nk='w'\n")
 
         assert target.stat().st_mode & 0o777 == 0o600
+
+
+class TestGetUtilsFingerprint:
+    """Stale-module-cache detection helper (PMSERV-060)."""
+
+    def test_returns_dict_with_expected_keys(self):
+        fp = get_utils_fingerprint()
+        assert set(fp.keys()) == {"loaded", "current", "stale", "path"}
+
+    def test_loaded_and_current_match_when_unchanged(self):
+        fp = get_utils_fingerprint()
+        # Process just imported utils.py; disk hasn't been touched.
+        assert fp["loaded"] == fp["current"]
+        assert fp["stale"] is False
+
+    def test_fingerprint_is_8_char_lowercase_hex(self):
+        fp = get_utils_fingerprint()
+        for key in ("loaded", "current"):
+            value = fp[key]
+            assert len(value) == 8, f"{key} should be 8 chars, got {len(value)}"
+            assert all(c in "0123456789abcdef" for c in value), f"{key} should be lowercase hex"
+
+    def test_path_resolves_to_utils_module(self):
+        fp = get_utils_fingerprint()
+        assert fp["path"].endswith("utils.py")
+
+    def test_stale_detected_when_disk_diverges(self, tmp_path, monkeypatch):
+        """Simulate a source edit by pointing the helper at a modified file."""
+        from pm_server import utils as _utils
+
+        # Write a file that the helper will read instead of the real utils.py
+        fake_path = tmp_path / "utils.py"
+        fake_path.write_text("# diverged source\n", encoding="utf-8")
+
+        # Override the module __file__ so the disk-side recompute reads our
+        # fake file. The cached _UTILS_FINGERPRINT (computed at real import
+        # time) stays untouched, so loaded vs current must differ.
+        monkeypatch.setattr(_utils, "__file__", str(fake_path))
+
+        fp = get_utils_fingerprint()
+        assert fp["loaded"] != fp["current"]
+        assert fp["stale"] is True
+
+    def test_unreadable_disk_returns_unreadable_marker(self, monkeypatch):
+        """If the source file vanishes (unlikely but defensive), surface it."""
+        from pm_server import utils as _utils
+
+        monkeypatch.setattr(_utils, "__file__", "/nonexistent/path/utils.py")
+        fp = get_utils_fingerprint()
+        assert fp["current"] == "unreadable"
+        # ``stale`` must be False when we cannot read — avoids false alarms
+        assert fp["stale"] is False
