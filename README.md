@@ -532,7 +532,8 @@ Your `.pm/` data directories are **unchanged** — no data migration needed.
 git clone https://github.com/flc-design/pm-server.git
 cd pm-server
 pip install -e ".[dev]"
-pytest                  # 400+ tests
+pytest                  # 600+ tests
+pytest --cov            # with coverage (branch coverage, show missing)
 ruff check src/         # Lint
 ruff format src/        # Format
 ```

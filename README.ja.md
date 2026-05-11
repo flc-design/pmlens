@@ -526,7 +526,8 @@ pm-server migrate       # MCP 登録を pm-agent → pm-server に切り替え
 git clone https://github.com/flc-design/pm-server.git
 cd pm-server
 pip install -e ".[dev]"
-pytest                  # 400+ テスト
+pytest                  # 600+ テスト
+pytest --cov            # カバレッジ計測（分岐網羅、未到達行を表示）
 ruff check src/         # リント
 ruff format src/        # フォーマット
 ```
