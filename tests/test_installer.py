@@ -149,6 +149,10 @@ class TestMigrateFromPmAgent:
             return result
 
         monkeypatch.setattr(subprocess, "run", mock_run)
+        monkeypatch.setattr(
+            "pm_server.installer.shutil.which",
+            lambda name: "/usr/bin/claude" if name == "claude" else f"/usr/bin/{name}",
+        )
 
         # registry を用意
         registry_dir = tmp_path / ".pm"
