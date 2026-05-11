@@ -201,27 +201,6 @@ pm-server uninstall --target auto
 
 ---
 
-## ⚠ 並行セッション注意 (Phase-9 進行中)
-
-`pm-server` v0.5.x は `pm_recall` に **多セッション disambiguation** を導入しました
-（PMSERV-049、ADR-009）: 複数の Claude Code セッションが同一プロジェクトで並行
-動作する場合、`pm_recall` は `current_session_id` と、曖昧な場合は
-`last_session_candidates` 配列および `ambiguity_detected: true` フラグを返すため、
-各セッションが自身に紐付くコンテキストを選択できます。
-
-**PMSERV-048**（YAML アトミック書き込み + ファイルロック）が完了するまでは、
-基底のストレージレイヤーは並行書き込みに対して安全ではありません。推奨事項:
-
-- 並行セッションからの同時タスク更新は避ける（lost-update リスク）。
-- `pm_recall` が `ambiguity_detected: true` を返した場合は、
-  `last_session_candidates` を確認し `is_current_session: true` のエントリを採用。
-- メモリレイヤー（SQLite）は PMSERV-047（WAL）が着地するまで rollback-journal
-  モードで動作。
-
-このセクションは PMSERV-048 着地時に削除されます。
-
----
-
 ## MCP ツール一覧（31ツール）
 
 ### プロジェクト管理

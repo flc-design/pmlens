@@ -204,27 +204,6 @@ dataclasses, atomic-write helpers).
 
 ---
 
-## ⚠ Concurrent Session Caveat (Phase-9 In Progress)
-
-`pm-server` v0.5.x introduces **multi-session disambiguation** for `pm_recall`
-(PMSERV-049, ADR-009): when several Claude Code sessions run in parallel
-against the same project, `pm_recall` now returns `current_session_id` and —
-when ambiguous — a `last_session_candidates` array plus an
-`ambiguity_detected: true` flag so each session can pick its own context.
-
-Until **PMSERV-048** (YAML atomic write + file locking) lands, the underlying
-storage layer is *not* safe against concurrent writes. We recommend:
-
-- Avoid simultaneous task updates from parallel sessions (lost-update risk).
-- When `pm_recall` returns `ambiguity_detected: true`, inspect
-  `last_session_candidates` and pick the entry with `is_current_session: true`.
-- The memory layer (SQLite) still uses rollback-journal mode until
-  PMSERV-047 (WAL).
-
-This section will be removed once PMSERV-048 ships.
-
----
-
 ## MCP Tools (31 tools)
 
 ### Project Management
