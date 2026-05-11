@@ -70,6 +70,31 @@ def _sanitize_fts_query(query: str) -> str:
     return " ".join(parts)
 
 
+# ─── SQLite concurrency pragmas (PMSERV-047) ────────
+
+_BUSY_TIMEOUT_MS = 5000
+
+
+def _apply_pragmas(conn: sqlite3.Connection) -> None:
+    """Apply WAL mode + concurrency-friendly pragmas to a SQLite connection.
+
+    journal_mode=WAL is DB-persistent (stored in the file header) and unlocks
+    snapshot isolation: readers do not block writers and vice versa, which is
+    the key win for the multi-process pm-server pattern (Claude Code + Codex
+    CLI sessions sharing one .pm/memory.db).
+
+    synchronous=NORMAL is connection-scoped and safe under WAL — torn writes
+    are still prevented by WAL frame design, but per-commit fsync is skipped
+    in favour of fsync at checkpoint. SQLite official guidance.
+
+    busy_timeout=5000 ms matches the PMSERV-048 filelock timeout so the
+    YAML and SQLite layers share the same wait budget.
+    """
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
+
+
 # ─── Schema SQL ─────────────────────────────────────
 
 _SCHEMA_SQL = """\
@@ -183,6 +208,7 @@ class MemoryStore:
         db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        _apply_pragmas(self._conn)
         self._ensure_schema()
 
     def _ensure_schema(self) -> None:
@@ -430,6 +456,7 @@ class MemoryStore:
         try:
             self.global_db_path.parent.mkdir(parents=True, exist_ok=True)
             conn = sqlite3.connect(str(self.global_db_path))
+            _apply_pragmas(conn)
             conn.executescript(_GLOBAL_SCHEMA_SQL)
             conn.executescript(_GLOBAL_FTS_SQL)
             conn.executescript(_GLOBAL_TRIGGER_SQL)
@@ -556,6 +583,7 @@ class MemoryStore:
         try:
             conn = sqlite3.connect(str(self.global_db_path))
             conn.row_factory = sqlite3.Row
+            _apply_pragmas(conn)
             safe_query = _sanitize_fts_query(query)
             rows = conn.execute(
                 """SELECT m.* FROM memory_index m

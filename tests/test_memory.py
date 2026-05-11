@@ -2,12 +2,20 @@
 
 from __future__ import annotations
 
+import multiprocessing as mp
 import time
 from pathlib import Path
 
 import pytest
 
-from pm_server.memory import MemoryStore, _sanitize_fts_query, _str_to_tags, _tags_to_str
+from pm_server.memory import (
+    _BUSY_TIMEOUT_MS,
+    MemoryStore,
+    _apply_pragmas,
+    _sanitize_fts_query,
+    _str_to_tags,
+    _tags_to_str,
+)
 from pm_server.models import Memory, MemoryType, SessionSummary
 
 # ─── Tag conversion helpers ────────────────────────────
@@ -521,3 +529,170 @@ class TestServerToolIntegration:
 
         result = pm_session_summary(action="invalid")
         assert result["status"] == "error"
+
+
+# ─── SQLite concurrency pragmas (PMSERV-047) ─────────────
+
+
+class TestSqlitePragmas:
+    """Verify _apply_pragmas sets WAL + NORMAL synchronous + 5s busy_timeout."""
+
+    def test_constant_matches_filelock_timeout(self):
+        # PMSERV-048 filelock uses 5s; PMSERV-047 mirrors that budget.
+        assert _BUSY_TIMEOUT_MS == 5000
+
+    def test_journal_mode_is_wal(self, memory_store: MemoryStore):
+        mode = memory_store._conn.execute("PRAGMA journal_mode").fetchone()[0]
+        assert mode == "wal"
+
+    def test_busy_timeout_is_set(self, memory_store: MemoryStore):
+        timeout = memory_store._conn.execute("PRAGMA busy_timeout").fetchone()[0]
+        assert timeout == _BUSY_TIMEOUT_MS
+
+    def test_synchronous_is_normal(self, memory_store: MemoryStore):
+        # NORMAL = 1 (FULL = 2, OFF = 0). Safe under WAL per SQLite docs.
+        sync = memory_store._conn.execute("PRAGMA synchronous").fetchone()[0]
+        assert sync == 1
+
+    def test_apply_pragmas_is_idempotent(self, memory_store: MemoryStore):
+        # Re-applying should not raise and should leave settings unchanged.
+        _apply_pragmas(memory_store._conn)
+        _apply_pragmas(memory_store._conn)
+        assert memory_store._conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+        assert memory_store._conn.execute("PRAGMA busy_timeout").fetchone()[0] == _BUSY_TIMEOUT_MS
+
+    def test_global_db_uses_wal(self, tmp_path: Path):
+        """sync_to_global should set WAL on the global DB too."""
+        import sqlite3
+
+        db_path = tmp_path / "memory.db"
+        global_path = tmp_path / "global" / "memory.db"
+        store = MemoryStore(db_path, global_db_path=global_path)
+        store.save(
+            Memory(
+                session_id="sess-test",
+                type=MemoryType.OBSERVATION,
+                content="trigger global sync",
+                project="test-proj",
+            )
+        )
+        store.close()
+
+        # Open the global DB with a fresh connection and verify WAL persisted.
+        conn = sqlite3.connect(str(global_path))
+        try:
+            assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+        finally:
+            conn.close()
+
+
+# ─── Multi-process concurrency (PMSERV-047 / phase-9) ───
+#
+# These workers must be defined at module level so the spawn context can pickle
+# them. Pattern reused from PMSERV-048's tests/test_concurrent.py.
+
+
+def _worker_check_pragmas(db_path_str: str, result_path: str) -> None:
+    """Open a fresh MemoryStore in a child process and report the 3 pragmas."""
+    from pm_server.memory import MemoryStore
+
+    store = MemoryStore(Path(db_path_str), global_db_path=None)
+    journal = store._conn.execute("PRAGMA journal_mode").fetchone()[0]
+    busy = store._conn.execute("PRAGMA busy_timeout").fetchone()[0]
+    sync = store._conn.execute("PRAGMA synchronous").fetchone()[0]
+    Path(result_path).write_text(f"{journal},{busy},{sync}")
+    store.close()
+
+
+def _worker_write_n_memories(
+    db_path_str: str, project: str, prefix: str, count: int, ready_path: str
+) -> None:
+    """Write `count` memories rapidly, then touch the ready file."""
+    from pm_server.memory import MemoryStore
+    from pm_server.models import Memory, MemoryType
+
+    store = MemoryStore(Path(db_path_str), global_db_path=None)
+    for i in range(count):
+        store.save(
+            Memory(
+                session_id=f"sess-{prefix}",
+                type=MemoryType.OBSERVATION,
+                content=f"{prefix}-{i:03d}",
+                project=project,
+            )
+        )
+    store.close()
+    Path(ready_path).touch()
+
+
+class TestSqliteWalConcurrency:
+    """Validate WAL + busy_timeout under real multi-process contention.
+
+    Uses spawn context (cross-platform safe; fork inherits import state and
+    can race in unhelpful ways). Workers are module-level for pickling.
+    """
+
+    def test_wal_persists_across_processes(self, tmp_path: Path):
+        """journal_mode=WAL is DB-persistent (file header) — a fresh process
+        opening the same .db sees WAL without needing the application to set
+        it again. Per-connection pragmas are still re-applied in __init__.
+        """
+        ctx = mp.get_context("spawn")
+        db_path = tmp_path / "wal_persist.db"
+        result_path = tmp_path / "pragma_result"
+
+        # Seed with one MemoryStore in the parent (writes WAL into file header).
+        seed = MemoryStore(db_path, global_db_path=None)
+        seed.close()
+
+        proc = ctx.Process(target=_worker_check_pragmas, args=(str(db_path), str(result_path)))
+        proc.start()
+        proc.join(timeout=10.0)
+        assert proc.exitcode == 0, "child process failed to open WAL DB"
+
+        journal, busy, sync = result_path.read_text().split(",")
+        assert journal == "wal"
+        assert int(busy) == _BUSY_TIMEOUT_MS
+        assert int(sync) == 1  # NORMAL
+
+    def test_concurrent_writers_dont_deadlock(self, tmp_path: Path):
+        """Two processes writing in parallel both succeed.
+
+        With WAL + busy_timeout=5000 they serialize at the WAL frame level but
+        neither raises SQLITE_BUSY. Pre-WAL (or busy_timeout=0) the second
+        writer would fail immediately on contention.
+        """
+        ctx = mp.get_context("spawn")
+        db_path = tmp_path / "concurrent_writers.db"
+
+        # Seed to flip WAL on the file header before children open it.
+        seed = MemoryStore(db_path, global_db_path=None)
+        seed.close()
+
+        ready_a = tmp_path / "ready_a"
+        ready_b = tmp_path / "ready_b"
+
+        proc_a = ctx.Process(
+            target=_worker_write_n_memories,
+            args=(str(db_path), "proj-a", "writer-a", 30, str(ready_a)),
+        )
+        proc_b = ctx.Process(
+            target=_worker_write_n_memories,
+            args=(str(db_path), "proj-b", "writer-b", 30, str(ready_b)),
+        )
+        proc_a.start()
+        proc_b.start()
+        proc_a.join(timeout=15.0)
+        proc_b.join(timeout=15.0)
+
+        assert proc_a.exitcode == 0, "writer A failed (likely SQLITE_BUSY)"
+        assert proc_b.exitcode == 0, "writer B failed (likely SQLITE_BUSY)"
+        assert ready_a.exists() and ready_b.exists()
+
+        # All 60 inserts must have landed.
+        verify = MemoryStore(db_path, global_db_path=None)
+        try:
+            total = verify._conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+        finally:
+            verify.close()
+        assert total == 60
