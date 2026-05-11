@@ -36,6 +36,7 @@ from pm_server.storage import (
     update_workflow,
 )
 from pm_server.workflow import (
+    abandon_workflow,
     advance_step,
     get_active_workflow,
     get_workflow,
@@ -620,6 +621,139 @@ class TestWorkflowProgress:
         assert status["status"] == "completed"
 
 
+# ─── Abandon Tests ──────────────────────────────────
+
+
+class TestWorkflowAbandon:
+    """Test pm_workflow_abandon lifecycle transition (PMSERV-052)."""
+
+    def test_abandon_active_workflow(self, tmp_pm_path):
+        start_workflow(tmp_pm_path, "auth", "development")
+        result = abandon_workflow(tmp_pm_path)
+
+        assert result["status"] == "abandoned"
+        assert result["workflow_id"] == "WF-001"
+        assert result["feature"] == "auth"
+        assert result["template"] == "development"
+        assert result["previous_status"] == "active"
+        assert result["progress"] == "0/9"
+        assert result["abandoned_at_step"]["id"] == "decision"
+
+        wf = get_workflow(tmp_pm_path, "WF-001")
+        assert wf.status == WorkflowStatus.ABANDONED
+        assert wf.updated == _dt.date.today()
+
+    def test_abandon_with_notes(self, tmp_pm_path):
+        start_workflow(tmp_pm_path, "auth", "development")
+        abandon_workflow(tmp_pm_path, notes="Requirements changed")
+
+        wf = get_workflow(tmp_pm_path, "WF-001")
+        assert "Requirements changed" in wf.steps[0].notes
+
+    def test_abandon_with_notes_appends(self, tmp_pm_path):
+        start_workflow(tmp_pm_path, "auth", "development")
+        # Pre-populate notes on the current step
+        wf = get_workflow(tmp_pm_path, "WF-001")
+        wf.steps[0].notes = "Initial note"
+        save_workflows(tmp_pm_path, [wf])
+
+        abandon_workflow(tmp_pm_path, notes="Abandon reason")
+
+        wf = get_workflow(tmp_pm_path, "WF-001")
+        assert "Initial note" in wf.steps[0].notes
+        assert "Abandon reason" in wf.steps[0].notes
+        assert wf.steps[0].notes == "Initial note\nAbandon reason"
+
+    def test_abandon_specific_workflow_by_id(self, tmp_pm_path):
+        start_workflow(tmp_pm_path, "first", "development")
+        start_workflow(tmp_pm_path, "second", "development")
+        result = abandon_workflow(tmp_pm_path, workflow_id="WF-001")
+
+        assert result["workflow_id"] == "WF-001"
+        # WF-002 should remain ACTIVE
+        wf2 = get_workflow(tmp_pm_path, "WF-002")
+        assert wf2.status == WorkflowStatus.ACTIVE
+
+    def test_abandon_no_active_workflow_raises(self, tmp_pm_path):
+        with pytest.raises(PmServerError, match="No active workflow"):
+            abandon_workflow(tmp_pm_path)
+
+    def test_abandon_nonexistent_workflow_raises(self, tmp_pm_path):
+        with pytest.raises(WorkflowNotFoundError):
+            abandon_workflow(tmp_pm_path, workflow_id="WF-999")
+
+    def test_abandon_already_abandoned_idempotent(self, tmp_pm_path):
+        start_workflow(tmp_pm_path, "auth", "development")
+        abandon_workflow(tmp_pm_path, workflow_id="WF-001")
+        result = abandon_workflow(tmp_pm_path, workflow_id="WF-001")
+
+        assert result["status"] == "already_abandoned"
+        assert result["workflow_id"] == "WF-001"
+        assert "already abandoned" in result["message"]
+
+    def test_abandon_completed_workflow_errors(self, tmp_pm_path):
+        start_workflow(tmp_pm_path, "auth", "development")
+        for _ in range(9):
+            advance_step(tmp_pm_path, skip=True)
+
+        result = abandon_workflow(tmp_pm_path, workflow_id="WF-001")
+        assert result["status"] == "error"
+        assert "completed" in result["message"]
+        # Status must remain COMPLETED, not flip to ABANDONED
+        wf = get_workflow(tmp_pm_path, "WF-001")
+        assert wf.status == WorkflowStatus.COMPLETED
+
+    def test_abandon_blocks_subsequent_advance(self, tmp_pm_path):
+        start_workflow(tmp_pm_path, "auth", "development")
+        abandon_workflow(tmp_pm_path, workflow_id="WF-001")
+
+        result = advance_step(tmp_pm_path, workflow_id="WF-001")
+        assert result["status"] == "error"
+        assert "not active" in result["message"]
+
+    def test_abandon_preserves_step_artifacts(self, tmp_pm_path):
+        start_workflow(tmp_pm_path, "auth", "development")
+        advance_step(tmp_pm_path, artifacts=["ADR-005"])  # decision → tasks
+        abandon_workflow(tmp_pm_path, workflow_id="WF-001")
+
+        wf = get_workflow(tmp_pm_path, "WF-001")
+        assert "ADR-005" in wf.steps[0].artifacts
+        # current_step_index should remain where it was (not pushed to end)
+        assert wf.current_step_index == 1
+
+    def test_abandon_paused_workflow(self, tmp_pm_path):
+        start_workflow(tmp_pm_path, "auth", "development")
+        # Manually pause the workflow (PAUSED setter not yet exposed via API)
+        wf = get_workflow(tmp_pm_path, "WF-001")
+        wf.status = WorkflowStatus.PAUSED
+        save_workflows(tmp_pm_path, [wf])
+
+        result = abandon_workflow(tmp_pm_path, workflow_id="WF-001")
+        assert result["status"] == "abandoned"
+        assert result["previous_status"] == "paused"
+
+    def test_abandon_auto_detects_latest_active(self, tmp_pm_path):
+        start_workflow(tmp_pm_path, "first", "development")
+        start_workflow(tmp_pm_path, "second", "development")
+        result = abandon_workflow(tmp_pm_path)
+        # Should pick the latest ACTIVE workflow (WF-002), matching advance_step semantics
+        assert result["workflow_id"] == "WF-002"
+
+    def test_abandon_does_not_change_step_status(self, tmp_pm_path):
+        start_workflow(tmp_pm_path, "auth", "development")
+        abandon_workflow(tmp_pm_path, workflow_id="WF-001")
+        wf = get_workflow(tmp_pm_path, "WF-001")
+        # Current step stays ACTIVE — abandon doesn't touch step-level state
+        assert wf.steps[0].status == WorkflowStepStatus.ACTIVE
+
+    def test_abandon_progress_reflects_done_steps(self, tmp_pm_path):
+        start_workflow(tmp_pm_path, "auth", "development")
+        advance_step(tmp_pm_path, skip=True)  # 1 done (skipped counts)
+        advance_step(tmp_pm_path, skip=True)  # 2 done
+        result = abandon_workflow(tmp_pm_path, workflow_id="WF-001")
+        assert result["progress"] == "2/9"
+
+
 # ─── Edge Cases ─────────────────────────────────────
 
 
@@ -677,6 +811,7 @@ class TestWorkflowMcpTools:
 
     def test_tool_imports(self):
         from pm_server.server import (
+            pm_workflow_abandon,
             pm_workflow_advance,
             pm_workflow_list,
             pm_workflow_start,
@@ -687,6 +822,7 @@ class TestWorkflowMcpTools:
         assert callable(pm_workflow_start)
         assert callable(pm_workflow_status)
         assert callable(pm_workflow_advance)
+        assert callable(pm_workflow_abandon)
         assert callable(pm_workflow_list)
         assert callable(pm_workflow_templates)
 

@@ -30,7 +30,7 @@ Track tasks, visualize progress, record decisions — through natural language i
 ## Features
 
 - **🔌 Multi-host first** — registers in **Claude Code AND Codex CLI** with one command (`pm-server install --target=auto`). Project rules sync to both `CLAUDE.md` and `AGENTS.md` automatically (ADR-008). Switch hosts mid-project without losing context — same `.pm/` data, same workflows
-- **31 MCP tools** — task CRUD, child issues, status, blockers, velocity, dashboard, ADR, session memory, workflows, knowledge records, multi-host rules injection, and more
+- **32 MCP tools** — task CRUD, child issues, status, blockers, velocity, dashboard, ADR, session memory, workflows, knowledge records, multi-host rules injection, and more
 - **Workflow engine** — template-based development workflows with loops, user gates, and chaining (Discovery → Development)
 - **Knowledge records** — structured findings between casual memory and formal ADR (research, tradeoff, spec, etc.)
 - **Super Research skill** — 3 parallel agents (Domain Expert, Critical Analyst, Lateral Thinker) + Depth Check (6 dimensions) + Fact Check + Cross-Check
@@ -204,7 +204,7 @@ dataclasses, atomic-write helpers).
 
 ---
 
-## MCP Tools (31 tools)
+## MCP Tools (32 tools)
 
 ### Project Management
 
@@ -272,6 +272,7 @@ dataclasses, atomic-write helpers).
 | `pm_workflow_start` | Start a workflow from a template (development / discovery / super-research) |
 | `pm_workflow_status` | View current step, progress, and guidance for active workflow |
 | `pm_workflow_advance` | Advance to next step with artifacts and notes; supports loops and skip |
+| `pm_workflow_abandon` | Abandon a workflow (transition to ABANDONED, preserves step history) |
 | `pm_workflow_list` | List all workflow instances with status filter |
 | `pm_workflow_templates` | List available workflow templates (built-in + custom) |
 
@@ -465,7 +466,7 @@ Claude Code Session
   └── MCP Server (stdio)
         └── pm-server serve
               │
-              ├── server.py    → 31 MCP tools (FastMCP)
+              ├── server.py    → 32 MCP tools (FastMCP)
               ├── models.py    → Pydantic v2 data models (17 models, 15 enums)
               ├── storage.py   → YAML read/write
               ├── workflow.py  → Workflow engine (state machine)

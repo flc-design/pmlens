@@ -70,7 +70,7 @@ from .utils import (
     resolve_project_path,
 )
 from .velocity import calculate_velocity, detect_risks
-from .workflow import advance_step, start_workflow, workflow_status
+from .workflow import abandon_workflow, advance_step, start_workflow, workflow_status
 
 mcp = FastMCP("pm-server")
 
@@ -1491,6 +1491,31 @@ def pm_workflow_advance(
     """
     pm_path = _get_pm_path(project_path)
     return advance_step(pm_path, workflow_id, proceed, artifacts, notes, skip)
+
+
+@mcp.tool()
+def pm_workflow_abandon(
+    workflow_id: str | None = None,
+    notes: str | None = None,
+    project_path: str | None = None,
+) -> dict:
+    """Abandon a workflow (transition to ABANDONED, preserve history).
+
+    Use when you decide to stop a workflow before completion (research dead-end,
+    requirements changed, scope dropped). The workflow's step state, artifacts,
+    and progress are preserved; only the container status changes. Subsequent
+    pm_workflow_advance calls will return an error.
+
+    workflow_id: Specific workflow. Auto-detects the most recent active workflow
+                 if omitted. To abandon a PAUSED workflow, pass its id explicitly.
+    notes: Optional reason for abandonment. Appended to the current step's notes
+           for retrospective context. Skipped if the workflow has no current step.
+
+    Cannot abandon COMPLETED workflows. Re-abandoning an ABANDONED workflow is
+    idempotent (returns status="already_abandoned").
+    """
+    pm_path = _get_pm_path(project_path)
+    return abandon_workflow(pm_path, workflow_id, notes)
 
 
 @mcp.tool()

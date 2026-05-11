@@ -1,6 +1,6 @@
 # PM Server Cheatsheet
 
-> **30 MCP tools** for Claude Code project management.
+> **32 MCP tools** for Claude Code project management.
 > Version 0.3.3+ | Python 3.11+ | PyPI: `pm-server`
 
 ---
@@ -81,6 +81,7 @@ Claude Code session:
 | `pm_workflow_start` | Start a workflow from template | `feature`, `template="development"` |
 | `pm_workflow_status` | Get workflow progress and guidance | `workflow_id?` (auto-detect) |
 | `pm_workflow_advance` | Advance/loop/skip a step | `proceed=True`, `artifacts?`, `skip?` |
+| `pm_workflow_abandon` | Abandon a workflow (preserves history) | `workflow_id?`, `notes?` |
 | `pm_workflow_list` | List workflow instances | `status?` |
 | `pm_workflow_templates` | List available templates | `project_path?` |
 

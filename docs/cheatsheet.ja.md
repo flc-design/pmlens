@@ -1,6 +1,6 @@
 # PM Server チートシート
 
-> Claude Code 用プロジェクト管理 MCP Server — **31 ツール**
+> Claude Code 用プロジェクト管理 MCP Server — **32 ツール**
 > Version 0.3.3+ | Python 3.11+ | PyPI: `pm-server`
 
 ---
@@ -81,6 +81,7 @@ Claude Code セッション:
 | `pm_workflow_start` | テンプレートからワークフローを開始 | `feature`, `template="development"` |
 | `pm_workflow_status` | ワークフロー進捗とガイダンスを取得 | `workflow_id?`（自動検出） |
 | `pm_workflow_advance` | ステップを進める/ループ/スキップ | `proceed=True`, `artifacts?`, `skip?` |
+| `pm_workflow_abandon` | ワークフローを放棄（履歴は保持） | `workflow_id?`, `notes?` |
 | `pm_workflow_list` | ワークフローインスタンス一覧 | `status?` |
 | `pm_workflow_templates` | 利用可能なテンプレート一覧 | `project_path?` |
 

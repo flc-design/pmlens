@@ -30,7 +30,7 @@
 ## 特徴
 
 - **🔌 マルチホストファースト** — `pm-server install --target=auto` 一発で **Claude Code と Codex CLI の両方に登録**。プロジェクトのルールも `CLAUDE.md` と `AGENTS.md` の両方に自動同期 (ADR-008)。プロジェクト途中でホストを切り替えてもコンテキストを失わない — 同じ `.pm/` データ、同じワークフロー
-- **31 の MCP ツール** — タスク CRUD、子イシュー、ステータス、ブロッカー、ベロシティ、ダッシュボード、ADR、セッションメモリ、ワークフロー、ナレッジレコード、マルチホストルール注入 等
+- **32 の MCP ツール** — タスク CRUD、子イシュー、ステータス、ブロッカー、ベロシティ、ダッシュボード、ADR、セッションメモリ、ワークフロー、ナレッジレコード、マルチホストルール注入 等
 - **ワークフローエンジン** — テンプレートベースの開発ワークフロー（ループ、ユーザーゲート、チェイン対応：Discovery → Development）
 - **ナレッジレコード** — カジュアルなメモリとフォーマルな ADR の中間に位置する構造化された知見記録（research、tradeoff、spec 等）
 - **Super Research スキル** — 3 並列エージェント（Domain Expert、Critical Analyst、Lateral Thinker）+ Depth Check（6 次元）+ Fact Check + Cross-Check
@@ -201,7 +201,7 @@ pm-server uninstall --target auto
 
 ---
 
-## MCP ツール一覧（31ツール）
+## MCP ツール一覧（32ツール）
 
 ### プロジェクト管理
 
@@ -269,6 +269,7 @@ pm-server uninstall --target auto
 | `pm_workflow_start` | テンプレートからワークフローを開始（development / discovery / super-research） |
 | `pm_workflow_status` | 現在のステップ、進捗、次に取るべきアクションのガイダンスを表示 |
 | `pm_workflow_advance` | 次のステップへ進める（ループ・スキップ対応、artifacts と notes を引き継げる） |
+| `pm_workflow_abandon` | ワークフローを放棄（ABANDONED へ遷移、ステップ履歴は保持） |
 | `pm_workflow_list` | ステータスフィルタ付きで全ワークフローインスタンスを一覧 |
 | `pm_workflow_templates` | 利用可能なテンプレート一覧（組み込み + カスタム） |
 
@@ -459,7 +460,7 @@ Claude Code Session
   └── MCP Server (stdio)
         └── pm-server serve
               │
-              ├── server.py    → 31 MCP ツール (FastMCP)
+              ├── server.py    → 32 MCP ツール (FastMCP)
               ├── models.py    → Pydantic v2 データモデル (17 models, 15 enums)
               ├── storage.py   → YAML 読み書き
               ├── workflow.py  → ワークフローエンジン (state machine)

@@ -1,6 +1,7 @@
 """Workflow engine for managing development workflow state.
 
-The engine manages workflow lifecycle: start → advance through steps → complete.
+The engine manages workflow lifecycle: start → advance through steps → complete,
+with abandon as a non-terminal escape hatch that preserves history.
 Supports loops (brainstorming), gates (user approval), and chaining (discovery → development).
 
 Architecture:
@@ -294,6 +295,73 @@ def advance_step(
         wf.updated = _dt.date.today()
         workflows[wf_index] = wf
         save_workflows(pm_path, workflows)
+
+    return result
+
+
+def abandon_workflow(
+    pm_path: Path,
+    workflow_id: str | None = None,
+    notes: str | None = None,
+) -> dict:
+    """Abandon an active or paused workflow.
+
+    Transitions WorkflowStatus to ABANDONED while preserving step state
+    (artifacts, notes, current_step_index). Subsequent advance_step calls
+    will error since the workflow is no longer ACTIVE.
+
+    Args:
+        workflow_id: Specific workflow. Auto-detects the most recent ACTIVE
+            workflow if omitted. To abandon a PAUSED workflow, pass its id.
+        notes: Optional reason. Appended to the current step's notes if the
+            workflow has a current step in range.
+
+    Returns:
+        Result dict. status="abandoned" on success, "already_abandoned" if
+        the workflow was already ABANDONED (idempotent), or "error" if the
+        workflow is COMPLETED.
+    """
+    with _yaml_transaction(pm_path, "workflows.yaml"):
+        workflows = load_workflows(pm_path)
+        wf, wf_index = _resolve_workflow(workflows, workflow_id)
+
+        if wf.status == WorkflowStatus.ABANDONED:
+            return {
+                "status": "already_abandoned",
+                "workflow_id": wf.id,
+                "feature": wf.feature,
+                "message": f"Workflow {wf.id} is already abandoned",
+            }
+
+        if wf.status == WorkflowStatus.COMPLETED:
+            return {
+                "status": "error",
+                "workflow_id": wf.id,
+                "message": f"Cannot abandon {wf.id}: workflow is completed",
+            }
+
+        previous_status = wf.status
+
+        if notes and 0 <= wf.current_step_index < len(wf.steps):
+            current = wf.steps[wf.current_step_index]
+            current.notes = notes if not current.notes else f"{current.notes}\n{notes}"
+
+        wf.status = WorkflowStatus.ABANDONED
+        wf.updated = _dt.date.today()
+        workflows[wf_index] = wf
+        save_workflows(pm_path, workflows)
+
+        result: dict = {
+            "status": "abandoned",
+            "workflow_id": wf.id,
+            "feature": wf.feature,
+            "template": wf.template,
+            "previous_status": previous_status.value,
+            "progress": _progress(wf),
+        }
+
+        if 0 <= wf.current_step_index < len(wf.steps):
+            result["abandoned_at_step"] = _step_guidance(wf.steps[wf.current_step_index])
 
     return result
 
