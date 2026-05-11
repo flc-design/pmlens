@@ -50,6 +50,9 @@ select = ["E", "F", "I", "N", "W", "UP"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = [
+    "smoke: end-to-end CLI subprocess smoke tests (PMSERV-056). Included by default; run alone with `pytest -m smoke` or skip via `pytest -m \"not smoke\"`.",
+]
 
 [tool.coverage.run]
 source = ["src/pm_server"]
