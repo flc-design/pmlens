@@ -603,6 +603,60 @@ class TestPmAddIssue:
         assert result["task"]["priority"] == "P0"
         assert "bugfix" in result["task"]["tags"]
 
+    def test_add_issue_defect_writes_tasks_atomically(self, initialized_project, monkeypatch):
+        """PMSERV-065 / ADR-012: defect issue creation on a done parent must
+        perform exactly one ``save_tasks`` write under a single
+        ``_yaml_transaction``. Pre-fix the compound op used ``add_task`` +
+        ``update_task`` which wrote twice, leaving a TOCTOU window between
+        them. A regression to that shape would surface here as 2 writes.
+        """
+        from pm_server import server as _server_mod
+
+        call_count = {"n": 0}
+        real_save = _server_mod.save_tasks
+
+        def counting_save(pm_path, tasks):
+            call_count["n"] += 1
+            real_save(pm_path, tasks)
+
+        monkeypatch.setattr(_server_mod, "save_tasks", counting_save)
+
+        result = pm_add_issue(
+            parent_id="TEST-001",  # status: done — triggers compound parent revert
+            title="Atomic compound write regression",
+            project_path=str(initialized_project),
+        )
+        assert result["parent_reverted"] is True, "fixture invariant: TEST-001 is done"
+        assert call_count["n"] == 1, (
+            f"compound op must be one atomic write (ADR-012), got {call_count['n']}"
+        )
+
+    def test_add_issue_next_number_from_in_lock_list(self, initialized_project, monkeypatch):
+        """PMSERV-065: pm_add_issue must compute the next task number from the
+        in-lock fresh task list, not via a separate ``next_task_number(pm_path)``
+        call that re-loads outside the lock (race window R3 in the spec).
+        """
+        from pm_server import server as _server_mod
+
+        call_count = {"n": 0}
+        real = _server_mod.next_task_number
+
+        def counting(pm_path):
+            call_count["n"] += 1
+            return real(pm_path)
+
+        monkeypatch.setattr(_server_mod, "next_task_number", counting)
+
+        pm_add_issue(
+            parent_id="TEST-002",
+            title="Number from in-lock list",
+            project_path=str(initialized_project),
+        )
+        assert call_count["n"] == 0, (
+            f"next_task_number(pm_path) re-load was expected to be zero "
+            f"(ADR-012 — compute from in-lock list), got {call_count['n']}"
+        )
+
 
 class TestPmTasksParentFilter:
     def test_filter_by_parent_id(self, initialized_project):

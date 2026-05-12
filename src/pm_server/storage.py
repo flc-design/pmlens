@@ -195,9 +195,14 @@ def update_task(pm_path: Path, task_id: str, **updates) -> Task:
     raise TaskNotFoundError(f"Task {task_id} not found")
 
 
-def next_task_number(pm_path: Path) -> int:
-    """Return the next available task number."""
-    tasks = load_tasks(pm_path)
+def _next_task_number_from_list(tasks: list[Task]) -> int:
+    """Compute the next task number from an already-loaded tasks list.
+
+    Pure helper for compound-RMW callers that already hold
+    ``_yaml_transaction(..., 'tasks.yaml')`` (e.g. ``pm_add_issue`` —
+    see ADR-012 / PMSERV-065). Avoids the nested-load race that would
+    occur if ``next_task_number`` were re-entered inside an open lock.
+    """
     if not tasks:
         return 1
     numbers = []
@@ -206,6 +211,11 @@ def next_task_number(pm_path: Path) -> int:
         if len(parts) == 2 and parts[1].isdigit():
             numbers.append(int(parts[1]))
     return max(numbers, default=0) + 1
+
+
+def next_task_number(pm_path: Path) -> int:
+    """Return the next available task number."""
+    return _next_task_number_from_list(load_tasks(pm_path))
 
 
 # ─── Decisions ───────────────────────────────────────

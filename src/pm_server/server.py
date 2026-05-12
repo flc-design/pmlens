@@ -39,6 +39,7 @@ from .models import (
 )
 from .storage import (
     GLOBAL_PM_DIR,
+    _next_task_number_from_list,
     _yaml_transaction,
     add_daily_log,
     add_decision,
@@ -58,6 +59,7 @@ from .storage import (
     register_project,
     save_project,
     save_registry,
+    save_tasks,
     update_knowledge,
     update_task,
 )
@@ -521,36 +523,44 @@ def pm_add_issue(
 
     pm_path = _get_pm_path(project_path)
     project = load_project(pm_path)
-    tasks = load_tasks(pm_path)
 
-    parent = None
-    for t in tasks:
-        if t.id == parent_id:
-            parent = t
-            break
-    if parent is None:
-        raise TaskNotFoundError(f"Parent task {parent_id} not found")
+    # PMSERV-065 / ADR-012: compound op (child append + conditional parent
+    # revert) を単一 _yaml_transaction("tasks.yaml") に統合し TOCTOU を解消。
+    # storage.py docstring の規約に従い、内部で add_task / update_task を
+    # 再呼び出しせず raw load_tasks / save_tasks を使う (filelock の
+    # self-deadlock を回避)。next_task_number も lock 内 fresh list から
+    # 計算するため id 衝突 race も同時に閉じる。
+    parent_reverted = False
+    with _yaml_transaction(pm_path, "tasks.yaml"):
+        tasks = load_tasks(pm_path)
+        parent = next((t for t in tasks if t.id == parent_id), None)
+        if parent is None:
+            raise TaskNotFoundError(f"Parent task {parent_id} not found")
 
-    number = next_task_number(pm_path)
-    task_id = generate_task_id(project.name, number)
+        number = _next_task_number_from_list(tasks)
+        task_id = generate_task_id(project.name, number)
 
-    child = Task(
-        id=task_id,
-        title=title,
-        phase=parent.phase,
-        priority=Priority(priority),
-        description=description,
-        tags=tags or [],
-        parent_id=parent_id,
-        severity=severity_enum,
-    )
-    add_task(pm_path, child)
+        child = Task(
+            id=task_id,
+            title=title,
+            phase=parent.phase,
+            priority=Priority(priority),
+            description=description,
+            tags=tags or [],
+            parent_id=parent_id,
+            severity=severity_enum,
+        )
+        tasks.append(child)
+
+        if severity_enum == IssueSeverity.DEFECT and parent.status == TaskStatus.DONE:
+            parent.status = TaskStatus.REVIEW
+            parent.updated = _dt.date.today()
+            parent_reverted = True
+
+        save_tasks(pm_path, tasks)
 
     warnings: list[dict] = []
-    parent_reverted = False
-    if severity_enum == IssueSeverity.DEFECT and parent.status == TaskStatus.DONE:
-        update_task(pm_path, parent_id, status=TaskStatus.REVIEW)
-        parent_reverted = True
+    if parent_reverted:
         warnings.append(
             _build_warning(
                 level="info",
