@@ -45,6 +45,7 @@ from .storage import (
     add_decision,
     add_knowledge,
     add_task,
+    get_builtin_templates_dir_status,
     init_pm_directory,
     list_workflow_templates,
     load_knowledge,
@@ -299,6 +300,7 @@ def pm_status(project_path: str | None = None) -> dict:
         "next_pm_actions": next_actions,
         "diagnostics": {
             "utils_fingerprint": get_utils_fingerprint(),
+            "builtin_templates_dir": get_builtin_templates_dir_status(),
         },
     }
 
@@ -1570,12 +1572,40 @@ def pm_workflow_templates(project_path: str | None = None) -> dict:
 
     Shows both built-in and custom templates.
     Custom templates in .pm/workflow_templates/ override built-in ones with the same name.
+
+    The response includes a ``warnings`` list. If the built-in templates directory
+    has gone stale post-import (PMSERV-068 — typically ``pip install -e .``
+    uninstalling the wheel under a running MCP server), a
+    ``builtin_templates_dir_missing`` warning is emitted. Callers (Claude) MUST
+    surface any non-empty warnings to the user verbatim.
     """
     pm_path = _get_pm_path(project_path)
     templates = list_workflow_templates(pm_path)
+
+    warnings: list[dict] = []
+    builtin_status = get_builtin_templates_dir_status()
+    if builtin_status["stale"]:
+        warnings.append(
+            _build_warning(
+                level="warn",
+                code="builtin_templates_dir_missing",
+                message=(
+                    f"組み込みテンプレートディレクトリ {builtin_status['path']!r} が "
+                    f"起動後に消失したため、組み込みテンプレートが list に含まれていません "
+                    f"(2026-05-08 incident と同根: pip install -e . 等で wheel が "
+                    f"uninstall された可能性が高い)"
+                ),
+                remediation=(
+                    "この MCP サーバー (該当の Claude Code セッション) を再起動してください。"
+                    "再起動後、import 時に新しい __file__ ベースのパスが解決されます。"
+                ),
+            )
+        )
+
     return {
         "count": len(templates),
         "templates": templates,
+        "warnings": warnings,
     }
 
 

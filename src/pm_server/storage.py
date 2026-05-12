@@ -478,6 +478,34 @@ def init_pm_directory(project_path: Path) -> Path:
 BUILTIN_TEMPLATES_DIR = Path(__file__).parent / "templates" / "workflows"
 
 
+def get_builtin_templates_dir_status() -> dict:
+    """Return sanity-check info for ``BUILTIN_TEMPLATES_DIR`` (PMSERV-068).
+
+    Captures the stale-module-cache pattern documented in the 2026-05-08
+    incident: ``BUILTIN_TEMPLATES_DIR`` is resolved relative to ``__file__``
+    at module-import time. If the wheel is later uninstalled in the same
+    Python env (typically by ``pip install -e .``), the path remains in
+    memory but no longer exists on disk, and ``list_workflow_templates``
+    silently returns zero built-ins. Surfacing this state lets callers
+    flag the MCP server for a restart instead of misreading the empty
+    list as "no templates available".
+    """
+    path = BUILTIN_TEMPLATES_DIR
+    exists = path.is_dir()
+    template_count = 0
+    if exists:
+        try:
+            template_count = sum(1 for _ in path.glob("*.yaml"))
+        except OSError:
+            template_count = -1
+    return {
+        "path": str(path),
+        "exists": exists,
+        "template_count": template_count,
+        "stale": not exists,
+    }
+
+
 def load_workflows(pm_path: Path) -> list[Workflow]:
     """Load all workflows from workflows.yaml."""
     data = _load_yaml(pm_path / "workflows.yaml")

@@ -24,6 +24,7 @@ from pm_server.server import (
     pm_update_rules,
     pm_update_task,
     pm_velocity,
+    pm_workflow_templates,
 )
 from pm_server.storage import (
     init_pm_directory,
@@ -1054,3 +1055,55 @@ class TestPmRecall:
         result = pm_recall(query="cross test", cross_project=True)
         assert result["current_session_id"] == "sess-cross"
         assert result["cross_project"] is True
+
+
+class TestBuiltinTemplatesDirDiagnostics:
+    """PMSERV-068 — surface BUILTIN_TEMPLATES_DIR sanity state through MCP tools.
+
+    These tests pair with the inner-helper tests in test_storage.py
+    (``TestBuiltinTemplatesDirStatus``). Here we verify the diagnostic
+    reaches the two surfaces a Claude session sees: ``pm_status`` and
+    ``pm_workflow_templates``.
+    """
+
+    def test_pm_status_diagnostics_includes_builtin_templates_dir(self, initialized_project):
+        result = pm_status(project_path=str(initialized_project))
+        diagnostics = result["diagnostics"]
+        assert "builtin_templates_dir" in diagnostics
+        btd = diagnostics["builtin_templates_dir"]
+        assert set(btd.keys()) == {"path", "exists", "template_count", "stale"}
+        # Healthy install in the test runner: dir exists, not stale
+        assert btd["exists"] is True
+        assert btd["stale"] is False
+
+    def test_pm_workflow_templates_has_warnings_field(self, initialized_project):
+        """Healthy state: warnings is present and empty."""
+        result = pm_workflow_templates(project_path=str(initialized_project))
+        assert "warnings" in result
+        assert result["warnings"] == []
+        # Pre-existing fields unchanged (backwards compatibility)
+        assert "count" in result
+        assert "templates" in result
+
+    def test_pm_workflow_templates_warns_on_stale_builtin_dir(
+        self, initialized_project, tmp_path, monkeypatch
+    ):
+        """If BUILTIN_TEMPLATES_DIR no longer resolves on disk (the 2026-05-08
+        incident shape), ``pm_workflow_templates`` must emit a structured
+        ``builtin_templates_dir_missing`` warning rather than silently
+        returning fewer templates.
+        """
+        from pm_server import storage as _storage
+
+        vanished = tmp_path / "uninstalled" / "templates" / "workflows"
+        monkeypatch.setattr(_storage, "BUILTIN_TEMPLATES_DIR", vanished)
+
+        result = pm_workflow_templates(project_path=str(initialized_project))
+        warnings = result["warnings"]
+        assert len(warnings) == 1
+        w = warnings[0]
+        assert w["code"] == "builtin_templates_dir_missing"
+        assert w["level"] == "warn"
+        assert str(vanished) in w["message"]
+        assert "remediation" in w
+        assert "再起動" in w["remediation"]

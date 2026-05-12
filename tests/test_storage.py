@@ -310,3 +310,45 @@ class TestYamlTransactionLocking:
         # Restore replace and verify the original is untouched (atomicity)
         monkeypatch.setattr(_utils.os, "replace", original_replace)
         assert original_path.read_bytes() == original_bytes
+
+
+class TestBuiltinTemplatesDirStatus:
+    """PMSERV-068 — diagnostic helper for the BUILTIN_TEMPLATES_DIR stale-cache
+    pattern documented in the 2026-05-08 incident.
+    """
+
+    def test_returns_dict_with_expected_keys(self):
+        from pm_server.storage import get_builtin_templates_dir_status
+
+        status = get_builtin_templates_dir_status()
+        assert set(status.keys()) == {"path", "exists", "template_count", "stale"}
+
+    def test_healthy_install_reports_existing_dir(self):
+        """In a normal install, the builtin templates dir exists with >= 1 yaml."""
+        from pm_server.storage import get_builtin_templates_dir_status
+
+        status = get_builtin_templates_dir_status()
+        assert status["exists"] is True
+        assert status["stale"] is False
+        assert status["template_count"] >= 1, (
+            "src/pm_server/templates/workflows/ must ship at least one builtin"
+        )
+        # Path should resolve under pm_server/templates/workflows
+        assert status["path"].endswith("workflows")
+
+    def test_stale_when_dir_missing(self, tmp_path, monkeypatch):
+        """Simulate the 2026-05-08 incident: BUILTIN_TEMPLATES_DIR points at
+        a path that no longer exists on disk (e.g. wheel uninstalled after
+        import). Helper must surface ``stale=True`` instead of silently
+        returning template_count=0 with no signal.
+        """
+        from pm_server import storage as _storage
+
+        vanished = tmp_path / "uninstalled" / "templates" / "workflows"
+        monkeypatch.setattr(_storage, "BUILTIN_TEMPLATES_DIR", vanished)
+
+        status = _storage.get_builtin_templates_dir_status()
+        assert status["exists"] is False
+        assert status["stale"] is True
+        assert status["template_count"] == 0
+        assert str(vanished) in status["path"]
