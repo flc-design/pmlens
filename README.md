@@ -75,8 +75,8 @@ You can also update manually:
 ```
 
 > The legacy `pm_update_claudemd` tool is still available as a back-compat alias
-> (CLAUDE.md only). It is slated for `DeprecationWarning` in v0.6.0 and removal
-> in v1.0.0 (PMSERV-055).
+> (CLAUDE.md only). It emits a `DeprecationWarning` since v0.6.0 and is slated
+> for removal in v1.0.0 (PMSERV-055).
 
 ### Initialize a project
 
@@ -196,7 +196,7 @@ A3 in [`docs/design.md` §6.4](docs/design.md).
 | Legacy CLAUDE.md only            | `pm_update_claudemd` / `pm-server update-claudemd`    |
 
 `AGENTS.md` is backed up to `AGENTS.md.bak.<timestamp>` before each write.
-`CLAUDE.md` backup symmetry will land in v0.6.0 (PMSERV-058).
+`CLAUDE.md` backup symmetry is still pending in PMSERV-058 (originally targeted for v0.6.0).
 
 See [`docs/design.md` §6](docs/design.md) and ADR-008 for the multi-host
 rules-injection design (claudemd → rules module rename, marker convention,
@@ -281,7 +281,7 @@ dataclasses, atomic-write helpers).
 | Tool | Description |
 |---|---|
 | `pm_update_rules` | Update PM Server rules section in CLAUDE.md and/or AGENTS.md (multi-host, ADR-008). Default `target=auto` detects installed hosts |
-| `pm_update_claudemd` | Legacy alias of `pm_update_rules(target="claude-code")` — slated for deprecation in v0.6.0 |
+| `pm_update_claudemd` | Legacy alias of `pm_update_rules(target="claude-code")` — deprecated since v0.6.0, removal in v1.0.0 |
 
 ---
 
@@ -447,7 +447,7 @@ pm-server migrate          # Migrate from pm-agent (rename transition)
 pm-server update-rules     # Inject PM Server rules into CLAUDE.md and/or AGENTS.md (ADR-008).
                            # --target {auto,all,claude-code,codex} (default: auto)
                            # --dry-run / --all (apply to every registered project)
-pm-server update-claudemd  # Legacy alias of `update-rules --target=claude-code`. Deprecation in v0.6.0.
+pm-server update-claudemd  # Legacy alias of `update-rules --target=claude-code`. Deprecated since v0.6.0.
 pm-server install-hooks    # Manually install Claude Code hooks (auto-installed via pm_status)
 pm-server uninstall-hooks  # Remove PM Server hooks from Claude Code settings
 ```

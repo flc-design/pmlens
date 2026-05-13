@@ -385,7 +385,8 @@ class InjectResult:
             cross-check R6, applies PMSERV-039 L1 lesson).
         backup_path: Path to ``.bak.<timestamp>`` if created, else None.
             CLAUDE.md does NOT get a backup in v0.5.0 (v0.4.0 parity);
-            AGENTS.md always does (ADR-008 #11). v0.6.0 will symmetrise.
+            AGENTS.md always does (ADR-008 #11). Symmetrising is tracked
+            in PMSERV-058 (still pending).
         is_dry_run: True if no on-disk side effects occurred.
     """
 

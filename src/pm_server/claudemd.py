@@ -7,8 +7,8 @@ work unchanged::
     from pm_server.claudemd import ensure_claudemd, update_claudemd, ...
 
 The shim is currently transparent — every symbol is the same object as
-in :mod:`pm_server.rules` (verifiable via ``is`` identity). It will be
-deprecated in v0.6.0 and removed in v1.0.0.
+in :mod:`pm_server.rules` (verifiable via ``is`` identity). It is
+deprecated since v0.6.0 and slated for removal in v1.0.0.
 """
 
 from pm_server.rules import (

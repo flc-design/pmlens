@@ -33,7 +33,7 @@ Claude Code セッション:
 | `pm_discover` | プロジェクトをスキャンして自動登録 | `scan_path="."` |
 | `pm_cleanup` | レジストリの健全性チェック、無効エントリ削除 | _(なし)_ |
 | `pm_update_rules` | CLAUDE.md / AGENTS.md のルールを更新（multi-host、ADR-008） | `project_path?, target?, dry_run?` |
-| `pm_update_claudemd` | レガシー alias: `pm_update_rules(target="claude-code")` (v0.6.0 で deprecation) | `project_path?` |
+| `pm_update_claudemd` | レガシー alias: `pm_update_rules(target="claude-code")` (v0.6.0 以降 deprecated) | `project_path?` |
 | `pm_dashboard` | HTML/テキスト ダッシュボード生成 | `format="html"` |
 
 ### タスク管理

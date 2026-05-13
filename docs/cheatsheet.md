@@ -33,7 +33,7 @@ Claude Code session:
 | `pm_discover` | Scan for projects and register them | `scan_path="."` |
 | `pm_cleanup` | Health-check registry, remove invalid entries | _(none)_ |
 | `pm_update_rules` | Update CLAUDE.md and/or AGENTS.md rules (multi-host, ADR-008) | `project_path?, target?, dry_run?` |
-| `pm_update_claudemd` | Legacy alias: `pm_update_rules(target="claude-code")` (deprecation v0.6.0) | `project_path?` |
+| `pm_update_claudemd` | Legacy alias: `pm_update_rules(target="claude-code")` (deprecated since v0.6.0) | `project_path?` |
 | `pm_dashboard` | Generate HTML/text dashboard | `format="html"` |
 
 ### Tasks
