@@ -30,6 +30,7 @@ from .models import (
     Project,
     ProjectNotFoundError,
     ProjectStatus,
+    RegistryEntry,
     RiskStatus,
     SessionSummary,
     Task,
@@ -1078,17 +1079,46 @@ def _has_pm_dir() -> bool:
 
 @mcp.tool()
 def pm_discover(scan_path: str = ".") -> dict:
-    """Scan for projects with .pm/ directories and register them."""
+    """Scan for projects with ``.pm/`` directories and register them.
+
+    The filesystem walk is performed without holding the registry lock so
+    that long scans do not block concurrent sessions. The diff between the
+    scan result and the current registry is then committed inside a single
+    ``_yaml_transaction(GLOBAL_PM_DIR, "registry")`` (PMSERV-066):
+
+    1. ``load_registry()`` runs **inside** the lock, closing the
+       pre-existing TOCTOU window where a lock-free snapshot was used to
+       decide whether to append new entries.
+    2. New entries are accumulated in memory and committed via a single
+       ``save_registry`` call, replacing the per-project lock acquire/
+       release loop that previously took N filelocks for N projects.
+
+    This is the same "lift the lock one level up and call raw load/save
+    directly" idiom established by ADR-012 for ``pm_add_issue`` — see
+    ``storage.py`` module docstring for the compound-op discipline.
+    """
     found = discover_projects(Path(scan_path))
-    newly_registered = []
+    if not found:
+        return {
+            "scanned": scan_path,
+            "found": 0,
+            "newly_registered": 0,
+            "projects": [],
+        }
 
-    registry = load_registry()
-    registered_paths = {p.path for p in registry.projects}
-
-    for proj in found:
-        if proj["path"] not in registered_paths:
-            register_project(Path(proj["path"]), proj["name"])
+    newly_registered: list[dict] = []
+    with _yaml_transaction(GLOBAL_PM_DIR, "registry"):
+        registry = load_registry()
+        registered_paths = {p.path for p in registry.projects}
+        for proj in found:
+            resolved = str(Path(proj["path"]).resolve())
+            if resolved in registered_paths:
+                continue
+            registry.projects.append(RegistryEntry(path=resolved, name=proj["name"]))
+            registered_paths.add(resolved)
             newly_registered.append(proj)
+        if newly_registered:
+            save_registry(registry)
 
     return {
         "scanned": scan_path,

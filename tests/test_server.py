@@ -222,6 +222,116 @@ class TestPmDiscover:
         result = pm_discover(scan_path=str(tmp_path))
         assert result["found"] == 0
 
+    def test_discover_batches_save_into_one_call(self, tmp_path, monkeypatch):
+        """PMSERV-066: ``pm_discover`` must commit N new entries with a
+        single ``save_registry`` call, not N per-entry saves.
+
+        Before the fix the implementation called ``register_project`` in a
+        loop, each acquiring its own ``_yaml_transaction(GLOBAL_PM_DIR,
+        "registry")`` and writing ``registry.yaml`` once per project (N
+        filelock acquires + N atomic writes). After the fix the entire diff
+        is batched into one transaction with exactly one write.
+        """
+        from pm_server import server as _server_mod
+
+        for name in ["p1", "p2", "p3"]:
+            pm = tmp_path / name / ".pm"
+            pm.mkdir(parents=True)
+            (pm / "project.yaml").write_text(f"name: {name}\n")
+
+        call_count = {"n": 0}
+        real_save = _server_mod.save_registry
+
+        def counting(*args, **kwargs):
+            call_count["n"] += 1
+            return real_save(*args, **kwargs)
+
+        monkeypatch.setattr(_server_mod, "save_registry", counting)
+
+        result = pm_discover(scan_path=str(tmp_path))
+        assert result["found"] == 3
+        assert result["newly_registered"] == 3
+        assert call_count["n"] == 1, f"Expected 1 batched save_registry call, got {call_count['n']}"
+
+    def test_discover_loads_registry_inside_lock(self, tmp_path, monkeypatch):
+        """PMSERV-066: ``load_registry`` must occur inside the registry
+        ``_yaml_transaction``, not in a lock-free pre-snapshot.
+
+        The pre-fix implementation called ``load_registry()`` lock-free,
+        used the snapshot to pick "new" entries, then took N separate locks
+        in the loop. Another process could register a project between the
+        snapshot and any of those per-call locks, producing a stale "is
+        this new?" decision. Locking around the load closes that window.
+        """
+        from contextlib import contextmanager
+
+        from pm_server import server as _server_mod
+
+        pm = tmp_path / "p1" / ".pm"
+        pm.mkdir(parents=True)
+        (pm / "project.yaml").write_text("name: p1\n")
+
+        events: list[str] = []
+        real_load = _server_mod.load_registry
+        real_tx = _server_mod._yaml_transaction
+
+        def tracking_load(*args, **kwargs):
+            events.append("load")
+            return real_load(*args, **kwargs)
+
+        @contextmanager
+        def tracking_tx(*args, **kwargs):
+            events.append("lock_enter")
+            with real_tx(*args, **kwargs):
+                yield
+            events.append("lock_exit")
+
+        monkeypatch.setattr(_server_mod, "load_registry", tracking_load)
+        monkeypatch.setattr(_server_mod, "_yaml_transaction", tracking_tx)
+
+        pm_discover(scan_path=str(tmp_path))
+
+        assert events.count("load") == 1, events
+        assert "lock_enter" in events, events
+        load_idx = events.index("load")
+        lock_idx = events.index("lock_enter")
+        assert lock_idx < load_idx, f"load_registry must happen inside the lock; got {events}"
+
+    def test_discover_skips_save_when_all_known(self, tmp_path, monkeypatch):
+        """PMSERV-066: a discover pass where every found project is already
+        registered must not write ``registry.yaml`` at all.
+
+        With the batched implementation, the lock is still acquired (so the
+        load is consistent), but ``save_registry`` is only called when
+        ``newly_registered`` is non-empty. This guards against churning the
+        atomic-write path on idempotent re-discoveries.
+        """
+        from pm_server import server as _server_mod
+
+        # First pass: register one project
+        pm = tmp_path / "p1" / ".pm"
+        pm.mkdir(parents=True)
+        (pm / "project.yaml").write_text("name: p1\n")
+        first = pm_discover(scan_path=str(tmp_path))
+        assert first["newly_registered"] == 1
+
+        # Second pass: same scan, count save_registry calls — must be 0
+        call_count = {"n": 0}
+        real_save = _server_mod.save_registry
+
+        def counting(*args, **kwargs):
+            call_count["n"] += 1
+            return real_save(*args, **kwargs)
+
+        monkeypatch.setattr(_server_mod, "save_registry", counting)
+
+        second = pm_discover(scan_path=str(tmp_path))
+        assert second["found"] == 1
+        assert second["newly_registered"] == 0
+        assert call_count["n"] == 0, (
+            f"Idempotent re-discover should not save_registry, got {call_count['n']} call(s)"
+        )
+
 
 class TestPmCleanup:
     def test_cleanup_removes_invalid(self, tmp_path, initialized_project):

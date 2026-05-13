@@ -124,22 +124,46 @@ def serve():
 @cli.command()
 @click.argument("scan_path", default=".")
 def discover(scan_path: str):
-    """Scan for projects and register them."""
+    """Scan for projects and register them.
+
+    Mirrors the ``pm_discover`` MCP tool (PMSERV-066): a single registry
+    transaction batches every new entry so the CLI does not differ in
+    locking semantics from the in-process MCP path.
+    """
     from pathlib import Path
 
     from .discovery import discover_projects
-    from .storage import register_project
+    from .models import RegistryEntry
+    from .storage import (
+        GLOBAL_PM_DIR,
+        _yaml_transaction,
+        load_registry,
+        save_registry,
+    )
 
     found = discover_projects(Path(scan_path))
     if not found:
         click.echo("No projects with .pm/ found.")
         return
 
-    for proj in found:
-        register_project(Path(proj["path"]), proj["name"])
+    newly_registered: list[dict] = []
+    with _yaml_transaction(GLOBAL_PM_DIR, "registry"):
+        registry = load_registry()
+        registered_paths = {p.path for p in registry.projects}
+        for proj in found:
+            resolved = str(Path(proj["path"]).resolve())
+            if resolved in registered_paths:
+                continue
+            registry.projects.append(RegistryEntry(path=resolved, name=proj["name"]))
+            registered_paths.add(resolved)
+            newly_registered.append(proj)
+        if newly_registered:
+            save_registry(registry)
+
+    for proj in newly_registered:
         click.echo(f"  ✓ {proj['name']} ({proj['path']})")
 
-    click.echo(f"\n{len(found)} project(s) registered.")
+    click.echo(f"\n{len(newly_registered)} project(s) registered (out of {len(found)} found).")
 
 
 @cli.command()

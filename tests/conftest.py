@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+import pm_server.server
 import pm_server.storage
 from pm_server.models import (
     Consequences,
@@ -30,6 +31,11 @@ def isolated_registry(tmp_path, monkeypatch):
     fake_global_pm = tmp_path / "fake_global_pm"
     fake_global_pm.mkdir()
     monkeypatch.setattr(pm_server.storage, "GLOBAL_PM_DIR", fake_global_pm)
+    # PMSERV-066: server.py also imports GLOBAL_PM_DIR at module-import time
+    # (server.py:from .storage import GLOBAL_PM_DIR), so the storage-side
+    # monkeypatch alone leaves the server-side binding pointing at the real
+    # ~/.pm/. Patch both to keep all GLOBAL_PM_DIR consumers in lock-step.
+    monkeypatch.setattr(pm_server.server, "GLOBAL_PM_DIR", fake_global_pm)
 
 
 @pytest.fixture
