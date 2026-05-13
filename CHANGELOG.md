@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.6.0] - 2026-05-13
+
+This release closes the **Concurrent Sessions & Data Integrity** track (phase-9). All known lost-update and TOCTOU windows on `~/.pm/registry.yaml` and `.pm/tasks.yaml` are now wrapped in a single `_yaml_transaction`. Memory storage moves to SQLite WAL so reader and writer no longer block each other. CI runs on every push (Python 3.11/3.12/3.13). Two new `pm_status.diagnostics` entries surface stale module-state that previously failed silently.
+
+### Added
+- **YAML atomic write + per-file lock (PMSERV-048, ADR-011)**: every `_save_yaml` now writes via `tempfile.mkstemp` + `os.replace`, and reads/writes that compose into a logical transaction are wrapped in `_yaml_transaction(pm_path, "<basename>")`. The transaction is intentionally non-reentrant — a second acquire from the same process deadlocks — so callers must compose, not nest. See the `storage.py` module docstring for the compound-op discipline.
+- **SQLite WAL mode for memory (PMSERV-047)**: `MemoryStore` opens `.pm/memory.db` with `PRAGMA journal_mode=WAL` and `busy_timeout=5000`, removing the reader/writer block that previously surfaced under concurrent `pm_recall` / `pm_remember`.
+- **`pm_workflow_abandon` MCP tool (PMSERV-052)**: surfaces the existing `WorkflowStatus.ABANDONED` value as a first-class tool, with `reason` and `notes` parameters. MCP tool count: 31 → 32.
+- **`pm_status.diagnostics.utils_fingerprint` (PMSERV-060)**: pm_status reports the SHA-256 of `utils.py` as loaded into the running MCP process vs. the file on disk. A `stale: true` flag indicates the MCP server has not picked up newer edits — diagnosing the same stale-import class as PMSERV-068 below, but for `utils.py` constants.
+- **`pm_status.diagnostics.builtin_templates_dir` + `pm_workflow_templates.warnings` (PMSERV-068)**: surface the 2026-05-08 incident where `BUILTIN_TEMPLATES_DIR` was resolved at import time and silently invalidated when the wheel was uninstalled (`pip install -e .`). Both the standing diagnostic and an action-time warning code `builtin_templates_dir_missing` are emitted; CLAUDE/AGENTS rules now require relaying `warnings[]` verbatim.
+- **GitHub Actions CI (PMSERV-056)**: `.github/workflows/ci.yml` runs `ruff check`, `ruff format --check`, and `pytest --cov` on every push and PR to `main`, on Python 3.11 / 3.12 / 3.13. Two `tests/test_smoke.py` cases cover `pm-server install --dry-run` for both Claude Code and Codex targets so a packaging-time regression cannot land green.
+- **`pytest-cov` + branch-coverage configuration (PMSERV-053)**: `pyproject.toml` now declares `pytest-cov` as a dev dependency and configures `[tool.coverage.run] branch = true` with sensible `omit` patterns.
+
+### Fixed
+- **`pm_add_issue` compound TOCTOU (PMSERV-065, ADR-012)**: the read-modify-write that creates a child issue and conditionally reverts a `done` parent to `review` now runs under a single `_yaml_transaction(pm_path, "tasks.yaml")`. This closes three race windows in one move: the `add_task` ↔ `update_task` gap (R1), the initial `load_tasks` ↔ parent-deletion race (R2), and the `next_task_number` ↔ append collision (R3). A new `_next_task_number_from_list` pure helper computes the next id from the in-lock task list.
+- **`pm_discover` batched register + lock-free snapshot TOCTOU (PMSERV-066)**: replaces the `for proj in found: register_project(...)` loop with one `_yaml_transaction(GLOBAL_PM_DIR, "registry")` that does a fresh `load_registry()` inside the lock, appends every new entry, and writes `registry.yaml` once. The previous implementation snapshotted the registry lock-free at the top of the function and would silently lose entries against a concurrent registration. `__main__.py`'s `discover` CLI now uses the same path so MCP and CLI no longer differ in locking semantics.
+- **`test_migrate_from_pm_agent` host-PATH leak (PMSERV-056 followup)**: the migration smoke test no longer inherits the running developer's `PATH`, so a locally-installed `pm-agent` in the runner cannot mask a regression.
+
+### Changed
+- **README front-page repositioning (ADR-010 Now action)**: multi-host neutrality (Claude Code + Codex) is the lead sell; the concurrent-session caveat is removed (PMSERV-050) now that PMSERV-047/048 close the underlying race.
+- **README scope-and-house clarification (WF-012)**: project display name updated and a trademark notice added to disambiguate from third-party PM systems.
+
+### Concurrent-Session Coverage Summary (phase-9)
+9 of 10 phase-9 tasks complete (90%). Remaining task `PMSERV-067` (rename `save_*` helpers to `_save_*` + `__all__` + DeprecationWarning alias) is intentionally deferred to v0.6.1 / v0.7.0 — see KR-007 for the migration plan and the rationale for not bundling the API-hygiene churn with this data-integrity release.
+
 ## [0.5.1] - 2026-05-07
 
 ### Security
