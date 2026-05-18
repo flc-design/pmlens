@@ -1,0 +1,30 @@
+# Dependabot — keeps the full-SHA-pinned GitHub Actions fresh (PMSERV-074, ADR-013).
+#
+# Actions in ci.yml / release.yml are pinned to full commit SHAs with a
+# `# vX.Y.Z` comment. Dependabot recognises that convention and bumps BOTH the
+# SHA and the comment in a single PR.
+#
+# NOTE (trade-off, see ADR-013): the `github-actions` group below bundles every
+# action update — including breaking major bumps — into ONE PR. A weekly PR may
+# therefore mix a safe patch with a Node-runtime major bump; review accordingly
+# (you cannot merge the safe bumps without also taking the major).
+#
+# ASSUMPTION: checkout v6+/setup-python v6+/upload-artifact v7+/download-artifact
+# v8+ require Actions Runner >= v2.327.1. GitHub-hosted `ubuntu-latest` always
+# satisfies this. If this repo ever moves to self-hosted runners, re-verify the
+# runner version before accepting a Dependabot major bump.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Tokyo"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: "chore(deps)"
