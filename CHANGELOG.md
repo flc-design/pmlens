@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.6.2] - 2026-05-18
+
+This release completes **Phase C** of the KR-008 supply-chain hardening pass (run `pm_recall query="KR-008"` from inside Claude Code). Every GitHub Action in `ci.yml` and `release.yml` is pinned to a full commit SHA, a grouped Dependabot config keeps those pins fresh, and — as a consequence of pinning to the latest majors — the entire CI/release pipeline moves off the deprecated Node 20 runtime ahead of GitHub's 2026-06-02 Node 20 → Node 24 actions deadline. The choice to pin to the latest majors (`actions/upload-artifact` v4 → v7, `actions/download-artifact` v4 → v8) rather than the minimum Node-24 majors — justified by a per-input breaking-change analysis against pm-server's actual usage and an independent cross-check — is recorded as **ADR-013**.
+
+### Security
+
+- **All GitHub Actions pinned to full commit SHAs (PMSERV-074, Phase C, ADR-013)**: `actions/checkout` → `de0fac2e…` (v6.0.2), `actions/setup-python` → `a309ff8b…` (v6.2.0), `actions/upload-artifact` → `043fb46d…` (v7.0.1), `actions/download-artifact` → `3e5f45b2…` (v8.0.1), across both `ci.yml` and `release.yml`. A mutable tag like `@v4` lets the action's owner — or anyone who compromises their account — silently change the code a workflow runs; pinning to an immutable commit SHA removes that mutable-tag attack surface from the pipeline that publishes to PyPI. `pypa/gh-action-pypi-publish` was already SHA-pinned in v0.6.1 and is unchanged. Each pin carries a `# vX.Y.Z` comment so Dependabot bumps both the SHA and the comment in one PR.
+- **`download-artifact` v8 fails closed on a digest mismatch (PMSERV-074, side benefit)**: v8 defaults `digest-mismatch` to `error`, so the `publish` job aborts before touching PyPI if the `dist` artifact handed over from the `build` job does not match its recorded SHA-256. For a normal same-run round-trip the digest always matches, so this adds an integrity gate to the OIDC publish path at no false-positive cost — a defense layer complementing v0.6.1's Trusted Publisher migration.
+- **Dependabot keeps the SHA pins fresh (PMSERV-074)**: a new `.github/dependabot.yml` watches the `github-actions` ecosystem weekly (Monday 09:00 Asia/Tokyo) and groups every action bump into a single PR. Full-SHA pins silently rot without this — upstream security fixes stop arriving the moment you pin. The grouping trades PR granularity for occasionally bundling a breaking major with safe patches; the file documents that trade-off and the Actions-Runner-version assumption (≥ v2.327.1, satisfied by GitHub-hosted `ubuntu-latest`).
+
+### Changed
+
+- **CI and release pipeline now run on Node 24**: pinning to the latest action majors moves `runs.using` from `node20` to `node24` for every action. No workflow logic changed — pm-server only uses inputs (`persist-credentials`, `python-version`, `cache`, `cache-dependency-path`, `name`, `path`, `if-no-files-found`) whose names, semantics, and defaults are identical between the old and new majors, verified by an independent cross-check of each action's `action.yml` diff.
+
+### Deferred to v0.7.0
+
+- **`dist/` precommit cleanup + `twine upload` discipline (Phase D-1)**, **`chart.js` vendoring with Subresource Integrity on `dashboard_single.html` (Phase D-2)**, and **memory provenance — a server-assigned `source` column on the SQLite memory store (Phase D-3)**, the defense-in-depth against delayed prompt injection through `pm_remember` / `pm_recall`. Significant code surface; unchanged from the v0.6.1 deferral.
+
 ## [0.6.1] - 2026-05-13
 
 This release is a **security hardening pass** in response to the May 2026 PyPI supply chain attack wave (Mini Shai-Hulud second wave on 2026-05-11/12, TeamPCP spring campaign, Anthropic MCP "by design" RCE CVE-2026-30623). The two-phase work raises direct-dependency floors to CVE-fixed versions, pins the full transitive tree with hashed locks, and migrates the publish path from a long-lived PyPI API token to GitHub Actions OIDC via PyPI Trusted Publishers behind a maintainer reviewer gate. The risk analysis itself — including the 5-perspective cross-check that downgraded 4 of 5 initially-Critical CVEs to N/A after fact-check — is captured as Knowledge Record **KR-008** (run `pm_recall query="KR-008"` from inside Claude Code).
