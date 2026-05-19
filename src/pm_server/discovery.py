@@ -3,9 +3,61 @@
 from __future__ import annotations
 
 import json
-import subprocess
 import tomllib
 from pathlib import Path
+
+# Hard cap when reading .git/config as text (defensive against a
+# pathologically large or crafted file). 1 MiB is far beyond any real
+# git config.
+_GIT_CONFIG_MAX_BYTES = 1_048_576
+
+
+def _read_git_remote_origin_url(project_path: Path) -> str | None:
+    """Return the ``origin`` remote URL by parsing ``.git/config`` directly.
+
+    This deliberately does **not** shell out to ``git``. Running ``git`` on a
+    possibly-untrusted working tree lets a malicious ``.git/config`` (e.g.
+    ``core.fsmonitor``, ``core.sshCommand``, ``core.hookspath``, ``core.pager``)
+    execute arbitrary commands during ordinary operations such as
+    ``git remote get-url`` — the CVE-2026-45033 / git config-exec class.
+    Parsing the file as plain text cannot execute code: the worst case is
+    returning ``None``.
+
+    Returns ``None`` when the URL cannot be determined safely: no repo, a
+    ``.git`` *file* (worktree/submodule pointer — not followed, to avoid an
+    attacker-influenced ``gitdir:`` redirect), an unreadable/oversized
+    config, or no ``origin`` remote.
+    """
+    git_dir = project_path / ".git"
+    if not git_dir.is_dir():
+        return None
+    config_file = git_dir / "config"
+    try:
+        if config_file.stat().st_size > _GIT_CONFIG_MAX_BYTES:
+            return None
+        text = config_file.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+    in_origin = False
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line[0] in "#;":
+            continue
+        if line.startswith("["):
+            end = line.find("]")
+            header = line[1:end].strip().lower() if end != -1 else ""
+            # git writes ``[remote "origin"]``; tolerate ``[remote.origin]``.
+            in_origin = header in ('remote "origin"', "remote.origin")
+            continue
+        if in_origin and "=" in line:
+            key, _, value = line.partition("=")
+            if key.strip().lower() == "url":
+                url = value.strip()
+                if len(url) >= 2 and url[0] == '"' and url[-1] == '"':
+                    url = url[1:-1]
+                return url or None
+    return None
 
 
 def detect_project_info(project_path: Path) -> dict:
@@ -61,18 +113,11 @@ def detect_project_info(project_path: Path) -> dict:
         except Exception:
             pass
 
-    # Git remote URL
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(project_path), "remote", "get-url", "origin"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if result.returncode == 0:
-            info["repository"] = result.stdout.strip()
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        pass
+    # Git remote URL — parse .git/config as text; never shell out to ``git``
+    # on a possibly-untrusted tree (CVE-2026-45033 / git config-exec class).
+    repo_url = _read_git_remote_origin_url(project_path)
+    if repo_url:
+        info["repository"] = repo_url
 
     # README.md fallback for description
     readme = project_path / "README.md"

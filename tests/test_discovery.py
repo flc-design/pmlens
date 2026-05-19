@@ -46,6 +46,50 @@ class TestDetectProjectInfo:
         # tmp directories have random names, just check it's set
         assert info["display_name"]
 
+    def test_git_remote_origin_parsed(self, tmp_path):
+        # Tab-indented keys (how git actually writes config) must be handled.
+        git_dir = tmp_path / ".git"
+        git_dir.mkdir()
+        (git_dir / "config").write_text(
+            "[core]\n\trepositoryformatversion = 0\n"
+            '[remote "origin"]\n\turl = https://github.com/acme/widget.git\n'
+            "\tfetch = +refs/heads/*:refs/remotes/origin/*\n"
+        )
+        info = detect_project_info(tmp_path)
+        assert info["repository"] == "https://github.com/acme/widget.git"
+
+    def test_git_config_malicious_not_executed(self, tmp_path):
+        # CVE-2026-45033 / git config-exec class: a hostile .git/config must
+        # NOT lead to command execution. We never shell out to git, so the
+        # sentinel file the gadget would create must be absent, while the
+        # legitimate origin URL is still parsed.
+        sentinel = tmp_path / "PWNED"
+        git_dir = tmp_path / ".git"
+        git_dir.mkdir()
+        (git_dir / "config").write_text(
+            "[core]\n"
+            f"\tfsmonitor = touch {sentinel}\n"
+            f"\tsshCommand = touch {sentinel}\n"
+            f"\tpager = touch {sentinel}\n"
+            f"\thooksPath = {tmp_path}\n"
+            '[remote "origin"]\n'
+            "\turl = https://github.com/acme/widget.git\n"
+        )
+        info = detect_project_info(tmp_path)
+        assert not sentinel.exists(), "git config gadget must never execute"
+        assert info["repository"] == "https://github.com/acme/widget.git"
+
+    def test_git_dir_as_file_returns_none(self, tmp_path):
+        # Worktree/submodule: .git is a file (``gitdir: ...``). We must not
+        # follow an attacker-influenced pointer; degrade safely to None.
+        (tmp_path / ".git").write_text("gitdir: /tmp/evil/.git/worktrees/x\n")
+        info = detect_project_info(tmp_path)
+        assert info["repository"] is None
+
+    def test_no_git_dir_no_repository(self, tmp_path):
+        info = detect_project_info(tmp_path)
+        assert info["repository"] is None
+
 
 class TestDiscoverProjects:
     def test_finds_projects(self, tmp_path):
