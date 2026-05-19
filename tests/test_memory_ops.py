@@ -100,12 +100,29 @@ class TestMemoryCleanup:
         assert memory_store.get_stats()["total_memories"] == 6
 
     def test_cleanup_older_than_days(self, memory_store: MemoryStore):
-        self._seed(memory_store, 5)
-        # All memories are "now", so older_than_days=0 deletes nothing meaningful
-        # Use a large window to verify the mechanism works
-        result = memory_store.cleanup(older_than_days=0, dry_run=True)
-        # All memories are from "now", so 0 days ago = now, nothing is older
-        assert result["would_delete"] == 0
+        ids = self._seed(memory_store, 5)
+        # Backdate the first 3 memories by 2 days. created_at has only
+        # second resolution (datetime('now')), so an older_than_days=0
+        # cutoff ("== now") is sub-second race-prone: it depends on whether
+        # the wall clock ticks a second between _seed() and cleanup(). A
+        # 2-day backdate vs a 1-day cutoff is unambiguous and deterministic.
+        placeholders = ",".join("?" * 3)
+        memory_store._conn.execute(
+            f"UPDATE memories SET created_at = datetime('now', '-2 days') "
+            f"WHERE id IN ({placeholders})",
+            ids[:3],
+        )
+        memory_store._conn.commit()
+
+        # Positive path: with a 1-day cutoff only the 3 backdated memories
+        # are "older than 1 day"; the 2 just-created ones are not.
+        result = memory_store.cleanup(older_than_days=1, dry_run=True)
+        assert result["would_delete"] == 3
+
+        # Negative path: a far-past cutoff (365 days) matches nothing,
+        # since even the backdated memories are only 2 days old.
+        result_none = memory_store.cleanup(older_than_days=365, dry_run=True)
+        assert result_none["would_delete"] == 0
 
     def test_cleanup_empty_db(self, memory_store: MemoryStore):
         result = memory_store.cleanup(keep_latest=5, dry_run=False)
