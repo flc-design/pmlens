@@ -56,13 +56,19 @@ class TestManifestShape:
     def test_pm_lens_env_set(self):
         # ADR-017 + ADR-018: the manifest is policy, not a hard security
         # boundary, but the env value must be set so installs default to Lens.
-        env = _load_manifest()["environment"]
+        # The env lives under server.mcp_config.env per the MCPB spec.
+        env = _load_manifest()["server"]["mcp_config"]["env"]
         assert env["PM_LENS"] == "1"
 
-    def test_permissions_declared_readonly(self):
-        perms = _load_manifest()["permissions"]
-        assert perms["filesystem"] == "read-only"
-        assert perms["subprocess"] == "none"
+    def test_no_top_level_environment_or_permissions(self):
+        # PMSERV-084 / WF-026 FINDING-D: top-level `environment` and
+        # `permissions` are not documented MCPB fields. Env vars belong under
+        # `server.mcp_config.env`; the read-only filesystem boundary is
+        # enforced structurally by RO_ALLOWLIST and SQLite mode=ro, not by a
+        # declarative manifest field.
+        manifest = _load_manifest()
+        assert "environment" not in manifest
+        assert "permissions" not in manifest
 
 
 class TestBuildScriptValidation:
@@ -87,8 +93,8 @@ class TestBuildScriptValidation:
             "server": {
                 "type": "uv",
                 "uv": {"package": "pm-server", "command": "pm-server", "args": ["serve"]},
+                "mcp_config": {"env": {"PM_LENS": "1"}},
             },
-            "environment": {"PM_LENS": "1"},
         }
 
     def test_good_manifest_passes(self, validate):
@@ -106,13 +112,13 @@ class TestBuildScriptValidation:
 
     def test_missing_pm_lens_rejected(self, validate):
         bad = self._good_manifest()
-        bad["environment"] = {}
+        bad["server"]["mcp_config"] = {"env": {}}
         with pytest.raises(SystemExit, match="PM_LENS"):
             validate(bad, "9.9.9")
 
     def test_wrong_pm_lens_value_rejected(self, validate):
         bad = self._good_manifest()
-        bad["environment"]["PM_LENS"] = "0"
+        bad["server"]["mcp_config"]["env"]["PM_LENS"] = "0"
         with pytest.raises(SystemExit, match="PM_LENS"):
             validate(bad, "9.9.9")
 

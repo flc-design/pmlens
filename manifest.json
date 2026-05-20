@@ -29,15 +29,12 @@
       "package": "pm-server",
       "command": "pm-server",
       "args": ["serve"]
+    },
+    "mcp_config": {
+      "env": {
+        "PM_LENS": "1"
+      }
     }
-  },
-  "environment": {
-    "PM_LENS": "1"
-  },
-  "permissions": {
-    "filesystem": "read-only",
-    "network": "none",
-    "subprocess": "none"
   },
   "compatibility": {
     "platforms": ["macos", "linux", "windows"],

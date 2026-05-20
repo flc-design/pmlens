@@ -10,8 +10,10 @@ This script validates:
   * ``manifest.json`` is parseable JSON.
   * its ``version`` field matches the ``[project] version`` in pyproject.toml
     (catches the dogfooding drift seen with .pm/project.yaml; see memory:135).
-  * ``server.type`` is ``"uv"`` and ``environment.PM_LENS`` is ``"1"``
-    (ADR-014/017 + ADR-018 amendment).
+  * ``server.type`` is ``"uv"`` and ``server.mcp_config.env.PM_LENS`` is ``"1"``
+    (ADR-014/017 + ADR-018 amendment). The env lives under ``server.mcp_config``
+    per the MCPB spec — host runtimes read env from there, not from a top-level
+    ``environment`` block (which is not in the documented schema).
 
 Then it writes ``dist/pm-server-<version>.mcpb`` containing manifest.json,
 README.md, and LICENSE.
@@ -77,10 +79,11 @@ def validate(manifest: dict, pyproject_version: str) -> None:
             f"(got command={uv.get('command')!r} args={uv.get('args')!r})"
         )
 
-    env = manifest.get("environment") or {}
+    mcp_config = server.get("mcp_config") or {}
+    env = mcp_config.get("env") or {}
     if env.get("PM_LENS") != "1":
         errors.append(
-            "environment.PM_LENS must be '1' to enforce Lens mode at bundle install "
+            "server.mcp_config.env.PM_LENS must be '1' to enforce Lens mode at bundle install "
             "(ADR-017 + ADR-018: this is policy, not a hard security boundary)"
         )
 
