@@ -535,6 +535,249 @@ class TestInstallSummary:
         r2 = InstallResult("codex", "installed", "msg", backup_path=None, is_dry_run=True)
         assert r2.is_dry_run is True
 
+    def test_install_result_lens_mode_default_false(self):
+        """lens_mode defaults to False (PMSERV-087 / WF-026 FINDING-F)."""
+        r = InstallResult("claude-code", "installed", "msg")
+        assert r.lens_mode is False
+        r2 = InstallResult("codex", "installed", "msg", lens_mode=True)
+        assert r2.lens_mode is True
+
+
+class TestLensModeActive:
+    """PMSERV-087: ``_lens_mode_active`` reads PM_LENS env."""
+
+    @pytest.mark.parametrize("truthy", ["1", "true", "True", "yes", "ON"])
+    def test_truthy_values(self, truthy, monkeypatch):
+        from pm_server.installer import _lens_mode_active
+
+        monkeypatch.setenv("PM_LENS", truthy)
+        assert _lens_mode_active() is True
+
+    @pytest.mark.parametrize("falsy", ["0", "false", "no", "", "off"])
+    def test_falsy_values(self, falsy, monkeypatch):
+        from pm_server.installer import _lens_mode_active
+
+        monkeypatch.setenv("PM_LENS", falsy)
+        assert _lens_mode_active() is False
+
+    def test_unset_is_false(self, monkeypatch):
+        from pm_server.installer import _lens_mode_active
+
+        monkeypatch.delenv("PM_LENS", raising=False)
+        assert _lens_mode_active() is False
+
+
+class TestInstallClaudeCodeLensMode:
+    """PMSERV-087: install_claude_code propagates PM_LENS to ``claude mcp add``."""
+
+    def test_lens_mode_injects_env_flag(self, monkeypatch):
+        monkeypatch.setenv("PM_LENS", "1")
+
+        def which(name):
+            return f"/usr/bin/{name}"
+
+        call_count = 0
+        captured_cmds: list[list[str]] = []
+
+        def mock_run(cmd, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            captured_cmds.append(list(cmd))
+            return _make_result(1) if call_count == 1 else _make_result(0)
+
+        with (
+            patch("pm_server.installer.shutil.which", side_effect=which),
+            patch("pm_server.installer.subprocess.run", side_effect=mock_run),
+        ):
+            r = install_claude_code()
+
+        assert r.status == "installed"
+        assert r.lens_mode is True
+        assert "Lens" in r.message
+        # The second subprocess call is `mcp add ...`; check --env present.
+        add_cmd = captured_cmds[1]
+        assert "--env" in add_cmd
+        env_idx = add_cmd.index("--env")
+        assert add_cmd[env_idx + 1] == "PM_LENS=1"
+
+    def test_non_lens_mode_does_not_inject_env(self, monkeypatch):
+        monkeypatch.delenv("PM_LENS", raising=False)
+
+        def which(name):
+            return f"/usr/bin/{name}"
+
+        call_count = 0
+        captured_cmds: list[list[str]] = []
+
+        def mock_run(cmd, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            captured_cmds.append(list(cmd))
+            return _make_result(1) if call_count == 1 else _make_result(0)
+
+        with (
+            patch("pm_server.installer.shutil.which", side_effect=which),
+            patch("pm_server.installer.subprocess.run", side_effect=mock_run),
+        ):
+            r = install_claude_code()
+
+        assert r.status == "installed"
+        assert r.lens_mode is False
+        assert "--env" not in captured_cmds[1]
+
+    def test_lens_mode_dry_run_message_mentions_lens(self, monkeypatch):
+        monkeypatch.setenv("PM_LENS", "1")
+
+        def which(name):
+            return f"/usr/bin/{name}"
+
+        with (
+            patch("pm_server.installer.shutil.which", side_effect=which),
+            patch("pm_server.installer.subprocess.run", return_value=_make_result(1)),
+        ):
+            r = install_claude_code(dry_run=True)
+
+        assert r.is_dry_run is True
+        assert r.lens_mode is True
+        assert "Lens" in r.message
+
+
+class TestInstallCodexLensMode:
+    """PMSERV-087: install_codex writes PM_LENS env into the TOML section."""
+
+    def test_lens_mode_writes_env_table_on_fresh_install(
+        self, fake_codex_config, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("PM_LENS", "1")
+        fake_codex_config.write_text("", encoding="utf-8")
+        monkeypatch.setattr(
+            "pm_server.installer._resolve_pm_server_path", lambda: tmp_path / "pm-server"
+        )
+
+        r = install_codex()
+        assert r.status == "installed"
+        assert r.lens_mode is True
+        assert "Lens" in r.message
+
+        doc = tomlkit.parse(fake_codex_config.read_text(encoding="utf-8"))
+        section = doc["mcp_servers"]["pm-server"]
+        assert "env" in section
+        assert str(section["env"]["PM_LENS"]) == "1"
+
+    def test_non_lens_install_does_not_write_env_table(
+        self, fake_codex_config, tmp_path, monkeypatch
+    ):
+        monkeypatch.delenv("PM_LENS", raising=False)
+        fake_codex_config.write_text("", encoding="utf-8")
+        monkeypatch.setattr(
+            "pm_server.installer._resolve_pm_server_path", lambda: tmp_path / "pm-server"
+        )
+
+        r = install_codex()
+        assert r.status == "installed"
+        assert r.lens_mode is False
+
+        doc = tomlkit.parse(fake_codex_config.read_text(encoding="utf-8"))
+        section = doc["mcp_servers"]["pm-server"]
+        assert "env" not in section
+
+    def test_already_registered_when_lens_env_matches(
+        self, fake_codex_config, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("PM_LENS", "1")
+        pm_server_path = tmp_path / "pm-server"
+        monkeypatch.setattr("pm_server.installer._resolve_pm_server_path", lambda: pm_server_path)
+        fake_codex_config.write_text(
+            textwrap.dedent(
+                f"""
+                [mcp_servers.pm-server]
+                command = "{pm_server_path}"
+                args = ["serve"]
+                startup_timeout_sec = 30
+                env = {{ PM_LENS = "1" }}
+                """
+            ).strip(),
+            encoding="utf-8",
+        )
+
+        r = install_codex()
+        assert r.status == "already_registered"
+        assert r.lens_mode is True
+
+    def test_reinstall_flips_rw_to_lens_by_adding_env(
+        self, fake_codex_config, tmp_path, monkeypatch
+    ):
+        # Start: existing RW registration (no env). Run install with PM_LENS=1.
+        # Expect: status=installed (mutation) + env.PM_LENS now "1".
+        monkeypatch.setenv("PM_LENS", "1")
+        pm_server_path = tmp_path / "pm-server"
+        monkeypatch.setattr("pm_server.installer._resolve_pm_server_path", lambda: pm_server_path)
+        fake_codex_config.write_text(
+            textwrap.dedent(
+                f"""
+                [mcp_servers.pm-server]
+                command = "{pm_server_path}"
+                args = ["serve"]
+                startup_timeout_sec = 30
+                """
+            ).strip(),
+            encoding="utf-8",
+        )
+
+        r = install_codex()
+        assert r.status == "installed"
+        assert r.lens_mode is True
+
+        doc = tomlkit.parse(fake_codex_config.read_text(encoding="utf-8"))
+        section = doc["mcp_servers"]["pm-server"]
+        assert str(section["env"]["PM_LENS"]) == "1"
+
+    def test_reinstall_flips_lens_to_rw_by_removing_env(
+        self, fake_codex_config, tmp_path, monkeypatch
+    ):
+        # Start: Lens-registered (env.PM_LENS=1). Run install with PM_LENS unset.
+        # Expect: env.PM_LENS removed; if env table becomes empty, removed too.
+        monkeypatch.delenv("PM_LENS", raising=False)
+        pm_server_path = tmp_path / "pm-server"
+        monkeypatch.setattr("pm_server.installer._resolve_pm_server_path", lambda: pm_server_path)
+        fake_codex_config.write_text(
+            textwrap.dedent(
+                f"""
+                [mcp_servers.pm-server]
+                command = "{pm_server_path}"
+                args = ["serve"]
+                startup_timeout_sec = 30
+                env = {{ PM_LENS = "1" }}
+                """
+            ).strip(),
+            encoding="utf-8",
+        )
+
+        r = install_codex()
+        assert r.status == "installed"
+        assert r.lens_mode is False
+
+        doc = tomlkit.parse(fake_codex_config.read_text(encoding="utf-8"))
+        section = doc["mcp_servers"]["pm-server"]
+        # Empty env table is collapsed
+        assert "env" not in section
+
+    def test_dry_run_lens_mode_message_mentions_lens(
+        self, fake_codex_config, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("PM_LENS", "1")
+        fake_codex_config.write_text("", encoding="utf-8")
+        monkeypatch.setattr(
+            "pm_server.installer._resolve_pm_server_path", lambda: tmp_path / "pm-server"
+        )
+
+        r = install_codex(dry_run=True)
+        assert r.is_dry_run is True
+        assert r.lens_mode is True
+        assert "Lens" in r.message
+        # File untouched
+        assert fake_codex_config.read_text(encoding="utf-8") == ""
+
 
 class TestResolvePmServerPath:
     """Absolute path resolution for sandbox-safe Codex registration (PMSERV-038)."""

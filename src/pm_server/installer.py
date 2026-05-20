@@ -24,6 +24,7 @@ Public surface:
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -39,6 +40,18 @@ from .utils import (
     _resolve_targets,
     _timestamped_backup,
 )
+
+
+def _lens_mode_active() -> bool:
+    """True when PM_LENS is set to a truthy value in the installer's env.
+
+    PMSERV-087 / WF-026 FINDING-F: when this is True, install_* functions
+    must propagate ``PM_LENS=1`` into the host config so that the spawned
+    pm-server process actually engages Lens mode. Otherwise a Lens
+    distribution (e.g. via .mcpb) would silently start in RW mode.
+    """
+    return os.environ.get("PM_LENS", "").lower() in {"1", "true", "yes", "on"}
+
 
 # --- Result types ---------------------------------------------------------
 
@@ -69,6 +82,7 @@ class InstallResult:
     message: str
     backup_path: str | None = None
     is_dry_run: bool = False
+    lens_mode: bool = False
 
 
 @dataclass(frozen=True)
@@ -116,6 +130,7 @@ def install_claude_code(*, dry_run: bool = False) -> InstallResult:
         the ``is_dry_run`` field is ``True`` and the ``status`` reflects
         the outcome that *would* have occurred.
     """
+    lens_mode = _lens_mode_active()
     pm_server_path = shutil.which("pm-server")
     if pm_server_path is None:
         return InstallResult(
@@ -123,6 +138,7 @@ def install_claude_code(*, dry_run: bool = False) -> InstallResult:
             status="failed",
             message="pm-server command not found in PATH",
             is_dry_run=dry_run,
+            lens_mode=lens_mode,
         )
 
     claude_path = shutil.which("claude")
@@ -132,6 +148,7 @@ def install_claude_code(*, dry_run: bool = False) -> InstallResult:
             status="skipped",
             message="claude command not found. Install Claude Code first.",
             is_dry_run=dry_run,
+            lens_mode=lens_mode,
         )
 
     result = subprocess.run(
@@ -146,47 +163,59 @@ def install_claude_code(*, dry_run: bool = False) -> InstallResult:
             status="already_registered",
             message="PM Server is already registered in Claude Code",
             is_dry_run=dry_run,
+            lens_mode=lens_mode,
         )
 
     if dry_run:
+        suffix = " in Lens (read-only) mode" if lens_mode else ""
         return InstallResult(
             target="claude-code",
             status="installed",
-            message="would register PM Server in Claude Code (user scope).",
+            message=f"would register PM Server in Claude Code (user scope){suffix}.",
             is_dry_run=True,
+            lens_mode=lens_mode,
         )
 
+    add_cmd: list[str] = [
+        claude_path,
+        "mcp",
+        "add",
+        "--transport",
+        "stdio",
+        "--scope",
+        "user",
+    ]
+    if lens_mode:
+        # PMSERV-087: propagate PM_LENS=1 to the spawned process. Without
+        # this, a Lens-context installer call (e.g. from a Desktop .mcpb
+        # distribution that re-uses install_claude_code) leaves Lens mode
+        # disengaged at server startup.
+        add_cmd.extend(["--env", "PM_LENS=1"])
+    add_cmd.extend(["pm-server", "--", pm_server_path, "serve"])
+
     result = subprocess.run(
-        [
-            claude_path,
-            "mcp",
-            "add",
-            "--transport",
-            "stdio",
-            "--scope",
-            "user",
-            "pm-server",
-            "--",
-            pm_server_path,
-            "serve",
-        ],
+        add_cmd,
         capture_output=True,
         text=True,
         timeout=10,
     )
     if result.returncode == 0:
+        suffix = " in Lens (read-only) mode" if lens_mode else ""
         return InstallResult(
             target="claude-code",
             status="installed",
             message=(
-                "PM Server registered in Claude Code (user scope). Restart Claude Code to activate."
+                f"PM Server registered in Claude Code (user scope){suffix}. "
+                "Restart Claude Code to activate."
             ),
+            lens_mode=lens_mode,
         )
 
     return InstallResult(
         target="claude-code",
         status="failed",
         message=f"Failed to register: {result.stderr}",
+        lens_mode=lens_mode,
     )
 
 
@@ -321,6 +350,7 @@ def install_codex(*, dry_run: bool = False) -> InstallResult:
         ``backup_path`` points at the saved-aside copy (``None`` for
         dry-run).
     """
+    lens_mode = _lens_mode_active()
     config_path = _codex_config_path()
     if not config_path.exists():
         return InstallResult(
@@ -328,34 +358,47 @@ def install_codex(*, dry_run: bool = False) -> InstallResult:
             status="skipped",
             message="~/.codex/config.toml not found — Codex CLI not installed",
             is_dry_run=dry_run,
+            lens_mode=lens_mode,
         )
 
     pm_server_path = _resolve_pm_server_path()
 
     doc = tomlkit.parse(config_path.read_text(encoding="utf-8"))
 
-    # Early return if already registered with matching command — no mutation,
-    # so no backup or atomic-write needed (avoids backup file accumulation).
+    # Early return if already registered with matching command AND matching
+    # PM_LENS env presence — no mutation, no backup needed. PMSERV-087:
+    # we also compare env, so re-running `PM_LENS=1 pm-server install` on a
+    # previously RW-registered Codex flips it into Lens (and vice versa).
     if "mcp_servers" in doc and "pm-server" in doc["mcp_servers"]:
-        existing_command = doc["mcp_servers"]["pm-server"].get("command")
-        if existing_command is not None and str(existing_command) == str(pm_server_path):
+        existing = doc["mcp_servers"]["pm-server"]
+        existing_command = existing.get("command")
+        existing_env = existing.get("env") or {}
+        existing_has_lens = str(existing_env.get("PM_LENS", "")) == "1"
+        if (
+            existing_command is not None
+            and str(existing_command) == str(pm_server_path)
+            and existing_has_lens == lens_mode
+        ):
             return InstallResult(
                 target="codex",
                 status="already_registered",
                 message="PM Server is already registered in Codex",
                 is_dry_run=dry_run,
+                lens_mode=lens_mode,
             )
 
     if dry_run:
         # Predict the outcome without creating a backup or writing anything.
+        suffix = " in Lens (read-only) mode" if lens_mode else ""
         if "mcp_servers" not in doc or "pm-server" not in doc.get("mcp_servers", {}):
             message = (
-                "would register PM Server in Codex (user scope). "
+                f"would register PM Server in Codex (user scope){suffix}. "
                 "Would back up to ~/.codex/config.toml.bak.<ts> before write."
             )
         else:
             message = (
-                "would update PM Server command in Codex (path changed). "
+                f"would update PM Server in Codex{suffix} "
+                "(path or PM_LENS env changed). "
                 "Would back up to ~/.codex/config.toml.bak.<ts> before write."
             )
         return InstallResult(
@@ -364,6 +407,7 @@ def install_codex(*, dry_run: bool = False) -> InstallResult:
             message=message,
             backup_path=None,
             is_dry_run=True,
+            lens_mode=lens_mode,
         )
 
     backup_path = _backup_codex_config(config_path)
@@ -375,9 +419,14 @@ def install_codex(*, dry_run: bool = False) -> InstallResult:
         section["command"] = str(pm_server_path)
         section["args"] = ["serve"]
         section["startup_timeout_sec"] = 30
+        if lens_mode:
+            env_table = tomlkit.inline_table()
+            env_table["PM_LENS"] = "1"
+            section["env"] = env_table
         doc["mcp_servers"]["pm-server"] = section
+        suffix = " in Lens (read-only) mode" if lens_mode else ""
         message = (
-            f"PM Server registered in Codex (user scope). "
+            f"PM Server registered in Codex (user scope){suffix}. "
             f"Backup at {backup_path}. Restart Codex to activate."
         )
     else:
@@ -386,8 +435,24 @@ def install_codex(*, dry_run: bool = False) -> InstallResult:
         section["args"] = ["serve"]
         if "startup_timeout_sec" not in section:
             section["startup_timeout_sec"] = 30
+        if lens_mode:
+            env_table = section.get("env")
+            if env_table is None:
+                env_table = tomlkit.inline_table()
+            env_table["PM_LENS"] = "1"
+            section["env"] = env_table
+        else:
+            # Non-Lens reinstall must clear any stale PM_LENS=1 so the
+            # process starts in the requested mode. Leave other env keys
+            # untouched (users may have added their own).
+            env_table = section.get("env")
+            if env_table is not None and "PM_LENS" in env_table:
+                del env_table["PM_LENS"]
+                if len(env_table) == 0:
+                    del section["env"]
+        suffix = " in Lens (read-only) mode" if lens_mode else ""
         message = (
-            f"PM Server command updated in Codex (path changed). "
+            f"PM Server updated in Codex{suffix} (path or PM_LENS env changed). "
             f"Backup at {backup_path}. Restart Codex to activate."
         )
 
@@ -398,6 +463,7 @@ def install_codex(*, dry_run: bool = False) -> InstallResult:
         status="installed",
         message=message,
         backup_path=str(backup_path),
+        lens_mode=lens_mode,
     )
 
 
