@@ -95,6 +95,28 @@ def _apply_pragmas(conn: sqlite3.Connection) -> None:
     conn.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
 
 
+def _connect_readonly(db_path: Path) -> sqlite3.Connection:
+    """Open a SQLite connection in read-only, side-effect-free mode.
+
+    Uses URI form ``file:<path>?mode=ro&immutable=1`` for PM_LENS=1 (Claude
+    Desktop/Cowork) where the host must not create ``-wal``/``-shm`` sidecars
+    or mutate change counters in another project's ``.pm/memory.db``.
+    ``immutable=1`` tells SQLite the file is in stable storage and skips
+    WAL processing entirely; the reader sees only the committed snapshot in
+    the main file. Trade-off: writes still pending in WAL (un-checkpointed)
+    are invisible until the owning pm-server next checkpoints — acceptable
+    for a passive viewer.
+
+    pragmas like ``journal_mode=WAL`` are deliberately NOT applied because
+    they would attempt to write the file header and fail with OperationalError
+    on a read-only connection.
+    """
+    uri = f"file:{db_path}?mode=ro&immutable=1"
+    conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
 # ─── Schema SQL ─────────────────────────────────────
 
 _SCHEMA_SQL = """\
@@ -195,21 +217,33 @@ class MemoryStore:
     Args:
         db_path: Path to the SQLite database file.
         global_db_path: Path to the global cross-project index.
-            Defaults to ~/.pm/memory.db. Set to None to disable sync.
+            None disables global sync. Callers (e.g. server.py) compute the
+            default path from ``_storage.GLOBAL_PM_DIR`` so HOME monkeypatching
+            in tests reaches the right location; module-import-time default was
+            removed in PMSERV-080 (I-1).
+        readonly: Open the DB with ``?mode=ro&immutable=1`` (no WAL/SHM
+            sidecars, no schema mutations). Used by PM_LENS=1 to keep
+            Desktop/Cowork passive on other projects' ``.pm/memory.db``.
     """
 
     def __init__(
         self,
         db_path: Path,
-        global_db_path: Path | None = Path.home() / ".pm" / "memory.db",
+        global_db_path: Path | None = None,
+        *,
+        readonly: bool = False,
     ) -> None:
         self.db_path = db_path
-        self.global_db_path = global_db_path
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
-        _apply_pragmas(self._conn)
-        self._ensure_schema()
+        self.global_db_path = None if readonly else global_db_path
+        self.readonly = readonly
+        if readonly:
+            self._conn = _connect_readonly(db_path)
+        else:
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+            self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
+            self._conn.row_factory = sqlite3.Row
+            _apply_pragmas(self._conn)
+            self._ensure_schema()
 
     def _ensure_schema(self) -> None:
         """Create tables, FTS index, and triggers if they don't exist."""

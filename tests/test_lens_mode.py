@@ -225,3 +225,86 @@ def test_lens_excludes_subprocess_invoking_tools(lens_server):
     subprocess_paths = {"pm_update_claudemd", "pm_init"}
     leaked = subprocess_paths & lens_server.REGISTERED_TOOLS
     assert not leaked, f"Subprocess-invoking tools leaked: {sorted(leaked)}"
+
+
+# ─── PMSERV-080 R5: _get_memory_store opens RO under PM_LENS ──
+
+
+def _seed_project_db(project_root):
+    """Create a project .pm/memory.db with one memory, then close cleanly."""
+    from pm_server.memory import MemoryStore
+    from pm_server.models import Memory, MemoryType
+
+    pm_dir = project_root / ".pm"
+    pm_dir.mkdir(parents=True, exist_ok=True)
+    store = MemoryStore(pm_dir / "memory.db")
+    store.save(
+        Memory(
+            session_id="sess-lens-int",
+            type=MemoryType.OBSERVATION,
+            content="seeded under lens",
+            project=project_root.name,
+            tags=["lens", "integration"],
+        )
+    )
+    store.close()
+    return pm_dir / "memory.db"
+
+
+def test_lens_get_memory_store_opens_readonly(lens_server, tmp_path):
+    """PM_LENS=1 + 既存 .pm/memory.db → MemoryStore(readonly=True) を返す."""
+    db_path = _seed_project_db(tmp_path)
+    # Clean sidecars created by the seed write so we observe only what the
+    # Lens-mode read path touches.
+    for suffix in ("-wal", "-shm"):
+        sidecar = db_path.with_name(db_path.name + suffix)
+        if sidecar.exists():
+            sidecar.unlink()
+
+    store = lens_server._get_memory_store(str(tmp_path))
+    try:
+        assert store.readonly is True
+        assert store.global_db_path is None
+        # Read path still works (verifies the seeded memory is visible)
+        mems = store.search("seeded")
+        assert any(m.content == "seeded under lens" for m in mems)
+    finally:
+        store.close()
+        lens_server._memory_stores.clear()
+
+    # No -wal/-shm sidecars created by the Lens read
+    assert not db_path.with_name(db_path.name + "-wal").exists()
+    assert not db_path.with_name(db_path.name + "-shm").exists()
+
+
+def test_lens_get_memory_store_missing_db_returns_in_memory(lens_server, tmp_path):
+    """PM_LENS=1 + .pm/memory.db 不在 → in-memory fallback で空応答, no disk write."""
+    pm_dir = tmp_path / ".pm"
+    pm_dir.mkdir(parents=True, exist_ok=True)
+    # Intentionally do NOT create memory.db
+
+    store = lens_server._get_memory_store(str(tmp_path))
+    try:
+        assert store.readonly is False  # :memory: requires writable conn
+        # Empty results since :memory: has fresh schema
+        assert store.search("anything") == []
+    finally:
+        store.close()
+        lens_server._memory_stores.clear()
+
+    # The fallback must not have written a memory.db to disk
+    assert not (pm_dir / "memory.db").exists()
+
+
+def test_normal_mode_get_memory_store_is_rw(normal_server, tmp_path):
+    """PM_LENS 未設定 → 通常の RW MemoryStore (readonly=False, global sync enabled)."""
+    pm_dir = tmp_path / ".pm"
+    pm_dir.mkdir(parents=True, exist_ok=True)
+
+    store = normal_server._get_memory_store(str(tmp_path))
+    try:
+        assert store.readonly is False
+        assert store.global_db_path is not None
+    finally:
+        store.close()
+        normal_server._memory_stores.clear()

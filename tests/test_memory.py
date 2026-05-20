@@ -12,6 +12,7 @@ from pm_server.memory import (
     _BUSY_TIMEOUT_MS,
     MemoryStore,
     _apply_pragmas,
+    _connect_readonly,
     _sanitize_fts_query,
     _str_to_tags,
     _tags_to_str,
@@ -120,6 +121,114 @@ class TestMemoryStoreInit:
         finally:
             conn.close()
         assert version == 1
+
+    def test_default_global_db_path_is_none(self, tmp_path: Path):
+        # PMSERV-080 I-1: the default no longer touches Path.home() at import
+        # time. Callers (server.py) compute the global path explicitly.
+        db_path = tmp_path / "lonely.db"
+        store = MemoryStore(db_path)
+        try:
+            assert store.global_db_path is None
+            assert store.readonly is False
+        finally:
+            store.close()
+
+
+# ─── PMSERV-080 R5: Read-only Lens connection ──────────
+
+
+class TestReadOnlyConnection:
+    def _seed(self, db_path: Path) -> None:
+        store = MemoryStore(db_path)
+        store.save(
+            Memory(
+                session_id="sess-lens-001",
+                type=MemoryType.OBSERVATION,
+                content="lens-mode payload",
+                project="lensproj",
+                tags=["lens", "ro"],
+            )
+        )
+        store.close()
+
+    def test_connect_readonly_returns_row_factory(self, tmp_path: Path):
+        db_path = tmp_path / "ro.db"
+        self._seed(db_path)
+        conn = _connect_readonly(db_path)
+        try:
+            row = conn.execute("SELECT content FROM memories LIMIT 1").fetchone()
+            assert row["content"] == "lens-mode payload"
+        finally:
+            conn.close()
+
+    def test_connect_readonly_rejects_writes(self, tmp_path: Path):
+        import sqlite3
+
+        db_path = tmp_path / "ro.db"
+        self._seed(db_path)
+        conn = _connect_readonly(db_path)
+        try:
+            with pytest.raises(sqlite3.OperationalError):
+                conn.execute(
+                    "INSERT INTO memories (session_id, type, content, project)"
+                    " VALUES ('x', 'observation', 'nope', 'x')"
+                )
+        finally:
+            conn.close()
+
+    def test_readonly_store_does_not_create_wal_shm(self, tmp_path: Path):
+        db_path = tmp_path / "ro.db"
+        self._seed(db_path)
+        # Erase any sidecars left from the seed step so we observe only what
+        # the readonly store creates.
+        for suffix in ("-wal", "-shm"):
+            sidecar = db_path.with_name(db_path.name + suffix)
+            if sidecar.exists():
+                sidecar.unlink()
+
+        store = MemoryStore(db_path, readonly=True)
+        try:
+            mems = store.search("lens-mode")
+            assert len(mems) == 1
+            assert mems[0].content == "lens-mode payload"
+        finally:
+            store.close()
+
+        assert not db_path.with_name(db_path.name + "-wal").exists()
+        assert not db_path.with_name(db_path.name + "-shm").exists()
+
+    def test_readonly_store_save_raises(self, tmp_path: Path):
+        import sqlite3
+
+        db_path = tmp_path / "ro.db"
+        self._seed(db_path)
+        store = MemoryStore(db_path, readonly=True)
+        try:
+            with pytest.raises(sqlite3.OperationalError):
+                store.save(
+                    Memory(
+                        session_id="sess-ro",
+                        type=MemoryType.OBSERVATION,
+                        content="must not persist",
+                        project="lensproj",
+                    )
+                )
+        finally:
+            store.close()
+
+    def test_readonly_store_ignores_global_db_path(self, tmp_path: Path):
+        # readonly=True must force global sync off — Lens host cannot write
+        # to the cross-project index either.
+        db_path = tmp_path / "ro.db"
+        self._seed(db_path)
+        bogus_global = tmp_path / "should_not_appear" / "memory.db"
+        store = MemoryStore(db_path, global_db_path=bogus_global, readonly=True)
+        try:
+            assert store.global_db_path is None
+            assert store.readonly is True
+        finally:
+            store.close()
+        assert not bogus_global.exists()
 
 
 # ─── Memory CRUD ───────────────────────────────────────

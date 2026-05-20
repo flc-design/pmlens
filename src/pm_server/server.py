@@ -171,12 +171,26 @@ _memory_stores: dict[str, MemoryStore] = {}
 
 
 def _get_memory_store(project_path: str | None) -> MemoryStore:
-    """Get or create a MemoryStore for the project."""
+    """Get or create a MemoryStore for the project.
+
+    PM_LENS=1 (PMSERV-080 R5): open the on-disk DB with mode=ro&immutable=1
+    so the Desktop/Cowork host never creates -wal/-shm sidecars in another
+    project's .pm/. If the DB file does not exist yet, fall back to an
+    in-memory store so read queries return empty results without writing
+    to disk.
+    """
     pm_path = _get_pm_path(project_path)
     key = str(pm_path)
     if key not in _memory_stores:
-        global_db_path = _storage.GLOBAL_PM_DIR / "memory.db"
-        _memory_stores[key] = MemoryStore(pm_path / "memory.db", global_db_path=global_db_path)
+        db_path = pm_path / "memory.db"
+        if PM_LENS_ENABLED:
+            if db_path.exists():
+                _memory_stores[key] = MemoryStore(db_path, readonly=True)
+            else:
+                _memory_stores[key] = MemoryStore(Path(":memory:"))
+        else:
+            global_db_path = _storage.GLOBAL_PM_DIR / "memory.db"
+            _memory_stores[key] = MemoryStore(db_path, global_db_path=global_db_path)
     return _memory_stores[key]
 
 
