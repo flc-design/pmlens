@@ -49,16 +49,94 @@ def _is_project_pm_dir(pm_dir: Path) -> bool:
     return pm_dir.is_dir() and (pm_dir / "project.yaml").exists()
 
 
+# PMSERV-082 (WF-025): MCP client workspace roots, populated by the server
+# when an MCP session exposes them. Empty list = no roots provided.
+_MCP_ROOTS: list[Path] = []
+
+
+def set_mcp_roots(roots: list[str | Path]) -> None:
+    """Register the MCP client's workspace roots for resolve_project_path.
+
+    server.py is expected to call this once an MCP session reports its
+    roots via the ``roots/list`` protocol. Pass an empty list to clear.
+    Invalid entries (unresolvable, not a directory) are silently skipped
+    so a flaky client cannot prevent fallback resolution.
+    """
+    global _MCP_ROOTS
+    resolved: list[Path] = []
+    for r in roots:
+        try:
+            p = Path(r).expanduser().resolve()
+        except (OSError, ValueError):
+            continue
+        if p.is_dir():
+            resolved.append(p)
+    _MCP_ROOTS = resolved
+
+
+def _resolve_from_mcp_roots() -> Path | None:
+    """Return the first MCP root that contains a valid ``.pm/project.yaml``."""
+    for root in _MCP_ROOTS:
+        if _is_project_pm_dir(root / ".pm"):
+            return root
+    return None
+
+
+def _pick_from_registry() -> Path | None:
+    """Auto-pick the single registered project under PM_LENS=1.
+
+    Active only when ``PM_LENS`` is truthy: in normal pm-server mode the
+    cwd walk-up is the right semantic, while in Lens mode (Claude
+    Desktop/Cowork) we want a passive viewer to land on the user's only
+    registered project without requiring an explicit argument.
+
+    Returns None when:
+      - PM_LENS is not active
+      - ``~/.pm/registry.yaml`` is missing or unreadable
+      - the registry contains zero or two-or-more entries (ambiguous —
+        let the caller decide rather than silently picking)
+      - the resolved path no longer has a valid ``.pm/project.yaml``
+    """
+    if os.environ.get("PM_LENS", "").lower() not in {"1", "true", "yes", "on"}:
+        return None
+    try:
+        import yaml  # local import: registry path is the exception, not the rule
+    except ImportError:
+        return None
+    registry_file = Path.home() / ".pm" / "registry.yaml"
+    if not registry_file.exists():
+        return None
+    try:
+        data = yaml.safe_load(registry_file.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    projects = data.get("projects", [])
+    if not isinstance(projects, list) or len(projects) != 1:
+        return None
+    entry = projects[0]
+    if not isinstance(entry, dict) or "path" not in entry:
+        return None
+    try:
+        p = Path(entry["path"]).resolve()
+    except (OSError, ValueError):
+        return None
+    return p if _is_project_pm_dir(p / ".pm") else None
+
+
 def resolve_project_path(project_path: str | None = None) -> Path:
     """Resolve the project root directory.
 
-    Priority:
-    1. Explicit project_path argument
-    2. PM_PROJECT_PATH environment variable
-    3. Walk up from cwd looking for .pm/ with project.yaml
+    Priority (PMSERV-082):
+      1. Explicit ``project_path`` argument
+      2. MCP client roots registered via ``set_mcp_roots``
+      3. ``PM_PROJECT_PATH`` environment variable
+      4. Single-entry registry auto-pick (active only under ``PM_LENS=1``)
+      5. Walk up from cwd looking for ``.pm/project.yaml``
 
-    The cwd walk-up skips .pm/ directories without project.yaml
-    (e.g. the global ~/.pm/ used for registry).
+    The cwd walk-up skips ``.pm/`` directories without ``project.yaml``
+    (e.g. the global ``~/.pm/`` used for registry).
     """
     if project_path:
         p = Path(project_path).resolve()
@@ -66,10 +144,16 @@ def resolve_project_path(project_path: str | None = None) -> Path:
             raise ProjectNotFoundError(f"No .pm/ directory found at {p}. Run pm_init first.")
         return p
 
+    if root := _resolve_from_mcp_roots():
+        return root
+
     if env_path := os.environ.get("PM_PROJECT_PATH"):
         p = Path(env_path).resolve()
         if (p / ".pm").is_dir():
             return p
+
+    if picked := _pick_from_registry():
+        return picked
 
     cwd = Path.cwd()
     for parent in [cwd, *cwd.parents]:
@@ -77,7 +161,8 @@ def resolve_project_path(project_path: str | None = None) -> Path:
             return parent
 
     raise ProjectNotFoundError(
-        "No .pm/ directory found in current directory tree. "
+        "No .pm/ directory found via project_path arg, MCP roots, "
+        "PM_PROJECT_PATH, registry auto-pick, or cwd walk-up. "
         "Provide project_path or run pm_init first."
     )
 
