@@ -1,6 +1,7 @@
 """Tests for project discovery and info detection."""
 
 import json
+from pathlib import Path
 
 from pm_server.discovery import detect_project_info, discover_projects
 
@@ -118,3 +119,113 @@ class TestDiscoverProjects:
     def test_nonexistent_path(self, tmp_path):
         found = discover_projects(tmp_path / "nope")
         assert found == []
+
+
+class TestDiscoverProjectsBounded:
+    """PMSERV-081 (WF-025 R2, ADR-016): bounded walk hardening."""
+
+    def _make_project(self, path):
+        pm = path / ".pm"
+        pm.mkdir(parents=True)
+        (pm / "project.yaml").write_text("name: " + path.name)
+
+    def test_depth_cap_excludes_deep_projects(self, tmp_path):
+        # depth-5 project is included; depth-6 is excluded by the default cap.
+        # depth here counts directory levels below scan_path until the
+        # project's parent directory (the dir containing .pm).
+        shallow = tmp_path / "a" / "b" / "c" / "d" / "shallow"
+        deep = tmp_path / "a" / "b" / "c" / "d" / "e" / "f" / "deep"
+        self._make_project(shallow)
+        self._make_project(deep)
+
+        found = discover_projects(tmp_path)
+        names = {f["name"] for f in found}
+        assert "shallow" in names
+        assert "deep" not in names
+
+    def test_custom_max_depth(self, tmp_path):
+        nested = tmp_path / "a" / "b" / "c" / "d" / "e" / "f" / "g" / "p"
+        self._make_project(nested)
+        # default cap 5 excludes it
+        assert discover_projects(tmp_path) == []
+        # explicit larger cap includes it
+        found = discover_projects(tmp_path, max_depth=10)
+        assert any(f["name"] == "p" for f in found)
+
+    def test_excluded_dirs_pruned(self, tmp_path):
+        # Projects nested under common cache/dependency directories must not
+        # be discovered — typical noise: a vendored copy of pm-server inside
+        # node_modules, or a stray .pm inside .git from a botched merge.
+        for excluded in ("node_modules", ".git", "__pycache__", ".venv", "target"):
+            self._make_project(tmp_path / excluded / "vendored")
+
+        # One legitimate project to confirm the walk still works overall
+        self._make_project(tmp_path / "real-project")
+
+        found = discover_projects(tmp_path)
+        names = {f["name"] for f in found}
+        assert names == {"real-project"}
+
+    def test_global_pm_directory_skipped(self, tmp_path, monkeypatch):
+        # ADR-016: even if scan_path lands at $HOME and a global ~/.pm
+        # happens to contain project.yaml, it must not be enumerated.
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        global_pm = fake_home / ".pm"
+        global_pm.mkdir()
+        (global_pm / "project.yaml").write_text("name: global-pm")
+        # Also a legitimate project sibling
+        self._make_project(fake_home / "real")
+
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+
+        found = discover_projects(fake_home)
+        names = {f["name"] for f in found}
+        assert "real" in names
+        assert "home" not in names  # the global ~/.pm parent is $HOME itself
+
+    def test_global_pm_not_descended_for_subprojects(self, tmp_path, monkeypatch):
+        # A nested project living *inside* ~/.pm/desktop (Desktop store
+        # isolation) must not be reachable via discover. ADR-016 negative.
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        global_pm = fake_home / ".pm"
+        nested = global_pm / "desktop" / "trapped"
+        self._make_project(nested)
+        # Legitimate project at $HOME level
+        self._make_project(fake_home / "real")
+
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+
+        found = discover_projects(fake_home)
+        names = {f["name"] for f in found}
+        assert "real" in names
+        assert "trapped" not in names
+
+    def test_symlink_loops_do_not_hang(self, tmp_path):
+        # A symlink pointing back to scan_path used to be an infinite-loop
+        # hazard with naive rglob. With followlinks=False we must finish.
+        self._make_project(tmp_path / "real")
+        loop = tmp_path / "loop"
+        try:
+            loop.symlink_to(tmp_path)
+        except OSError:
+            # Filesystem may forbid symlinks; treat as skip.
+            return
+
+        found = discover_projects(tmp_path)
+        names = {f["name"] for f in found}
+        assert "real" in names
+
+    def test_does_not_descend_into_pm(self, tmp_path):
+        # A stray project.yaml deep inside another project's .pm/ must not
+        # be misidentified — discovery records the .pm's parent then stops.
+        self._make_project(tmp_path / "outer")
+        nested_marker = tmp_path / "outer" / ".pm" / "ghost" / ".pm"
+        nested_marker.mkdir(parents=True)
+        (nested_marker / "project.yaml").write_text("name: ghost")
+
+        found = discover_projects(tmp_path)
+        names = {f["name"] for f in found}
+        assert "outer" in names
+        assert "ghost" not in names

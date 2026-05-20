@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tomllib
 from pathlib import Path
 
@@ -10,6 +11,33 @@ from pathlib import Path
 # pathologically large or crafted file). 1 MiB is far beyond any real
 # git config.
 _GIT_CONFIG_MAX_BYTES = 1_048_576
+
+# PMSERV-081 (WF-025 R2, ADR-016): bound the discover_projects walk to
+# avoid traversing dependency caches, large virtualenvs, and the user's
+# global ~/.pm/ when scan_path lands near $HOME.
+_DISCOVERY_MAX_DEPTH = 5
+
+_DISCOVERY_EXCLUDED_DIRS: frozenset[str] = frozenset(
+    {
+        ".git",
+        "node_modules",
+        "__pycache__",
+        ".venv",
+        "venv",
+        ".tox",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        "dist",
+        "build",
+        "target",  # Rust / Cargo
+        ".next",
+        ".nuxt",
+        ".gradle",
+        ".idea",
+        ".vscode",
+    }
+)
 
 
 def _read_git_remote_origin_url(project_path: Path) -> str | None:
@@ -135,17 +163,71 @@ def detect_project_info(project_path: Path) -> dict:
     return info
 
 
-def discover_projects(scan_path: Path) -> list[dict]:
-    """Recursively scan for projects with .pm/ directories."""
+def discover_projects(
+    scan_path: Path,
+    *,
+    max_depth: int = _DISCOVERY_MAX_DEPTH,
+) -> list[dict]:
+    """Recursively scan for projects with ``.pm/project.yaml``.
+
+    The walk is bounded to defend against pathological inputs and to avoid
+    visiting locations that are not project roots:
+
+    * **max_depth** caps how deep we descend below ``scan_path``. Defaults
+      to ``_DISCOVERY_MAX_DEPTH`` (5).
+    * **Excluded directory names** (``.git``, ``node_modules``,
+      virtualenv/cache dirs, IDE config dirs) are pruned from descent so we
+      never walk through dependency trees or VCS internals.
+    * The user's **global ``~/.pm/``** is explicitly skipped (ADR-016):
+      its layout — registry.yaml + memory.db — is not a project root and
+      must never be enumerated as one, especially under Desktop/Cowork.
+    * **Symlinks** are not followed (``os.walk(followlinks=False)``) to
+      prevent cycles and escapes via attacker-influenced links.
+    """
     found: list[dict] = []
     scan_path = scan_path.expanduser().resolve()
 
     if not scan_path.is_dir():
         return found
 
-    for pm_dir in scan_path.rglob(".pm"):
-        if pm_dir.is_dir() and (pm_dir / "project.yaml").exists():
-            project_path = pm_dir.parent
-            found.append({"path": str(project_path), "name": project_path.name})
+    try:
+        global_pm = (Path.home() / ".pm").resolve()
+    except OSError:
+        global_pm = None
+
+    for current, dirnames, _filenames in os.walk(scan_path, followlinks=False):
+        current_path = Path(current)
+        try:
+            rel = current_path.resolve().relative_to(scan_path)
+        except (ValueError, OSError):
+            dirnames[:] = []
+            continue
+        depth = 0 if rel == Path(".") else len(rel.parts)
+
+        pm_subdir = current_path / ".pm"
+        if ".pm" in dirnames and (pm_subdir / "project.yaml").exists():
+            is_global = False
+            if global_pm is not None:
+                try:
+                    is_global = pm_subdir.resolve() == global_pm
+                except OSError:
+                    is_global = False
+            if not is_global:
+                found.append({"path": str(current_path), "name": current_path.name})
+
+        pruned: list[str] = []
+        for d in dirnames:
+            if d in _DISCOVERY_EXCLUDED_DIRS or d == ".pm":
+                continue
+            if depth + 1 > max_depth:
+                continue
+            if global_pm is not None:
+                try:
+                    if (current_path / d).resolve() == global_pm:
+                        continue
+                except OSError:
+                    continue
+            pruned.append(d)
+        dirnames[:] = pruned
 
     return found
