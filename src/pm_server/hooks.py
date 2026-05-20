@@ -7,6 +7,7 @@ and functions to install/uninstall hooks in Claude Code settings.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -194,12 +195,32 @@ def handle_post_tool_use() -> None:
 
 
 def _build_commit_reminder(pm_path: Path) -> str:
-    """Build a contextual PM reminder after git commit."""
+    """Build a contextual PM reminder after git commit.
+
+    PMSERV-086 / WF-026 FINDING-E: under PM_LENS=1 the host process exposes
+    only the RO_ALLOWLIST tools, so suggesting ``pm_update_task`` / ``pm_log``
+    would produce a confusing ``tool not found`` for the user. Switch to a
+    read-only suggestion set when Lens is active.
+    """
     from .models import TaskStatus
     from .storage import load_tasks
 
+    lens_mode = os.environ.get("PM_LENS", "").lower() in {"1", "true", "yes", "on"}
+
     tasks = load_tasks(pm_path)
     active = [t for t in tasks if t.status == TaskStatus.IN_PROGRESS]
+
+    if lens_mode:
+        lines = ["[PM Server Lens] Git commit completed. (Read-only mode)"]
+        if active:
+            task_ids = ", ".join(t.id for t in active)
+            lines.append(f"1. pm_next — check recommended next tasks (active: {task_ids})")
+        else:
+            lines.append("1. pm_next — check recommended next tasks")
+        lines.append("2. pm_status — view current progress")
+        lines.append("3. pm_tasks — list tasks (e.g. status=in_progress)")
+        lines.append("Tip: to update tasks or log progress, use the full pm-server (Claude Code).")
+        return "\n".join(lines)
 
     lines = ["[PM Server] Git commit completed. Please execute:"]
 

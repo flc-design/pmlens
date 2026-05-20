@@ -193,14 +193,18 @@ class TestUninstallHooks:
 
 
 class TestBuildCommitReminder:
-    def test_with_active_task(self, pm_project: Path):
+    def test_with_active_task(self, pm_project: Path, monkeypatch):
+        # Pin the RW branch — a stray PM_LENS=1 in the shell would otherwise
+        # switch the reminder to the read-only suggestion set (PMSERV-086).
+        monkeypatch.delenv("PM_LENS", raising=False)
         reminder = _build_commit_reminder(pm_project / ".pm")
         assert "HK-001" in reminder
         assert "pm_update_task" in reminder
         assert "pm_log" in reminder
         assert "pm_next" in reminder
 
-    def test_no_active_tasks(self, tmp_path: Path):
+    def test_no_active_tasks(self, tmp_path: Path, monkeypatch):
+        monkeypatch.delenv("PM_LENS", raising=False)
         pm_path = tmp_path / ".pm"
         pm_path.mkdir()
         project = Project(
@@ -215,6 +219,37 @@ class TestBuildCommitReminder:
         reminder = _build_commit_reminder(pm_path)
         assert "pm_update_task" in reminder
         assert "pm_log" in reminder
+
+
+class TestBuildCommitReminderLensMode:
+    """PMSERV-086 / WF-026 FINDING-E: PM_LENS=1 must yield only RO suggestions."""
+
+    def test_lens_mode_swaps_to_ro_tools(self, pm_project: Path, monkeypatch):
+        monkeypatch.setenv("PM_LENS", "1")
+        reminder = _build_commit_reminder(pm_project / ".pm")
+        # Lens banner present
+        assert "Read-only mode" in reminder
+        # RO tools (in RO_ALLOWLIST) appear
+        assert "pm_next" in reminder
+        assert "pm_status" in reminder
+        assert "pm_tasks" in reminder
+        # RW tools must NOT appear — they would 404 in Lens process
+        assert "pm_update_task" not in reminder
+        assert "pm_log" not in reminder
+
+    def test_lens_mode_keeps_active_task_id_in_pm_next_line(self, pm_project: Path, monkeypatch):
+        monkeypatch.setenv("PM_LENS", "1")
+        reminder = _build_commit_reminder(pm_project / ".pm")
+        # Active task surface is still useful context for the reader
+        assert "HK-001" in reminder
+
+    @pytest.mark.parametrize("falsy", ["0", "false", "no", ""])
+    def test_falsy_pm_lens_takes_rw_branch(self, pm_project: Path, monkeypatch, falsy):
+        monkeypatch.setenv("PM_LENS", falsy)
+        reminder = _build_commit_reminder(pm_project / ".pm")
+        assert "pm_update_task" in reminder
+        assert "pm_log" in reminder
+        assert "Read-only mode" not in reminder
 
 
 class TestHandlePostToolUse:
