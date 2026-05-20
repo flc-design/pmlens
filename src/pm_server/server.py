@@ -78,6 +78,55 @@ from .workflow import abandon_workflow, advance_step, start_workflow, workflow_s
 
 mcp = FastMCP("pm-server")
 
+
+# ─── Lens Mode (PMSERV-079, WF-025) ──────────────────
+# Claude Desktop/Cowork 向けの read-only 配布モード。PM_LENS=1 が立った時、
+# RO_ALLOWLIST のツールのみ FastMCP に登録される。mutator/subprocess 経路は
+# 全て除外され、ADR-015/017/018 の不変条件が構造的に保証される。
+
+PM_LENS_ENABLED: bool = os.environ.get("PM_LENS", "").lower() in {"1", "true", "yes", "on"}
+
+RO_ALLOWLIST: frozenset[str] = frozenset(
+    {
+        "pm_status",
+        "pm_next",
+        "pm_tasks",
+        "pm_blockers",
+        "pm_recall",
+        "pm_memory_search",
+        "pm_memory_stats",
+        "pm_dashboard",
+        "pm_risks",
+        "pm_velocity",
+        "pm_list",
+        "pm_knowledge_query",
+        "pm_workflow_status",
+        "pm_workflow_list",
+        "pm_workflow_templates",
+    }
+)
+
+REGISTERED_TOOLS: set[str] = set()
+
+
+def _tool():
+    """``@_tool()`` をラップして PM_LENS モードを尊重するデコレータ。
+
+    PM_LENS=1 の時、RO_ALLOWLIST 外の関数は FastMCP に登録されず素の関数を返す。
+    これにより MCP クライアントからは到達不能になる。Python レベルで関数は
+    残るため、テストや他モジュールからの内部呼び出しは可能。
+    """
+
+    def decorator(fn):
+        tool_name = fn.__name__
+        if PM_LENS_ENABLED and tool_name not in RO_ALLOWLIST:
+            return fn
+        REGISTERED_TOOLS.add(tool_name)
+        return mcp.tool()(fn)
+
+    return decorator
+
+
 # ─── Session ID (one per server process = one per Claude Code session) ───
 
 _current_session_id: str = (
@@ -186,7 +235,7 @@ def _build_next_actions(active_tasks: list[dict], all_tasks: list[Task]) -> list
 # ─── Project Management ─────────────────────────────
 
 
-@mcp.tool()
+@_tool()
 def pm_init(project_path: str | None = None, project_name: str | None = None) -> dict:
     """Initialize PM for a project.
 
@@ -236,7 +285,7 @@ def pm_init(project_path: str | None = None, project_name: str | None = None) ->
     }
 
 
-@mcp.tool()
+@_tool()
 def pm_status(project_path: str | None = None) -> dict:
     """Get current project status.
 
@@ -306,7 +355,7 @@ def pm_status(project_path: str | None = None) -> dict:
     }
 
 
-@mcp.tool()
+@_tool()
 def pm_tasks(
     project_path: str | None = None,
     status: str | None = None,
@@ -338,7 +387,7 @@ def pm_tasks(
     return [_task_summary(t) for t in tasks]
 
 
-@mcp.tool()
+@_tool()
 def pm_add_task(
     title: str,
     phase: str,
@@ -375,7 +424,7 @@ def pm_add_task(
     return {"status": "created", "task": _task_summary(task)}
 
 
-@mcp.tool()
+@_tool()
 def pm_update_task(
     task_id: str,
     status: str | None = None,
@@ -418,7 +467,7 @@ def pm_update_task(
     return result
 
 
-@mcp.tool()
+@_tool()
 def pm_next(project_path: str | None = None, count: int = 3) -> list:
     """Recommend next tasks based on priority, dependencies, and phase.
 
@@ -457,7 +506,7 @@ def pm_next(project_path: str | None = None, count: int = 3) -> list:
     return [{**_task_summary(t), "score": score(t)} for t in candidates[:count]]
 
 
-@mcp.tool()
+@_tool()
 def pm_blockers(project_path: str | None = None) -> list:
     """List all blocked tasks and their blockers."""
     pm_path = _get_pm_path(project_path)
@@ -485,7 +534,7 @@ def _build_warning(level: str, code: str, message: str, remediation: str | None 
     return warning
 
 
-@mcp.tool()
+@_tool()
 def pm_add_issue(
     parent_id: str,
     title: str,
@@ -594,7 +643,7 @@ def pm_add_issue(
 # ─── Memory ──────────────────────────────────────────
 
 
-@mcp.tool()
+@_tool()
 def pm_remember(
     content: str,
     type: str = "observation",
@@ -646,7 +695,7 @@ def pm_remember(
     return result
 
 
-@mcp.tool()
+@_tool()
 def pm_recall(
     query: str | None = None,
     task_id: str | None = None,
@@ -747,7 +796,7 @@ def pm_recall(
     return {"results": []}
 
 
-@mcp.tool()
+@_tool()
 def pm_session_summary(
     action: str = "save",
     summary: str | None = None,
@@ -819,7 +868,7 @@ def pm_session_summary(
             return {"status": "error", "message": f"Unknown action: {action}. Use save/get/list"}
 
 
-@mcp.tool()
+@_tool()
 def pm_memory_search(
     query: str,
     type: str | None = None,
@@ -877,7 +926,7 @@ def pm_memory_search(
 # ─── Memory Operations ──────────────────────────────
 
 
-@mcp.tool()
+@_tool()
 def pm_memory_stats(project_path: str | None = None) -> dict:
     """Show memory statistics for the current project.
 
@@ -899,7 +948,7 @@ def pm_memory_stats(project_path: str | None = None) -> dict:
     return stats
 
 
-@mcp.tool()
+@_tool()
 def pm_memory_cleanup(
     older_than_days: int | None = None,
     keep_latest: int | None = None,
@@ -929,7 +978,7 @@ def pm_memory_cleanup(
 # ─── Recording ───────────────────────────────────────
 
 
-@mcp.tool()
+@_tool()
 def pm_log(
     entry: str,
     category: str = "progress",
@@ -971,7 +1020,7 @@ def pm_log(
     return result
 
 
-@mcp.tool()
+@_tool()
 def pm_add_decision(
     title: str,
     context: str,
@@ -1002,14 +1051,14 @@ def pm_add_decision(
 # ─── Analysis ────────────────────────────────────────
 
 
-@mcp.tool()
+@_tool()
 def pm_velocity(project_path: str | None = None, weeks: int = 4) -> dict:
     """Calculate velocity over the past N weeks. Includes trend analysis."""
     pm_path = _get_pm_path(project_path)
     return calculate_velocity(pm_path, weeks)
 
 
-@mcp.tool()
+@_tool()
 def pm_risks(project_path: str | None = None) -> list:
     """List all risks and auto-detected issues.
 
@@ -1042,7 +1091,7 @@ def pm_risks(project_path: str | None = None) -> list:
 # ─── Visualization ───────────────────────────────────
 
 
-@mcp.tool()
+@_tool()
 def pm_dashboard(project_path: str | None = None, format: str = "html") -> str:
     """Generate a project dashboard.
 
@@ -1077,7 +1126,7 @@ def _has_pm_dir() -> bool:
 # ─── Discovery & Management ──────────────────────────
 
 
-@mcp.tool()
+@_tool()
 def pm_discover(scan_path: str = ".") -> dict:
     """Scan for projects with ``.pm/`` directories and register them.
 
@@ -1128,7 +1177,7 @@ def pm_discover(scan_path: str = ".") -> dict:
     }
 
 
-@mcp.tool()
+@_tool()
 def pm_cleanup() -> dict:
     """Health-check the registry. Detect and remove invalid paths.
 
@@ -1172,7 +1221,7 @@ def pm_cleanup() -> dict:
     }
 
 
-@mcp.tool()
+@_tool()
 def pm_update_claudemd(project_path: str | None = None) -> dict:
     """Update the PM Server rules section in CLAUDE.md to the latest version.
 
@@ -1209,7 +1258,7 @@ def pm_update_claudemd(project_path: str | None = None) -> dict:
     }
 
 
-@mcp.tool()
+@_tool()
 def pm_update_rules(
     project_path: str | None = None,
     target: str = "auto",
@@ -1277,7 +1326,7 @@ def pm_update_rules(
 # ─── Knowledge Records ─────────────────────────────
 
 
-@mcp.tool()
+@_tool()
 def pm_record(
     category: str,
     title: str,
@@ -1351,34 +1400,17 @@ def pm_record(
     return result
 
 
-@mcp.tool()
-def pm_knowledge(
-    action: str = "list",
+def _query_knowledge(
+    pm_path: Path,
+    action: str,
     record_id: str | None = None,
     category: str | None = None,
     status: str | None = None,
     tag: str | None = None,
     task_id: str | None = None,
     workflow_id: str | None = None,
-    new_status: str | None = None,
-    confidence: str | None = None,
-    conclusion: str | None = None,
-    project_path: str | None = None,
 ) -> dict:
-    """Query and manage knowledge records.
-
-    action:
-      - list: List records with optional filters (category, status, tag, task_id)
-      - get: Get a specific record by record_id
-      - update: Update a record's status/confidence/conclusion (record_id required)
-      - summary: Get category-wise summary counts
-
-    category filter: research | market | spike | requirement | constraint |
-                     tradeoff | risk_analysis | spec | api_design
-    status filter: draft | validated | superseded
-    """
-    pm_path = _get_pm_path(project_path)
-
+    """Read-only knowledge query logic shared by ``pm_knowledge`` and ``pm_knowledge_query``."""
     match action:
         case "list":
             records = load_knowledge(pm_path)
@@ -1406,19 +1438,6 @@ def pm_knowledge(
                     return _knowledge_detail(r)
             return {"status": "error", "message": f"{record_id} not found"}
 
-        case "update":
-            if not record_id:
-                return {"status": "error", "message": "record_id required for update"}
-            updates: dict = {}
-            if new_status:
-                updates["status"] = KnowledgeStatus(new_status)
-            if confidence:
-                updates["confidence"] = ConfidenceLevel(confidence)
-            if conclusion:
-                updates["conclusion"] = conclusion
-            record = update_knowledge(pm_path, record_id, **updates)
-            return {"status": "updated", "record": _knowledge_summary(record)}
-
         case "summary":
             records = load_knowledge(pm_path)
             by_category: dict[str, int] = {}
@@ -1435,8 +1454,98 @@ def pm_knowledge(
         case _:
             return {
                 "status": "error",
-                "message": f"Unknown action: {action}. Use list/get/update/summary",
+                "message": f"Unknown action: {action}. Use list/get/summary",
             }
+
+
+@_tool()
+def pm_knowledge(
+    action: str = "list",
+    record_id: str | None = None,
+    category: str | None = None,
+    status: str | None = None,
+    tag: str | None = None,
+    task_id: str | None = None,
+    workflow_id: str | None = None,
+    new_status: str | None = None,
+    confidence: str | None = None,
+    conclusion: str | None = None,
+    project_path: str | None = None,
+) -> dict:
+    """Query and manage knowledge records.
+
+    action:
+      - list: List records with optional filters (category, status, tag, task_id)
+      - get: Get a specific record by record_id
+      - update: Update a record's status/confidence/conclusion (record_id required)
+      - summary: Get category-wise summary counts
+
+    category filter: research | market | spike | requirement | constraint |
+                     tradeoff | risk_analysis | spec | api_design
+    status filter: draft | validated | superseded
+    """
+    pm_path = _get_pm_path(project_path)
+
+    if action == "update":
+        if not record_id:
+            return {"status": "error", "message": "record_id required for update"}
+        updates: dict = {}
+        if new_status:
+            updates["status"] = KnowledgeStatus(new_status)
+        if confidence:
+            updates["confidence"] = ConfidenceLevel(confidence)
+        if conclusion:
+            updates["conclusion"] = conclusion
+        record = update_knowledge(pm_path, record_id, **updates)
+        return {"status": "updated", "record": _knowledge_summary(record)}
+
+    return _query_knowledge(
+        pm_path,
+        action,
+        record_id=record_id,
+        category=category,
+        status=status,
+        tag=tag,
+        task_id=task_id,
+        workflow_id=workflow_id,
+    )
+
+
+@_tool()
+def pm_knowledge_query(
+    action: str = "list",
+    record_id: str | None = None,
+    category: str | None = None,
+    status: str | None = None,
+    tag: str | None = None,
+    task_id: str | None = None,
+    workflow_id: str | None = None,
+    project_path: str | None = None,
+) -> dict:
+    """Read-only knowledge query (PMSERV-079 / WF-025 / ADR-018).
+
+    Lens-safe variant of ``pm_knowledge`` exposing only read actions.
+    ``pm_knowledge`` の read 部分 (list/get/summary) のみを提供する。
+    update mutator は ``pm_knowledge`` 側に分離し、本ツールでは到達不能。
+
+    action: list | get | summary (no update — use pm_knowledge for mutations).
+    """
+    if action == "update":
+        return {
+            "status": "error",
+            "message": "pm_knowledge_query is read-only. Use pm_knowledge for update.",
+        }
+    pm_path = _get_pm_path(project_path)
+    return _query_knowledge(
+        pm_path,
+        action,
+        record_id=record_id,
+        category=category,
+        status=status,
+        tag=tag,
+        task_id=task_id,
+        workflow_id=workflow_id,
+    )
 
 
 def _knowledge_summary(r: KnowledgeRecord) -> dict:
@@ -1478,7 +1587,7 @@ def _knowledge_detail(r: KnowledgeRecord) -> dict:
 # ─── Workflow ───────────────────────────────────────
 
 
-@mcp.tool()
+@_tool()
 def pm_workflow_start(
     feature: str,
     template: str = "development",
@@ -1497,7 +1606,7 @@ def pm_workflow_start(
     return start_workflow(pm_path, feature, template)
 
 
-@mcp.tool()
+@_tool()
 def pm_workflow_status(
     workflow_id: str | None = None,
     project_path: str | None = None,
@@ -1511,7 +1620,7 @@ def pm_workflow_status(
     return workflow_status(pm_path, workflow_id)
 
 
-@mcp.tool()
+@_tool()
 def pm_workflow_advance(
     workflow_id: str | None = None,
     proceed: bool = True,
@@ -1535,7 +1644,7 @@ def pm_workflow_advance(
     return advance_step(pm_path, workflow_id, proceed, artifacts, notes, skip)
 
 
-@mcp.tool()
+@_tool()
 def pm_workflow_abandon(
     workflow_id: str | None = None,
     notes: str | None = None,
@@ -1560,7 +1669,7 @@ def pm_workflow_abandon(
     return abandon_workflow(pm_path, workflow_id, notes)
 
 
-@mcp.tool()
+@_tool()
 def pm_workflow_list(
     status: str | None = None,
     project_path: str | None = None,
@@ -1596,7 +1705,7 @@ def pm_workflow_list(
     }
 
 
-@mcp.tool()
+@_tool()
 def pm_workflow_templates(project_path: str | None = None) -> dict:
     """List available workflow templates.
 
@@ -1639,7 +1748,7 @@ def pm_workflow_templates(project_path: str | None = None) -> dict:
     }
 
 
-@mcp.tool()
+@_tool()
 def pm_list() -> list:
     """List all registered projects with summary info."""
     registry = load_registry()
