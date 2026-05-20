@@ -122,6 +122,19 @@ class TestProject:
         assert restored.name == "testproj"
         assert len(restored.phases) == 2
 
+    def test_pm_schema_default(self):
+        p = Project(name="test")
+        assert p.pm_schema == 1
+
+    def test_pm_schema_backward_compat_old_yaml(self):
+        # Old YAML payloads without `pm_schema` must load with the default.
+        p = Project(**{"name": "legacy", "version": "0.5.1"})
+        assert p.pm_schema == 1
+
+    def test_pm_schema_serialized(self, sample_project):
+        data = sample_project.model_dump(mode="json")
+        assert data["pm_schema"] == 1
+
 
 class TestRegistry:
     def test_empty(self):

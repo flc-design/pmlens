@@ -217,6 +217,7 @@ class MemoryStore:
         cur.executescript(_SCHEMA_SQL)
         cur.executescript(_FTS_SCHEMA_SQL)
         cur.executescript(_TRIGGER_SQL)
+        cur.execute("PRAGMA user_version = 1")
         self._conn.commit()
         self._migrate_session_summaries_updated_at()
 
@@ -460,6 +461,7 @@ class MemoryStore:
             conn.executescript(_GLOBAL_SCHEMA_SQL)
             conn.executescript(_GLOBAL_FTS_SQL)
             conn.executescript(_GLOBAL_TRIGGER_SQL)
+            conn.execute("PRAGMA user_version = 1")
             conn.execute(
                 """INSERT INTO memory_index
                    (project, project_path, memory_id, type, content, tags, task_id, created_at)

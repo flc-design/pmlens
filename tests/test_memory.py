@@ -95,6 +95,32 @@ class TestMemoryStoreInit:
         assert "session_summaries" in tables
         assert "memories_fts" in tables
 
+    def test_per_project_db_user_version_is_one(self, memory_store: MemoryStore):
+        version = memory_store._conn.execute("PRAGMA user_version").fetchone()[0]
+        assert version == 1
+
+    def test_global_db_user_version_is_one_after_sync(
+        self, memory_store: MemoryStore, tmp_path: Path
+    ):
+        import sqlite3
+
+        mem = Memory(
+            session_id="sess-schema-001",
+            type=MemoryType.OBSERVATION,
+            content="trigger global sync",
+            project="testproj",
+        )
+        memory_store.save(mem)
+
+        global_path = tmp_path / "global_pm" / "memory.db"
+        assert global_path.exists()
+        conn = sqlite3.connect(str(global_path))
+        try:
+            version = conn.execute("PRAGMA user_version").fetchone()[0]
+        finally:
+            conn.close()
+        assert version == 1
+
 
 # ─── Memory CRUD ───────────────────────────────────────
 

@@ -64,6 +64,25 @@ class TestProjectStorage:
         content = (tmp_pm_path / "project.yaml").read_text()
         assert content.startswith("# PM Server - project.yaml")
 
+    def test_load_legacy_yaml_without_pm_schema(self, tmp_pm_path):
+        legacy = (
+            "# PM Server - project.yaml\n"
+            "name: legacy-proj\n"
+            "display_name: Legacy\n"
+            "version: 0.5.1\n"
+            "status: development\n"
+        )
+        (tmp_pm_path / "project.yaml").write_text(legacy)
+        loaded = load_project(tmp_pm_path)
+        assert loaded.name == "legacy-proj"
+        assert loaded.pm_schema == 1
+
+    def test_pm_schema_round_trip(self, tmp_pm_path, sample_project):
+        save_project(tmp_pm_path, sample_project)
+        content = (tmp_pm_path / "project.yaml").read_text()
+        assert "pm_schema: 1" in content
+        assert load_project(tmp_pm_path).pm_schema == 1
+
 
 class TestTaskStorage:
     def test_save_and_load(self, tmp_pm_path, sample_tasks):

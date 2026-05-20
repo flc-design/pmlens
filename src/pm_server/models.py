@@ -293,6 +293,7 @@ class Project(BaseModel):
     description: str = ""
     phases: list[Phase] = Field(default_factory=list)
     health: ProjectHealth = Field(default_factory=ProjectHealth)
+    pm_schema: int = 1
 
 
 class RegistryEntry(BaseModel):
