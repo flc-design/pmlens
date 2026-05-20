@@ -46,7 +46,7 @@
     "project_path": {
       "type": "string",
       "title": "Project root",
-      "description": "Absolute path to a project directory containing .pm/project.yaml. Leave blank to let the host pass workspace roots via MCP roots, or rely on the single-project auto-pick from ~/.pm/registry.yaml (PMSERV-082).",
+      "description": "Absolute path to a project directory containing .pm/project.yaml. If omitted, pm-server falls back to PM_PROJECT_PATH env, then to single-entry auto-pick from ~/.pm/registry.yaml under PM_LENS, then to a cwd walk-up. Set this explicitly when more than one project is registered.",
       "required": false
     }
   }

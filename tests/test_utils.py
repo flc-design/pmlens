@@ -21,7 +21,6 @@ from pm_server.utils import (
     _timestamped_backup,
     get_utils_fingerprint,
     resolve_project_path,
-    set_mcp_roots,
 )
 
 
@@ -162,91 +161,11 @@ class TestResolveProjectPathCwdWalkUp:
             resolve_project_path()
 
 
-class TestResolveProjectPathMcpRoots:
-    """PMSERV-082: MCP client workspace roots (priority 2)."""
-
-    @pytest.fixture(autouse=True)
-    def _isolate_roots(self):
-        # Ensure other tests do not see stale state from these tests.
-        set_mcp_roots([])
-        yield
-        set_mcp_roots([])
-
-    def test_first_root_with_pm_wins(self, tmp_path, monkeypatch):
-        ws1 = tmp_path / "no-pm"
-        ws1.mkdir()
-        ws2 = tmp_path / "has-pm"
-        pm2 = ws2 / ".pm"
-        pm2.mkdir(parents=True)
-        (pm2 / "project.yaml").write_text("name: ws2\n")
-
-        set_mcp_roots([str(ws1), str(ws2)])
-
-        # Ensure later priorities cannot accidentally satisfy the request
-        monkeypatch.delenv("PM_PROJECT_PATH", raising=False)
-        monkeypatch.delenv("PM_LENS", raising=False)
-        monkeypatch.chdir(tmp_path)
-
-        assert resolve_project_path() == ws2.resolve()
-
-    def test_roots_skipped_without_project_yaml(self, tmp_path, monkeypatch):
-        # A root that has .pm/ but no project.yaml does NOT count as a hit;
-        # this is exactly the "global ~/.pm" shape we must skip (ADR-016).
-        ws = tmp_path / "global-shape"
-        pm = ws / ".pm"
-        pm.mkdir(parents=True)
-        (pm / "registry.yaml").write_text("projects: []\n")
-        set_mcp_roots([ws])
-
-        monkeypatch.delenv("PM_PROJECT_PATH", raising=False)
-        monkeypatch.delenv("PM_LENS", raising=False)
-        cwd = tmp_path / "elsewhere"
-        cwd.mkdir()
-        monkeypatch.chdir(cwd)
-
-        with pytest.raises(ProjectNotFoundError):
-            resolve_project_path()
-
-    def test_invalid_roots_are_silently_dropped(self, tmp_path, monkeypatch):
-        # A flaky client passing non-directory or unresolvable roots must not
-        # break resolution — invalid entries are dropped, then the chain
-        # continues to the next priority.
-        good = tmp_path / "good"
-        good_pm = good / ".pm"
-        good_pm.mkdir(parents=True)
-        (good_pm / "project.yaml").write_text("name: good\n")
-
-        set_mcp_roots([str(tmp_path / "does-not-exist"), str(good)])
-        monkeypatch.delenv("PM_PROJECT_PATH", raising=False)
-        monkeypatch.delenv("PM_LENS", raising=False)
-        monkeypatch.chdir(tmp_path)
-
-        assert resolve_project_path() == good.resolve()
-
-    def test_explicit_arg_overrides_roots(self, tmp_path):
-        # Priority 1 still beats roots
-        ws = tmp_path / "from-roots"
-        ws_pm = ws / ".pm"
-        ws_pm.mkdir(parents=True)
-        (ws_pm / "project.yaml").write_text("name: from-roots\n")
-
-        explicit = tmp_path / "explicit"
-        ex_pm = explicit / ".pm"
-        ex_pm.mkdir(parents=True)
-        (ex_pm / "project.yaml").write_text("name: explicit\n")
-
-        set_mcp_roots([str(ws)])
-        assert resolve_project_path(str(explicit)) == explicit.resolve()
-
-
 class TestResolveProjectPathPicker:
-    """PMSERV-082: single-entry registry auto-pick (priority 4, PM_LENS gated)."""
+    """PMSERV-082: single-entry registry auto-pick (priority 3, PM_LENS gated).
 
-    @pytest.fixture(autouse=True)
-    def _isolate(self):
-        set_mcp_roots([])
-        yield
-        set_mcp_roots([])
+    PMSERV-085: priority renumbered from 4 to 3 after MCP roots removal.
+    """
 
     def _write_registry(self, home, projects):
         import yaml as _yaml
