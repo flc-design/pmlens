@@ -456,6 +456,12 @@ pm-server uninstall-hooks  # Remove PM Server hooks from Claude Code settings
 
 ## Architecture
 
+For a graphical overview (module map, MCP tool catalog with Lens RO_ALLOWLIST,
+Lens mode flow, workflow state machines, task/issue lifecycle, data layout,
+and distribution channels), see **[`docs/architecture.html`](docs/architecture.html)**.
+Open it directly in a browser — it is a single self-contained static file
+(no external dependencies).
+
 ```
 Claude Code Session
   │

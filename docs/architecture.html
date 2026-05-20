@@ -1,0 +1,628 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>PM Server — Architecture & Behavior</title>
+<style>
+:root {
+  --bg: #fafafa;
+  --fg: #1a1a1a;
+  --muted: #666;
+  --line: #ddd;
+  --accent: #0066cc;
+  --ro: #2563eb;
+  --rw: #dc2626;
+  --gate: #d97706;
+  --done: #16a34a;
+  --warn: #f59e0b;
+  --card: #ffffff;
+  --code-bg: #f3f4f6;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+* { box-sizing: border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--fg);
+  margin: 0;
+  line-height: 1.6;
+  font-size: 15px;
+}
+.layout { display: grid; grid-template-columns: 240px 1fr; gap: 24px; max-width: 1280px; margin: 0 auto; padding: 24px; }
+nav.toc {
+  position: sticky;
+  top: 24px;
+  align-self: start;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 16px;
+  font-size: 13px;
+}
+nav.toc h3 { margin: 0 0 8px; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+nav.toc ol { list-style: none; padding-left: 0; margin: 0; }
+nav.toc li { margin: 4px 0; }
+nav.toc a { color: var(--fg); text-decoration: none; padding: 4px 8px; display: block; border-radius: 4px; }
+nav.toc a:hover { background: var(--code-bg); color: var(--accent); }
+main { min-width: 0; }
+section.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 24px;
+  margin-bottom: 20px;
+}
+h1 { font-size: 28px; margin-top: 0; }
+h2 { font-size: 22px; margin: 0 0 12px; padding-bottom: 6px; border-bottom: 2px solid var(--accent); }
+h3 { font-size: 16px; margin: 16px 0 8px; }
+p { margin: 8px 0; }
+.muted { color: var(--muted); font-size: 13px; }
+code { background: var(--code-bg); padding: 2px 6px; border-radius: 3px; font-family: var(--mono); font-size: 13px; }
+pre { background: var(--code-bg); padding: 12px 14px; border-radius: 6px; overflow-x: auto; font-family: var(--mono); font-size: 12.5px; line-height: 1.5; }
+table { border-collapse: collapse; width: 100%; font-size: 13.5px; margin-top: 8px; }
+th { background: var(--code-bg); text-align: left; padding: 8px 10px; font-weight: 600; border-bottom: 2px solid var(--line); }
+td { padding: 6px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+tr:hover { background: #fafbfc; }
+.badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+.badge-ro { background: #dbeafe; color: var(--ro); }
+.badge-rw { background: #fee2e2; color: var(--rw); }
+.badge-gate { background: #fef3c7; color: var(--gate); }
+.badge-done { background: #dcfce7; color: var(--done); }
+.legend { display: flex; gap: 16px; flex-wrap: wrap; margin: 12px 0; font-size: 13px; }
+.legend-item { display: flex; align-items: center; gap: 6px; }
+.swatch { width: 14px; height: 14px; border-radius: 3px; border: 1px solid var(--line); }
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.callout { background: #fffbeb; border-left: 4px solid var(--warn); padding: 12px 16px; border-radius: 4px; margin: 12px 0; }
+.callout strong { color: #92400e; }
+svg { display: block; max-width: 100%; height: auto; }
+.svg-wrap { background: #fff; padding: 16px; border: 1px solid var(--line); border-radius: 6px; overflow-x: auto; }
+header.hero { padding: 24px 24px 0; max-width: 1280px; margin: 0 auto; }
+header.hero .subtitle { color: var(--muted); margin-top: 4px; }
+.meta { font-size: 12.5px; color: var(--muted); margin-top: 8px; }
+.tree { font-family: var(--mono); font-size: 12.5px; line-height: 1.7; white-space: pre; background: var(--code-bg); padding: 14px 18px; border-radius: 6px; }
+.tree .root { color: var(--accent); font-weight: 600; }
+.tree .comment { color: var(--muted); }
+</style>
+</head>
+<body>
+<header class="hero">
+  <h1>PM Server — Architecture &amp; Behavior</h1>
+  <div class="subtitle">Claude Code 用プロジェクト管理 MCP サーバーの全体機能・データフロー・状態遷移マップ</div>
+  <div class="meta">バージョン 0.6.2 (2026-05-20 時点) · 33 MCP tools · 15 RO_ALLOWLIST (Lens) · 698+ tests · MIT</div>
+</header>
+
+<div class="layout">
+<nav class="toc">
+  <h3>Sections</h3>
+  <ol>
+    <li><a href="#overview">1. Overview</a></li>
+    <li><a href="#modules">2. Module Architecture</a></li>
+    <li><a href="#tools">3. MCP Tool Catalog</a></li>
+    <li><a href="#lens">4. Lens Mode Flow</a></li>
+    <li><a href="#workflow">5. Workflow Engine</a></li>
+    <li><a href="#tasks">6. Task &amp; Issue Lifecycle</a></li>
+    <li><a href="#data">7. Data Layout</a></li>
+    <li><a href="#dist">8. Distribution Channels</a></li>
+  </ol>
+</nav>
+
+<main>
+
+<section class="card" id="overview">
+  <h2>1. Overview</h2>
+  <p>
+    <strong>PM Server</strong> は Claude Code 用のプロジェクト管理 MCP (Model Context Protocol) サーバー。
+    タスク追跡・進捗可視化・ブロッカー検知・ADR 記録・横断ダッシュボード・workflow 状態マシン・
+    SQLite メモリ層 (FTS5 全文検索) を一体提供する。
+  </p>
+  <table>
+    <tr><td><strong>言語</strong></td><td>Python 3.11+</td></tr>
+    <tr><td><strong>主要フレームワーク</strong></td><td>FastMCP, Pydantic v2, Click, Jinja2, tomlkit</td></tr>
+    <tr><td><strong>データ形式</strong></td><td>YAML (human-readable, git-friendly) + SQLite (per-project + global)</td></tr>
+    <tr><td><strong>配布</strong></td><td>PyPI <code>pm-server</code> (RW) + <code>.mcpb</code> bundle (Lens, read-only)</td></tr>
+    <tr><td><strong>対象ホスト</strong></td><td>Claude Code, Claude Desktop, Claude Cowork, Codex CLI</td></tr>
+    <tr><td><strong>ライセンス</strong></td><td>MIT</td></tr>
+  </table>
+</section>
+
+<section class="card" id="modules">
+  <h2>2. Module Architecture</h2>
+  <p>17 個の Python モジュールが <code>server.py</code> (FastMCP インスタンス) を中心に連携する。
+     データ層 (models / storage / memory) が下位、機能層 (workflow / hooks / installer / discovery /
+     velocity / dashboard / recall) が中位、orchestration (server / __main__) が上位。</p>
+  <div class="svg-wrap">
+  <svg viewBox="0 0 880 480" xmlns="http://www.w3.org/2000/svg" font-family="ui-monospace, SF Mono, monospace" font-size="12">
+    <defs>
+      <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="strokeWidth">
+        <path d="M0,0 L8,4 L0,8 z" fill="#888"/>
+      </marker>
+    </defs>
+    <!-- Top: CLI / orchestration -->
+    <rect x="340" y="20" width="200" height="40" rx="6" fill="#fef3c7" stroke="#d97706" stroke-width="1.5"/>
+    <text x="440" y="40" text-anchor="middle" font-weight="700">__main__.py</text>
+    <text x="440" y="54" text-anchor="middle" fill="#666" font-size="11">click CLI + hook subcommands</text>
+
+    <rect x="340" y="90" width="200" height="56" rx="6" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
+    <text x="440" y="111" text-anchor="middle" font-weight="700">server.py</text>
+    <text x="440" y="126" text-anchor="middle" fill="#666" font-size="11">FastMCP + 33 @_tool()</text>
+    <text x="440" y="140" text-anchor="middle" fill="#666" font-size="11">PM_LENS gating</text>
+
+    <!-- Mid layer: features -->
+    <rect x="20" y="200" width="130" height="44" rx="6" fill="#fff" stroke="#999"/>
+    <text x="85" y="220" text-anchor="middle">workflow.py</text>
+    <text x="85" y="234" text-anchor="middle" fill="#666" font-size="10">state machine</text>
+
+    <rect x="170" y="200" width="130" height="44" rx="6" fill="#fff" stroke="#999"/>
+    <text x="235" y="220" text-anchor="middle">hooks.py</text>
+    <text x="235" y="234" text-anchor="middle" fill="#666" font-size="10">PostToolUse / Lens-aware</text>
+
+    <rect x="320" y="200" width="130" height="44" rx="6" fill="#fff" stroke="#999"/>
+    <text x="385" y="220" text-anchor="middle">installer.py</text>
+    <text x="385" y="234" text-anchor="middle" fill="#666" font-size="10">Claude Code / Codex</text>
+
+    <rect x="470" y="200" width="130" height="44" rx="6" fill="#fff" stroke="#999"/>
+    <text x="535" y="220" text-anchor="middle">discovery.py</text>
+    <text x="535" y="234" text-anchor="middle" fill="#666" font-size="10">depth-5 cap walk</text>
+
+    <rect x="620" y="200" width="130" height="44" rx="6" fill="#fff" stroke="#999"/>
+    <text x="685" y="220" text-anchor="middle">dashboard.py</text>
+    <text x="685" y="234" text-anchor="middle" fill="#666" font-size="10">Jinja2 HTML/text</text>
+
+    <rect x="20" y="260" width="130" height="44" rx="6" fill="#fff" stroke="#999"/>
+    <text x="85" y="280" text-anchor="middle">velocity.py</text>
+    <text x="85" y="294" text-anchor="middle" fill="#666" font-size="10">analytics + risks</text>
+
+    <rect x="170" y="260" width="130" height="44" rx="6" fill="#fff" stroke="#999"/>
+    <text x="235" y="280" text-anchor="middle">recall.py</text>
+    <text x="235" y="294" text-anchor="middle" fill="#666" font-size="10">session context</text>
+
+    <rect x="320" y="260" width="130" height="44" rx="6" fill="#fff" stroke="#999"/>
+    <text x="385" y="280" text-anchor="middle">claudemd.py</text>
+    <text x="385" y="294" text-anchor="middle" fill="#666" font-size="10">CLAUDE.md template</text>
+
+    <rect x="470" y="260" width="130" height="44" rx="6" fill="#fff" stroke="#999"/>
+    <text x="535" y="280" text-anchor="middle">rules.py</text>
+    <text x="535" y="294" text-anchor="middle" fill="#666" font-size="10">codex AGENTS.md</text>
+
+    <rect x="620" y="260" width="130" height="44" rx="6" fill="#fff" stroke="#999"/>
+    <text x="685" y="280" text-anchor="middle">context.py</text>
+    <text x="685" y="294" text-anchor="middle" fill="#666" font-size="10">CLI bootstrap</text>
+
+    <!-- Bottom: data layer -->
+    <rect x="180" y="360" width="160" height="48" rx="6" fill="#dcfce7" stroke="#16a34a" stroke-width="1.5"/>
+    <text x="260" y="380" text-anchor="middle" font-weight="700">storage.py</text>
+    <text x="260" y="396" text-anchor="middle" fill="#666" font-size="10">YAML I/O</text>
+
+    <rect x="360" y="360" width="160" height="48" rx="6" fill="#dcfce7" stroke="#16a34a" stroke-width="1.5"/>
+    <text x="440" y="380" text-anchor="middle" font-weight="700">memory.py</text>
+    <text x="440" y="396" text-anchor="middle" fill="#666" font-size="10">SQLite + FTS5 (RO/RW)</text>
+
+    <rect x="540" y="360" width="160" height="48" rx="6" fill="#dcfce7" stroke="#16a34a" stroke-width="1.5"/>
+    <text x="620" y="380" text-anchor="middle" font-weight="700">models.py</text>
+    <text x="620" y="396" text-anchor="middle" fill="#666" font-size="10">Pydantic v2 (17 models)</text>
+
+    <rect x="340" y="430" width="200" height="40" rx="6" fill="#fce7f3" stroke="#be185d"/>
+    <text x="440" y="455" text-anchor="middle" font-weight="700">utils.py — shared helpers</text>
+
+    <!-- arrows from __main__ to server -->
+    <line x1="440" y1="60" x2="440" y2="88" stroke="#888" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+    <!-- arrows from server to mid layer -->
+    <line x1="380" y1="146" x2="100" y2="200" stroke="#bbb" stroke-width="1" marker-end="url(#arrow)"/>
+    <line x1="400" y1="146" x2="250" y2="200" stroke="#bbb" stroke-width="1" marker-end="url(#arrow)"/>
+    <line x1="440" y1="146" x2="385" y2="200" stroke="#bbb" stroke-width="1" marker-end="url(#arrow)"/>
+    <line x1="480" y1="146" x2="535" y2="200" stroke="#bbb" stroke-width="1" marker-end="url(#arrow)"/>
+    <line x1="500" y1="146" x2="685" y2="200" stroke="#bbb" stroke-width="1" marker-end="url(#arrow)"/>
+
+    <!-- arrows mid to data -->
+    <line x1="100" y1="244" x2="260" y2="360" stroke="#bbb" stroke-width="1" marker-end="url(#arrow)"/>
+    <line x1="235" y1="304" x2="260" y2="360" stroke="#bbb" stroke-width="1" marker-end="url(#arrow)"/>
+    <line x1="385" y1="304" x2="440" y2="360" stroke="#bbb" stroke-width="1" marker-end="url(#arrow)"/>
+    <line x1="535" y1="244" x2="440" y2="360" stroke="#bbb" stroke-width="1" marker-end="url(#arrow)"/>
+
+    <!-- utils.py at bottom is referenced by many; show dashed lines -->
+    <line x1="260" y1="408" x2="380" y2="430" stroke="#be185d" stroke-dasharray="3 3" stroke-width="1"/>
+    <line x1="440" y1="408" x2="440" y2="430" stroke="#be185d" stroke-dasharray="3 3" stroke-width="1"/>
+    <line x1="620" y1="408" x2="500" y2="430" stroke="#be185d" stroke-dasharray="3 3" stroke-width="1"/>
+
+    <!-- Legend -->
+    <rect x="20" y="30" width="14" height="14" fill="#fef3c7" stroke="#d97706"/>
+    <text x="40" y="42" font-size="11">CLI entry</text>
+    <rect x="20" y="50" width="14" height="14" fill="#dbeafe" stroke="#2563eb"/>
+    <text x="40" y="62" font-size="11">MCP server</text>
+    <rect x="20" y="70" width="14" height="14" fill="#dcfce7" stroke="#16a34a"/>
+    <text x="40" y="82" font-size="11">Data layer</text>
+    <rect x="20" y="90" width="14" height="14" fill="#fff" stroke="#999"/>
+    <text x="40" y="102" font-size="11">Feature</text>
+    <rect x="20" y="110" width="14" height="14" fill="#fce7f3" stroke="#be185d"/>
+    <text x="40" y="122" font-size="11">Shared helpers</text>
+  </svg>
+  </div>
+  <p class="muted">点線 (utils.py) は多数モジュールから利用される依存。<code>discovery.py</code> は深さ 5 cap + 除外
+     ディレクトリ + <code>~/.pm/</code> スキップで bounded walk を保証 (PMSERV-081)。
+     <code>memory.py</code> は PM_LENS=1 時に <code>?mode=ro&amp;immutable=1</code> で SQLite を開き
+     WAL sidecar の意図せぬ作成を防ぐ (PMSERV-080)。</p>
+</section>
+
+<section class="card" id="tools">
+  <h2>3. MCP Tool Catalog</h2>
+  <p>33 個の MCP ツールがカテゴリ別に提供される。
+     <span class="badge badge-ro">RO</span> は Lens モード (PM_LENS=1) で利用可能、
+     <span class="badge badge-rw">RW</span> は full pm-server (Claude Code 配布) のみ。</p>
+  <div class="legend">
+    <div class="legend-item"><span class="swatch" style="background:#dbeafe;border-color:#2563eb"></span>RO (Lens 可)</div>
+    <div class="legend-item"><span class="swatch" style="background:#fee2e2;border-color:#dc2626"></span>RW (mutator / subprocess)</div>
+  </div>
+  <table>
+    <tr><th>カテゴリ</th><th>ツール</th><th>用途</th><th>モード</th></tr>
+    <tr><td rowspan="6">Project setup</td>
+      <td><code>pm_init</code></td><td>新規プロジェクトの .pm/ 初期化</td><td><span class="badge badge-rw">RW</span></td></tr>
+    <tr><td><code>pm_discover</code></td><td>サブツリー walk で .pm/ project を検出 (depth=5 cap)</td><td><span class="badge badge-rw">RW</span></td></tr>
+    <tr><td><code>pm_list</code></td><td>~/.pm/registry.yaml の登録 project 一覧</td><td><span class="badge badge-ro">RO</span></td></tr>
+    <tr><td><code>pm_cleanup</code></td><td>古いログ・記憶・summary の clean-up</td><td><span class="badge badge-rw">RW</span></td></tr>
+    <tr><td><code>pm_update_claudemd</code></td><td>CLAUDE.md の pm-server セクションを最新化</td><td><span class="badge badge-rw">RW</span></td></tr>
+    <tr><td><code>pm_update_rules</code></td><td>Codex AGENTS.md を最新化</td><td><span class="badge badge-rw">RW</span></td></tr>
+
+    <tr><td rowspan="5">Status &amp; navigation</td>
+      <td><code>pm_status</code></td><td>フェーズ進捗・タスク数・blocker・diagnostics</td><td><span class="badge badge-ro">RO</span></td></tr>
+    <tr><td><code>pm_next</code></td><td>優先度・依存・phase で次タスク推薦</td><td><span class="badge badge-ro">RO</span></td></tr>
+    <tr><td><code>pm_dashboard</code></td><td>HTML/テキスト ダッシュボード生成</td><td><span class="badge badge-ro">RO</span></td></tr>
+    <tr><td><code>pm_velocity</code></td><td>4 週ベロシティ + 完了率</td><td><span class="badge badge-ro">RO</span></td></tr>
+    <tr><td><code>pm_risks</code></td><td>遅延予測・blocker・期限超過のリスク一覧</td><td><span class="badge badge-ro">RO</span></td></tr>
+
+    <tr><td rowspan="5">Tasks &amp; issues</td>
+      <td><code>pm_tasks</code></td><td>フィルタ付きタスク一覧</td><td><span class="badge badge-ro">RO</span></td></tr>
+    <tr><td><code>pm_add_task</code></td><td>新規タスク登録 (ID 自動採番)</td><td><span class="badge badge-rw">RW</span></td></tr>
+    <tr><td><code>pm_update_task</code></td><td>status/priority/blocked_by 等の更新</td><td><span class="badge badge-rw">RW</span></td></tr>
+    <tr><td><code>pm_blockers</code></td><td>blocked タスクと blocker 一覧</td><td><span class="badge badge-ro">RO</span></td></tr>
+    <tr><td><code>pm_add_issue</code></td><td>defect/enhancement issue を親 task 配下に追加 (defect で親 auto-revert)</td><td><span class="badge badge-rw">RW</span></td></tr>
+
+    <tr><td rowspan="7">Memory &amp; session</td>
+      <td><code>pm_remember</code></td><td>observation/insight/lesson を SQLite 保存</td><td><span class="badge badge-rw">RW</span></td></tr>
+    <tr><td><code>pm_recall</code></td><td>last session + recent memories + FTS5 検索</td><td><span class="badge badge-ro">RO</span></td></tr>
+    <tr><td><code>pm_memory_search</code></td><td>tags / type / task_id / cross_project 検索</td><td><span class="badge badge-ro">RO</span></td></tr>
+    <tr><td><code>pm_memory_stats</code></td><td>type 別カウント・最古/最新タイムスタンプ</td><td><span class="badge badge-ro">RO</span></td></tr>
+    <tr><td><code>pm_memory_cleanup</code></td><td>古い memory の dry-run / actual 削除</td><td><span class="badge badge-rw">RW</span></td></tr>
+    <tr><td><code>pm_log</code></td><td>daily log エントリ追記 (progress/decision/blocker/milestone)</td><td><span class="badge badge-rw">RW</span></td></tr>
+    <tr><td><code>pm_session_summary</code></td><td>session summary の save/get/list</td><td><span class="badge badge-rw">RW</span></td></tr>
+
+    <tr><td rowspan="1">Decisions (ADR)</td>
+      <td><code>pm_add_decision</code></td><td>Architecture Decision Record の登録</td><td><span class="badge badge-rw">RW</span></td></tr>
+
+    <tr><td rowspan="3">Knowledge records</td>
+      <td><code>pm_record</code></td><td>research/spec/tradeoff/risk_analysis を構造化記録</td><td><span class="badge badge-rw">RW</span></td></tr>
+    <tr><td><code>pm_knowledge</code></td><td>list/get/update/summary (update は RW)</td><td><span class="badge badge-rw">RW</span></td></tr>
+    <tr><td><code>pm_knowledge_query</code></td><td>RO 専用クエリ (Lens 用に切り出し PMSERV-079)</td><td><span class="badge badge-ro">RO</span></td></tr>
+
+    <tr><td rowspan="6">Workflow engine</td>
+      <td><code>pm_workflow_start</code></td><td>development/discovery/super-research 起動</td><td><span class="badge badge-rw">RW</span></td></tr>
+    <tr><td><code>pm_workflow_status</code></td><td>active workflow の step 詳細・gate・artifacts</td><td><span class="badge badge-ro">RO</span></td></tr>
+    <tr><td><code>pm_workflow_advance</code></td><td>次 step へ遷移 (gate user_approval 必要)</td><td><span class="badge badge-rw">RW</span></td></tr>
+    <tr><td><code>pm_workflow_abandon</code></td><td>active workflow を放棄</td><td><span class="badge badge-rw">RW</span></td></tr>
+    <tr><td><code>pm_workflow_list</code></td><td>active/completed/paused/abandoned 一覧</td><td><span class="badge badge-ro">RO</span></td></tr>
+    <tr><td><code>pm_workflow_templates</code></td><td>builtin + custom テンプレート一覧</td><td><span class="badge badge-ro">RO</span></td></tr>
+  </table>
+  <p class="muted">15 RO / 18 RW = 33 ツール (2026-05-20 時点)。Lens 配布では RO_ALLOWLIST 外のツールが FastMCP に
+     未登録 = 構造的不変条件 (ADR-015/017/018)。</p>
+</section>
+
+<section class="card" id="lens">
+  <h2>4. Lens Mode (Read-Only) Flow</h2>
+  <p><code>PM_LENS=1</code> 環境変数が立った pm-server プロセスは、起動時に <code>RO_ALLOWLIST</code> 外のツールを
+     FastMCP に登録しない。これは Claude Desktop / Cowork のような passive ビューア host で「書き込み事故」を
+     構造的に防ぐ防衛機構。</p>
+  <div class="svg-wrap">
+  <svg viewBox="0 0 880 360" xmlns="http://www.w3.org/2000/svg" font-family="ui-monospace, SF Mono, monospace" font-size="12">
+    <defs>
+      <marker id="arrow2" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="strokeWidth">
+        <path d="M0,0 L8,4 L0,8 z" fill="#2563eb"/>
+      </marker>
+      <marker id="redarrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="strokeWidth">
+        <path d="M0,0 L8,4 L0,8 z" fill="#dc2626"/>
+      </marker>
+    </defs>
+
+    <!-- Step 1: Host -->
+    <rect x="20" y="20" width="180" height="60" rx="6" fill="#fef3c7" stroke="#d97706" stroke-width="1.5"/>
+    <text x="110" y="42" text-anchor="middle" font-weight="700">Claude Desktop / Cowork</text>
+    <text x="110" y="60" text-anchor="middle" fill="#666" font-size="10">.mcpb manifest を読込</text>
+
+    <!-- Step 2: manifest -->
+    <rect x="240" y="20" width="200" height="60" rx="6" fill="#fff" stroke="#2563eb" stroke-width="1.5"/>
+    <text x="340" y="40" text-anchor="middle" font-weight="700">manifest.json</text>
+    <text x="340" y="56" text-anchor="middle" fill="#666" font-size="10">server.type = uv</text>
+    <text x="340" y="70" text-anchor="middle" fill="#666" font-size="10">server.mcp_config.env.PM_LENS = "1"</text>
+
+    <!-- Step 3: uv runtime -->
+    <rect x="480" y="20" width="160" height="60" rx="6" fill="#fff" stroke="#2563eb" stroke-width="1.5"/>
+    <text x="560" y="42" text-anchor="middle" font-weight="700">uv runtime</text>
+    <text x="560" y="60" text-anchor="middle" fill="#666" font-size="10">PyPI から pm-server fetch</text>
+
+    <!-- Step 4: process -->
+    <rect x="680" y="20" width="180" height="60" rx="6" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
+    <text x="770" y="42" text-anchor="middle" font-weight="700">pm-server プロセス</text>
+    <text x="770" y="60" text-anchor="middle" fill="#666" font-size="10">env: PM_LENS=1</text>
+
+    <line x1="200" y1="50" x2="240" y2="50" stroke="#2563eb" stroke-width="1.5" marker-end="url(#arrow2)"/>
+    <line x1="440" y1="50" x2="480" y2="50" stroke="#2563eb" stroke-width="1.5" marker-end="url(#arrow2)"/>
+    <line x1="640" y1="50" x2="680" y2="50" stroke="#2563eb" stroke-width="1.5" marker-end="url(#arrow2)"/>
+
+    <!-- Down arrow -->
+    <line x1="770" y1="80" x2="770" y2="120" stroke="#2563eb" stroke-width="1.5" marker-end="url(#arrow2)"/>
+
+    <!-- Step 5: PM_LENS_ENABLED check -->
+    <rect x="620" y="120" width="240" height="50" rx="6" fill="#dbeafe" stroke="#2563eb" stroke-width="1.5"/>
+    <text x="740" y="140" text-anchor="middle" font-weight="700">server.py:87</text>
+    <text x="740" y="156" text-anchor="middle" fill="#666" font-size="10">PM_LENS_ENABLED = True</text>
+
+    <line x1="620" y1="145" x2="540" y2="145" stroke="#2563eb" stroke-width="1.5" marker-end="url(#arrow2)"/>
+
+    <!-- Step 6: decorator -->
+    <rect x="280" y="120" width="240" height="50" rx="6" fill="#dbeafe" stroke="#2563eb" stroke-width="1.5"/>
+    <text x="400" y="140" text-anchor="middle" font-weight="700">@_tool() decorator (L112-)</text>
+    <text x="400" y="156" text-anchor="middle" fill="#666" font-size="10">name in RO_ALLOWLIST? → 登録</text>
+
+    <line x1="400" y1="170" x2="400" y2="200" stroke="#2563eb" stroke-width="1.5" marker-end="url(#arrow2)"/>
+
+    <!-- Outcomes: RO registered + RW excluded -->
+    <rect x="100" y="210" width="320" height="60" rx="6" fill="#dcfce7" stroke="#16a34a" stroke-width="1.5"/>
+    <text x="260" y="232" text-anchor="middle" font-weight="700">FastMCP に登録 (15 tools)</text>
+    <text x="260" y="250" text-anchor="middle" fill="#666" font-size="10">pm_status, pm_next, pm_tasks, pm_blockers, pm_recall,</text>
+    <text x="260" y="264" text-anchor="middle" fill="#666" font-size="10">pm_memory_search, pm_dashboard, pm_workflow_status …</text>
+
+    <rect x="460" y="210" width="320" height="60" rx="6" fill="#fee2e2" stroke="#dc2626" stroke-width="1.5"/>
+    <text x="620" y="232" text-anchor="middle" font-weight="700">FastMCP 未登録 (18 tools)</text>
+    <text x="620" y="250" text-anchor="middle" fill="#666" font-size="10">pm_add_task, pm_update_task, pm_log, pm_remember,</text>
+    <text x="620" y="264" text-anchor="middle" fill="#666" font-size="10">pm_init, pm_cleanup, pm_workflow_start, …</text>
+
+    <!-- Result -->
+    <rect x="280" y="300" width="320" height="40" rx="6" fill="#fff" stroke="#888"/>
+    <text x="440" y="324" text-anchor="middle" font-weight="700">MCP クライアントは RO 15 tools のみ確認</text>
+
+    <line x1="260" y1="270" x2="400" y2="300" stroke="#888" stroke-width="1" marker-end="url(#arrow2)"/>
+    <line x1="620" y1="270" x2="480" y2="300" stroke="#dc2626" stroke-width="1" marker-end="url(#redarrow)"/>
+  </svg>
+  </div>
+  <div class="callout">
+    <strong>構造的強制 vs ポリシー宣言:</strong> manifest の <code>server.mcp_config.env.PM_LENS=1</code> は配布意図のシグナル
+    (host が読まなければ無効) だが、<code>RO_ALLOWLIST</code> による FastMCP 未登録は code レベルの構造的不変条件。
+    1 箇所のロジック漏れがあっても他方で防御するレイヤード設計 (ADR-015/017/018)。
+  </div>
+</section>
+
+<section class="card" id="workflow">
+  <h2>5. Workflow Engine</h2>
+  <p>3 つの builtin テンプレートでステートマシン化された開発プロセスを提供。各 step が
+     <code>tool_hint</code>/<code>skill_hint</code>/<code>agent_hint</code> でガイダンスを返し、
+     <code>gate: user_approval</code> step では明示的承認待ち、<code>loop: true</code> step では
+     品質スコアによるループバックを許容する。</p>
+
+  <h3>5.1 <code>development</code> (9 steps)</h3>
+  <div class="svg-wrap">
+  <svg viewBox="0 0 880 100" xmlns="http://www.w3.org/2000/svg" font-family="ui-monospace, SF Mono, monospace" font-size="11">
+    <defs>
+      <marker id="arrow3" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto" markerUnits="strokeWidth">
+        <path d="M0,0 L7,3.5 L0,7 z" fill="#666"/>
+      </marker>
+    </defs>
+    <g>
+      <rect x="10" y="30" width="90" height="40" rx="4" fill="#fff" stroke="#666"/>
+      <text x="55" y="50" text-anchor="middle">1. decision</text>
+      <text x="55" y="62" text-anchor="middle" fill="#666" font-size="9">ADR</text>
+
+      <rect x="110" y="30" width="90" height="40" rx="4" fill="#fff" stroke="#666"/>
+      <text x="155" y="50" text-anchor="middle">2. tasks</text>
+      <text x="155" y="62" text-anchor="middle" fill="#666" font-size="9">pm_add_task</text>
+
+      <rect x="210" y="30" width="90" height="40" rx="4" fill="#fff" stroke="#666"/>
+      <text x="255" y="50" text-anchor="middle">3. spec</text>
+
+      <rect x="310" y="30" width="90" height="40" rx="4" fill="#fff" stroke="#666"/>
+      <text x="355" y="50" text-anchor="middle">4. plan</text>
+
+      <rect x="410" y="30" width="90" height="40" rx="4" fill="#fef3c7" stroke="#d97706" stroke-width="1.5"/>
+      <text x="455" y="50" text-anchor="middle">5. check</text>
+      <text x="455" y="62" text-anchor="middle" fill="#d97706" font-size="9">user_approval</text>
+
+      <rect x="510" y="30" width="90" height="40" rx="4" fill="#fff" stroke="#666"/>
+      <text x="555" y="50" text-anchor="middle">6. implement</text>
+
+      <rect x="610" y="30" width="90" height="40" rx="4" fill="#fff" stroke="#666"/>
+      <text x="655" y="50" text-anchor="middle">7. test</text>
+
+      <rect x="710" y="30" width="90" height="40" rx="4" fill="#fef3c7" stroke="#d97706" stroke-width="1.5"/>
+      <text x="755" y="50" text-anchor="middle">8. quality</text>
+      <text x="755" y="62" text-anchor="middle" fill="#d97706" font-size="9">user_approval</text>
+
+      <rect x="800" y="30" width="70" height="40" rx="4" fill="#f5f5f5" stroke="#999" stroke-dasharray="3 2"/>
+      <text x="835" y="50" text-anchor="middle">9. issues</text>
+      <text x="835" y="62" text-anchor="middle" fill="#999" font-size="9">optional</text>
+
+      <line x1="100" y1="50" x2="110" y2="50" stroke="#666" marker-end="url(#arrow3)"/>
+      <line x1="200" y1="50" x2="210" y2="50" stroke="#666" marker-end="url(#arrow3)"/>
+      <line x1="300" y1="50" x2="310" y2="50" stroke="#666" marker-end="url(#arrow3)"/>
+      <line x1="400" y1="50" x2="410" y2="50" stroke="#666" marker-end="url(#arrow3)"/>
+      <line x1="500" y1="50" x2="510" y2="50" stroke="#666" marker-end="url(#arrow3)"/>
+      <line x1="600" y1="50" x2="610" y2="50" stroke="#666" marker-end="url(#arrow3)"/>
+      <line x1="700" y1="50" x2="710" y2="50" stroke="#666" marker-end="url(#arrow3)"/>
+      <line x1="800" y1="50" x2="800" y2="50" stroke="#666" marker-end="url(#arrow3)"/>
+    </g>
+  </svg>
+  </div>
+
+  <h3>5.2 <code>super-research</code> (6 steps, depth_check ループ付き)</h3>
+  <div class="svg-wrap">
+  <svg viewBox="0 0 880 160" xmlns="http://www.w3.org/2000/svg" font-family="ui-monospace, SF Mono, monospace" font-size="11">
+    <rect x="20" y="40" width="100" height="40" rx="4" fill="#fff" stroke="#666"/>
+    <text x="70" y="60" text-anchor="middle">1. scope</text>
+    <text x="70" y="72" text-anchor="middle" fill="#666" font-size="9">pm_remember</text>
+
+    <rect x="140" y="40" width="140" height="40" rx="4" fill="#dbeafe" stroke="#2563eb" stroke-width="1.5"/>
+    <text x="210" y="60" text-anchor="middle">2. parallel_research</text>
+    <text x="210" y="72" text-anchor="middle" fill="#2563eb" font-size="9">3 agents</text>
+
+    <rect x="300" y="40" width="120" height="40" rx="4" fill="#dbeafe" stroke="#2563eb" stroke-width="1.5"/>
+    <text x="360" y="60" text-anchor="middle">3. depth_check</text>
+    <text x="360" y="72" text-anchor="middle" fill="#2563eb" font-size="9">6-dim, &lt;3.0 ↺</text>
+
+    <rect x="440" y="40" width="100" height="40" rx="4" fill="#fff" stroke="#666"/>
+    <text x="490" y="60" text-anchor="middle">4. fact_check</text>
+
+    <rect x="560" y="40" width="110" height="40" rx="4" fill="#fff" stroke="#666"/>
+    <text x="615" y="60" text-anchor="middle">5. cross_check</text>
+
+    <rect x="690" y="40" width="170" height="40" rx="4" fill="#fef3c7" stroke="#d97706" stroke-width="1.5"/>
+    <text x="775" y="58" text-anchor="middle">6. synthesis (KR 必須)</text>
+    <text x="775" y="72" text-anchor="middle" fill="#d97706" font-size="9">user_approval</text>
+
+    <line x1="120" y1="60" x2="140" y2="60" stroke="#666" marker-end="url(#arrow3)"/>
+    <line x1="280" y1="60" x2="300" y2="60" stroke="#666" marker-end="url(#arrow3)"/>
+    <line x1="420" y1="60" x2="440" y2="60" stroke="#666" marker-end="url(#arrow3)"/>
+    <line x1="540" y1="60" x2="560" y2="60" stroke="#666" marker-end="url(#arrow3)"/>
+    <line x1="670" y1="60" x2="690" y2="60" stroke="#666" marker-end="url(#arrow3)"/>
+
+    <!-- loop arrow from depth_check back to parallel_research -->
+    <path d="M 360 80 Q 360 130 210 130 Q 140 130 140 95" stroke="#2563eb" stroke-width="1.2" fill="none" stroke-dasharray="4 3" marker-end="url(#arrow3)"/>
+    <text x="280" y="142" text-anchor="middle" fill="#2563eb" font-size="10">score &lt; 3.0 → loop back (iteration++)</text>
+  </svg>
+  </div>
+
+  <h3>5.3 <code>discovery</code> (調査・ブレスト)</h3>
+  <p class="muted">scope → research → analysis → synthesis → proposal の 5 step。完了時に <code>chain_to: development</code>
+     で次の開発 workflow 起動を提案する。</p>
+</section>
+
+<section class="card" id="tasks">
+  <h2>6. Task &amp; Issue Lifecycle</h2>
+  <p>タスクは <code>todo → in_progress → review → done</code> の主経路、別途 <code>blocked</code> (任意状態から推移可) を持つ。
+     issue (子 task) を <code>severity=defect</code> で起票すると親 task が自動的に <code>done → review</code> に巻き戻る。</p>
+  <div class="svg-wrap">
+  <svg viewBox="0 0 880 320" xmlns="http://www.w3.org/2000/svg" font-family="ui-monospace, SF Mono, monospace" font-size="12">
+    <defs>
+      <marker id="arrow4" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="strokeWidth">
+        <path d="M0,0 L8,4 L0,8 z" fill="#666"/>
+      </marker>
+      <marker id="orange-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="strokeWidth">
+        <path d="M0,0 L8,4 L0,8 z" fill="#dc2626"/>
+      </marker>
+    </defs>
+
+    <!-- Linear states -->
+    <rect x="40" y="40" width="120" height="50" rx="25" fill="#f5f5f5" stroke="#666"/>
+    <text x="100" y="68" text-anchor="middle" font-weight="700">todo</text>
+
+    <rect x="240" y="40" width="120" height="50" rx="25" fill="#fef3c7" stroke="#d97706" stroke-width="1.5"/>
+    <text x="300" y="68" text-anchor="middle" font-weight="700">in_progress</text>
+
+    <rect x="440" y="40" width="120" height="50" rx="25" fill="#fef3c7" stroke="#d97706" stroke-width="1.5"/>
+    <text x="500" y="68" text-anchor="middle" font-weight="700">review</text>
+
+    <rect x="640" y="40" width="120" height="50" rx="25" fill="#dcfce7" stroke="#16a34a" stroke-width="1.5"/>
+    <text x="700" y="68" text-anchor="middle" font-weight="700">done</text>
+
+    <line x1="160" y1="65" x2="240" y2="65" stroke="#666" stroke-width="1.5" marker-end="url(#arrow4)"/>
+    <line x1="360" y1="65" x2="440" y2="65" stroke="#666" stroke-width="1.5" marker-end="url(#arrow4)"/>
+    <line x1="560" y1="65" x2="640" y2="65" stroke="#666" stroke-width="1.5" marker-end="url(#arrow4)"/>
+
+    <!-- Auto-revert arrow: done -> review -->
+    <path d="M 690 95 Q 690 150 510 150 Q 500 150 500 95" stroke="#dc2626" stroke-width="1.5" fill="none" stroke-dasharray="5 3" marker-end="url(#orange-arrow)"/>
+    <text x="600" y="170" text-anchor="middle" fill="#dc2626" font-size="11" font-weight="600">pm_add_issue(severity=defect)</text>
+    <text x="600" y="184" text-anchor="middle" fill="#dc2626" font-size="10">→ parent_reverted: done → review</text>
+
+    <!-- Blocked branch -->
+    <rect x="340" y="220" width="120" height="50" rx="25" fill="#fee2e2" stroke="#dc2626" stroke-width="1.5"/>
+    <text x="400" y="248" text-anchor="middle" font-weight="700">blocked</text>
+
+    <line x1="300" y1="90" x2="380" y2="220" stroke="#dc2626" stroke-width="1" stroke-dasharray="3 2" marker-end="url(#orange-arrow)"/>
+    <line x1="500" y1="90" x2="420" y2="220" stroke="#dc2626" stroke-width="1" stroke-dasharray="3 2" marker-end="url(#orange-arrow)"/>
+    <line x1="420" y1="220" x2="300" y2="90" stroke="#666" stroke-width="1" stroke-dasharray="3 2" marker-end="url(#arrow4)"/>
+    <text x="280" y="160" font-size="10" fill="#666">blocked ↔ in_progress / review</text>
+
+    <!-- Legend -->
+    <text x="40" y="290" font-size="11" font-weight="600">注:</text>
+    <text x="40" y="306" font-size="10" fill="#666">user_approval gate (workflow side) と task status 巻き戻し (pm_add_issue defect) は連動して</text>
+    <text x="40" y="320" font-size="10" fill="#666">WF-025 step 8 quality の再判定対象を systematic に再構成する (CLAUDE.md ルール準拠)。</text>
+  </svg>
+  </div>
+  <h3>6.1 Issue severity ごとの挙動</h3>
+  <table>
+    <tr><th>severity</th><th>親 task の自動状態変更</th><th>warning</th><th>使用シナリオ</th></tr>
+    <tr><td><code>defect</code> (default)</td><td>done → review (auto-revert)</td><td><code>parent_reverted</code></td><td>品質レビュー中に欠陥発見</td></tr>
+    <tr><td><code>enhancement</code></td><td>変更なし</td><td>—</td><td>将来改善・親に紐付く提案</td></tr>
+  </table>
+</section>
+
+<section class="card" id="data">
+  <h2>7. Data Layout</h2>
+  <p>YAML (human-readable, git-friendly) + SQLite (高速検索) のハイブリッド。プロジェクトローカル
+     <code>.pm/</code> と global <code>~/.pm/</code> が分離。</p>
+
+  <div class="grid-2">
+    <div>
+      <h3>Per-project (<code>&lt;repo&gt;/.pm/</code>)</h3>
+<div class="tree"><span class="root">.pm/</span>
+├── project.yaml        <span class="comment"># メタデータ + phases + pm_schema</span>
+├── tasks.yaml          <span class="comment"># 全タスク (parent_id で issue 親子)</span>
+├── decisions.yaml      <span class="comment"># ADR-NNN</span>
+├── workflows.yaml      <span class="comment"># WF-NNN 状態マシン</span>
+├── knowledge.yaml      <span class="comment"># KR-NNN (research/spec/etc)</span>
+├── memory.db           <span class="comment"># SQLite + FTS5 (per-project)</span>
+├── daily/
+│   └── YYYY-MM-DD.yaml <span class="comment"># pm_log エントリ</span>
+└── registry.yaml       <span class="comment"># 内部メタ (project 自身の参照)</span></div>
+    </div>
+    <div>
+      <h3>Global (<code>~/.pm/</code>)</h3>
+<div class="tree"><span class="root">~/.pm/</span>
+├── registry.yaml       <span class="comment"># 登録 project 一覧 (path + name)</span>
+├── memory.db           <span class="comment"># cross-project SQLite (sync 先)</span>
+└── &lt;cache files&gt;       <span class="comment"># dashboard cache 等</span>
+
+<span class="comment"># discover_projects は ~/.pm/ を skip</span>
+<span class="comment"># (depth-5 cap + excluded dirs と二重防御)</span></div>
+    </div>
+  </div>
+
+  <h3>Lens モード時の RO 担保</h3>
+  <table>
+    <tr><th>レイヤ</th><th>挙動 (PM_LENS=1)</th></tr>
+    <tr><td>YAML files</td><td>read-only open (load_* のみ呼ばれ save_* は到達不能 — RO_ALLOWLIST 外)</td></tr>
+    <tr><td>per-project SQLite</td><td><code>?mode=ro&amp;immutable=1</code> で接続 — WAL <code>-shm</code> sidecar 不生成 (PMSERV-080)</td></tr>
+    <tr><td>global SQLite</td><td><code>MemoryStore(readonly=True)</code> で <code>global_db_path=None</code> 強制 — sync 経路無効化</td></tr>
+    <tr><td>memory.db 不在</td><td><code>:memory:</code> SQLite に fallback (search は空、エラーなし)</td></tr>
+  </table>
+</section>
+
+<section class="card" id="dist">
+  <h2>8. Distribution Channels</h2>
+  <p>同一コードベースが 2 つの配布形態を持つ。PyPI は完全 RW、.mcpb は構造的 RO (Lens)。</p>
+  <table>
+    <tr><th></th><th>PyPI <code>pm-server</code></th><th>.mcpb bundle</th></tr>
+    <tr><td><strong>対象 host</strong></td><td>Claude Code (CLI) / Codex CLI</td><td>Claude Desktop / Claude Cowork</td></tr>
+    <tr><td><strong>インストール</strong></td><td><code>pip install pm-server</code> &rarr; <code>claude mcp add</code> / <code>pm-server install</code></td><td>.mcpb ファイルを host に drag &amp; drop (host が <code>uv</code> 経由で PyPI から fetch)</td></tr>
+    <tr><td><strong>権限</strong></td><td>full RW (33 tools)</td><td>Lens RO (15 tools)</td></tr>
+    <tr><td><strong>PM_LENS env</strong></td><td>未設定 (RW)</td><td>manifest <code>server.mcp_config.env.PM_LENS = "1"</code></td></tr>
+    <tr><td><strong>SQLite モード</strong></td><td>RW (WAL OK)</td><td><code>?mode=ro&amp;immutable=1</code></td></tr>
+    <tr><td><strong>同一バイナリ?</strong></td><td>はい</td><td>はい (PyPI から host が install)</td></tr>
+    <tr><td><strong>バージョン同期</strong></td><td>pyproject.toml が source of truth</td><td>manifest.json が pyproject と lockstep (<code>build_mcpb.py</code> validator で CI 強制)</td></tr>
+  </table>
+  <div class="callout">
+    <strong>共有 surface の安全性:</strong> 両者は <code>~/.pm/</code> と project 内 <code>.pm/memory.db</code> を共有しうるが、
+    Lens 側は <code>memory.py:98-117</code> の <code>?mode=ro&amp;immutable=1</code> で RO 接続するため、
+    Claude Code 側が WAL を書いていても -shm sidecar の意図せぬ生成は発生しない (PMSERV-080 / FINDING-J)。
+  </div>
+  <h3>installer.py の PM_LENS 認識 (PMSERV-087, 2026-05-20)</h3>
+  <p><code>install_claude_code()</code> は <code>--env PM_LENS=1</code> を <code>claude mcp add</code> に注入、
+    <code>install_codex()</code> は TOML inline_table <code>env = { PM_LENS = "1" }</code> を section に書き込む。
+    <code>InstallResult.lens_mode</code> フィールドで RW/Lens を caller が判別可能。
+    既存 RW 登録 → Lens 再インストールは env 追加で flip、その逆は env から PM_LENS=1 を削除して flip back する。</p>
+</section>
+
+<footer style="text-align: center; color: var(--muted); font-size: 12px; margin: 24px 0;">
+  Generated 2026-05-20 · pm-server v0.6.2 · WF-025/WF-026 fixes applied (PMSERV-084..087)
+</footer>
+
+</main>
+</div>
+</body>
+</html>
