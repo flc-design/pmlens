@@ -117,6 +117,29 @@ def _connect_readonly(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
+def _has_pm_server_schema(db_path: Path) -> bool:
+    """Return True iff the SQLite DB has pm-server's ``memories`` table.
+
+    Used by ``server._get_memory_store`` under PM_LENS=1 to distinguish
+    "DB file exists but is uninitialized" (e.g. touched by an older install,
+    a partial init, or unrelated SQLite content) from "DB file exists with
+    a valid pm-server schema". Returns False on any SQLite error so the
+    caller can fall back to an in-memory empty store rather than letting
+    OperationalError propagate to read tools (PMSERV-093).
+    """
+    try:
+        conn = _connect_readonly(db_path)
+        try:
+            row = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='memories'"
+            ).fetchone()
+            return row is not None
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return False
+
+
 # ─── Schema SQL ─────────────────────────────────────
 
 _SCHEMA_SQL = """\
@@ -224,6 +247,11 @@ class MemoryStore:
         readonly: Open the DB with ``?mode=ro&immutable=1`` (no WAL/SHM
             sidecars, no schema mutations). Used by PM_LENS=1 to keep
             Desktop/Cowork passive on other projects' ``.pm/memory.db``.
+        lens_fallback: Set True when the store was created as a Lens fallback
+            (DB absent OR exists-but-uninitialized; see
+            ``server._get_memory_store``). Read tools surface an explanatory
+            ``note`` field so users can distinguish "no records yet" from
+            "store unavailable" (PMSERV-091/093).
     """
 
     def __init__(
@@ -232,10 +260,15 @@ class MemoryStore:
         global_db_path: Path | None = None,
         *,
         readonly: bool = False,
+        lens_fallback: bool = False,
     ) -> None:
         self.db_path = db_path
         self.global_db_path = None if readonly else global_db_path
         self.readonly = readonly
+        # PMSERV-091/093: signals "Lens fallback to in-memory" (DB absent OR
+        # exists-but-uninitialized) so server.py read tools can add an
+        # explanatory note distinguishing "no records" from "store unavailable".
+        self.lens_fallback = lens_fallback
         if readonly:
             self._conn = _connect_readonly(db_path)
         else:

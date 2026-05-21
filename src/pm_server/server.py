@@ -11,7 +11,7 @@ from fastmcp import FastMCP
 
 from . import storage as _storage
 from .discovery import detect_project_info, discover_projects
-from .memory import MemoryStore
+from .memory import MemoryStore, _has_pm_server_schema
 from .models import (
     ConfidenceLevel,
     Consequences,
@@ -169,25 +169,50 @@ def _detect_session_ambiguity(
 
 _memory_stores: dict[str, MemoryStore] = {}
 
+# PMSERV-091/093: explanatory note appended to read-tool responses when the
+# Lens MemoryStore fell back to an empty in-memory store (DB absent OR
+# exists-but-uninitialized). Lets users distinguish "no records yet" from
+# "store unavailable" without a stack trace.
+_LENS_FALLBACK_NOTE: str = (
+    "memory store not initialized for this project (Lens fallback to in-memory). "
+    "Use Claude Code in this project to record memories — "
+    "Lens (PM_LENS=1) is read-only."
+)
+
+
+def _maybe_add_lens_note(result: dict, store: MemoryStore) -> dict:
+    """Append the Lens-fallback note to a tool result when applicable.
+
+    No-op when the store was opened against an initialized DB. Only intended
+    for local-DB result dicts; cross-project paths should not call this since
+    they read the global index regardless of local state (PMSERV-093).
+    """
+    if getattr(store, "lens_fallback", False):
+        result["note"] = _LENS_FALLBACK_NOTE
+    return result
+
 
 def _get_memory_store(project_path: str | None) -> MemoryStore:
     """Get or create a MemoryStore for the project.
 
     PM_LENS=1 (PMSERV-080 R5): open the on-disk DB with mode=ro&immutable=1
     so the Desktop/Cowork host never creates -wal/-shm sidecars in another
-    project's .pm/. If the DB file does not exist yet, fall back to an
-    in-memory store so read queries return empty results without writing
-    to disk.
+    project's .pm/. If the DB file does not exist OR exists-but-uninitialized
+    (PMSERV-093 — e.g. touched by an older install or partial init), fall
+    back to an in-memory empty store so read queries return empty results
+    without raising ``sqlite3.OperationalError``. The fallback flag flows
+    through ``MemoryStore.lens_fallback`` so tools can attach an explanatory
+    note via ``_maybe_add_lens_note`` (PMSERV-091).
     """
     pm_path = _get_pm_path(project_path)
     key = str(pm_path)
     if key not in _memory_stores:
         db_path = pm_path / "memory.db"
         if PM_LENS_ENABLED:
-            if db_path.exists():
+            if db_path.exists() and _has_pm_server_schema(db_path):
                 _memory_stores[key] = MemoryStore(db_path, readonly=True)
             else:
-                _memory_stores[key] = MemoryStore(Path(":memory:"))
+                _memory_stores[key] = MemoryStore(Path(":memory:"), lens_fallback=True)
         else:
             global_db_path = _storage.GLOBAL_PM_DIR / "memory.db"
             _memory_stores[key] = MemoryStore(db_path, global_db_path=global_db_path)
@@ -793,21 +818,26 @@ def pm_recall(
                 }
                 for c in candidates
             ]
-        return response
+        return _maybe_add_lens_note(response, store)
 
     # Search by query
     if query:
         results = store.search(query, type=type, limit=limit)
-        return {"query": query, "results": [_memory_dict(m) for m in results]}
+        return _maybe_add_lens_note(
+            {"query": query, "results": [_memory_dict(m) for m in results]}, store
+        )
 
     # Search by task_id
     if task_id:
         results = store.get_by_task(task_id)
         if type:
             results = [m for m in results if m.type.value == type]
-        return {"task_id": task_id, "results": [_memory_dict(m) for m in results[:limit]]}
+        return _maybe_add_lens_note(
+            {"task_id": task_id, "results": [_memory_dict(m) for m in results[:limit]]},
+            store,
+        )
 
-    return {"results": []}
+    return _maybe_add_lens_note({"results": []}, store)
 
 
 @_tool()
@@ -930,11 +960,14 @@ def pm_memory_search(
             "session_id": m.session_id,
         }
 
-    return {
-        "query": query,
-        "filters": {"type": type, "tags": tags, "task_id": task_id},
-        "results": [_result_dict(m) for m in results[:limit]],
-    }
+    return _maybe_add_lens_note(
+        {
+            "query": query,
+            "filters": {"type": type, "tags": tags, "task_id": task_id},
+            "results": [_result_dict(m) for m in results[:limit]],
+        },
+        store,
+    )
 
 
 # ─── Memory Operations ──────────────────────────────
@@ -959,7 +992,7 @@ def pm_memory_stats(project_path: str | None = None) -> dict:
     else:
         stats["db_size"] = f"{size / (1024 * 1024):.1f} MB"
 
-    return stats
+    return _maybe_add_lens_note(stats, store)
 
 
 @_tool()

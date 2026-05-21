@@ -308,3 +308,147 @@ def test_normal_mode_get_memory_store_is_rw(normal_server, tmp_path):
     finally:
         store.close()
         normal_server._memory_stores.clear()
+
+
+# ─── PMSERV-093 / PMSERV-091: schema-guard + fallback note ─────
+
+
+def test_lens_get_memory_store_uninitialized_db_falls_back(lens_server, tmp_path):
+    """PMSERV-093: .pm/memory.db exists but has no pm-server schema → in-memory fallback.
+
+    Reproduces the ct-project report (2026-05-21): a project whose
+    .pm/memory.db was touched (e.g. by an older install) but never had
+    CREATE TABLE run on it must NOT raise OperationalError on read.
+    """
+    pm_dir = tmp_path / ".pm"
+    pm_dir.mkdir(parents=True, exist_ok=True)
+    db_path = pm_dir / "memory.db"
+    db_path.touch()  # 0-byte file, SQLite-empty, no pm-server schema
+
+    store = lens_server._get_memory_store(str(tmp_path))
+    try:
+        # In-memory fallback (writable :memory: with fresh schema)
+        assert store.readonly is False
+        # PMSERV-091/093: lens_fallback flag so tools add explanatory note
+        assert store.lens_fallback is True
+        # All read paths must return empty without exception
+        assert store.get_recent(limit=5) == []
+        assert store.search("anything") == []
+        assert store.get_latest_summary() is None
+    finally:
+        store.close()
+        lens_server._memory_stores.clear()
+
+
+def test_lens_get_memory_store_corrupted_db_falls_back(lens_server, tmp_path):
+    """PMSERV-093: garbage bytes in .pm/memory.db → fallback, not exception."""
+    pm_dir = tmp_path / ".pm"
+    pm_dir.mkdir(parents=True, exist_ok=True)
+    db_path = pm_dir / "memory.db"
+    db_path.write_bytes(b"not a sqlite file at all")
+
+    store = lens_server._get_memory_store(str(tmp_path))
+    try:
+        assert store.lens_fallback is True
+        assert store.search("anything") == []
+    finally:
+        store.close()
+        lens_server._memory_stores.clear()
+
+
+def test_lens_get_memory_store_missing_db_sets_fallback_flag(lens_server, tmp_path):
+    """PMSERV-091: DB absent → fallback flag is True so tools attach note."""
+    pm_dir = tmp_path / ".pm"
+    pm_dir.mkdir(parents=True, exist_ok=True)
+    # Intentionally do NOT create memory.db
+
+    store = lens_server._get_memory_store(str(tmp_path))
+    try:
+        # Pre-existing regression guard (matches existing test)
+        assert store.readonly is False
+        # PMSERV-091 new behavior: fallback flag is set
+        assert store.lens_fallback is True
+    finally:
+        store.close()
+        lens_server._memory_stores.clear()
+
+
+def test_lens_get_memory_store_initialized_db_no_fallback(lens_server, tmp_path):
+    """PMSERV-093: valid initialized DB → readonly mount, lens_fallback=False."""
+    db_path = _seed_project_db(tmp_path)
+    for suffix in ("-wal", "-shm"):
+        sidecar = db_path.with_name(db_path.name + suffix)
+        if sidecar.exists():
+            sidecar.unlink()
+
+    store = lens_server._get_memory_store(str(tmp_path))
+    try:
+        assert store.readonly is True
+        # Initialized DB → no fallback signal
+        assert store.lens_fallback is False
+    finally:
+        store.close()
+        lens_server._memory_stores.clear()
+
+
+def test_pm_recall_under_lens_uninitialized_returns_note(lens_server, tmp_path):
+    """PMSERV-091/093: pm_recall returns note field when Lens falls back."""
+    pm_dir = tmp_path / ".pm"
+    pm_dir.mkdir(parents=True, exist_ok=True)
+    (pm_dir / "memory.db").touch()
+
+    result = lens_server.pm_recall(project_path=str(tmp_path))
+    assert "note" in result
+    assert "Lens" in result["note"]
+    assert result["recent_memories"] == []
+    lens_server._memory_stores.clear()
+
+
+def test_pm_memory_stats_under_lens_uninitialized_returns_note(lens_server, tmp_path):
+    """PMSERV-091/093: pm_memory_stats returns note field when Lens falls back."""
+    pm_dir = tmp_path / ".pm"
+    pm_dir.mkdir(parents=True, exist_ok=True)
+    (pm_dir / "memory.db").touch()
+
+    result = lens_server.pm_memory_stats(project_path=str(tmp_path))
+    assert "note" in result
+    assert result["total_memories"] == 0
+    lens_server._memory_stores.clear()
+
+
+def test_pm_memory_search_local_under_lens_uninitialized_returns_note(lens_server, tmp_path):
+    """PMSERV-091/093: pm_memory_search (local) returns note when Lens falls back."""
+    pm_dir = tmp_path / ".pm"
+    pm_dir.mkdir(parents=True, exist_ok=True)
+    (pm_dir / "memory.db").touch()
+
+    result = lens_server.pm_memory_search(query="anything", project_path=str(tmp_path))
+    assert "note" in result
+    assert result["results"] == []
+    lens_server._memory_stores.clear()
+
+
+def test_pm_memory_search_cross_project_omits_note(lens_server, tmp_path):
+    """PMSERV-093: cross-project search reads global DB → no local-fallback note."""
+    pm_dir = tmp_path / ".pm"
+    pm_dir.mkdir(parents=True, exist_ok=True)
+    (pm_dir / "memory.db").touch()
+
+    result = lens_server.pm_memory_search(
+        query="anything", project_path=str(tmp_path), cross_project=True
+    )
+    assert "note" not in result  # cross-project bypasses local-fallback messaging
+    lens_server._memory_stores.clear()
+
+
+def test_pm_recall_with_initialized_db_omits_note(lens_server, tmp_path):
+    """Regression guard: normal initialized DB → no note (only fallback adds it)."""
+    db_path = _seed_project_db(tmp_path)
+    for suffix in ("-wal", "-shm"):
+        sidecar = db_path.with_name(db_path.name + suffix)
+        if sidecar.exists():
+            sidecar.unlink()
+
+    result = lens_server.pm_recall(project_path=str(tmp_path))
+    assert "note" not in result
+    lens_server._memory_stores.clear()
