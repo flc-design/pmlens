@@ -53,7 +53,9 @@ def test_schema_creates_table_indexes_and_trigger(tmp_path: Path) -> None:
             "idx_outbox_type_status",
             "idx_outbox_tags",
         }
-        triggers = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='trigger'")}
+        triggers = {
+            r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='trigger'")
+        }
         assert "trg_outbox_append_only" in triggers
     finally:
         conn.close()
@@ -77,7 +79,9 @@ def test_ensure_schema_is_idempotent(tmp_path: Path) -> None:
     DesktopOutboxStore(db)  # second init must not error or duplicate objects
     conn = sqlite3.connect(str(db))
     try:
-        triggers = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='trigger'")}
+        triggers = {
+            r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='trigger'")
+        }
         assert triggers == {"trg_outbox_append_only"}
     finally:
         conn.close()
@@ -100,8 +104,12 @@ def test_append_invalid_type_raises(outbox_store: DesktopOutboxStore) -> None:
 
 def test_append_persists_all_fields(outbox_store: DesktopOutboxStore) -> None:
     rid = outbox_store.append(
-        "claude-desktop", "sess-x", "memory", "hello",
-        source_project="/abs/project", tags="a,b,c",
+        "claude-desktop",
+        "sess-x",
+        "memory",
+        "hello",
+        source_project="/abs/project",
+        tags="a,b,c",
     )
     row = outbox_store.get(rid)
     assert row is not None

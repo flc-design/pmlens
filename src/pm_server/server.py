@@ -1207,6 +1207,247 @@ def pm_outbox_log(
     }
 
 
+# Mapping from outbox row.type → main MemoryType used by pm_outbox_merge.
+# 'memory' is treated as an observation by default; the user can re-tag
+# during/after merge if a different MemoryType is appropriate.
+_OUTBOX_TYPE_TO_MEMORY_TYPE: dict[str, MemoryType] = {
+    "memory": MemoryType.OBSERVATION,
+    "lesson": MemoryType.LESSON,
+}
+
+
+def _parse_log_prefix(content: str, fallback_category: str = "progress") -> tuple[str, str]:
+    """Extract [category] prefix from a stored log content string.
+
+    pm_outbox_log stores ``[<category>] <entry>`` for traceability; on merge
+    we want the original category back so the DailyLogEntry preserves it.
+    Returns (category, entry). If parse fails, returns (fallback, content).
+    """
+    if content.startswith("[") and "] " in content:
+        head, rest = content.split("] ", 1)
+        category = head[1:]
+        valid = {"progress", "decision", "blocker", "note", "milestone"}
+        if category in valid:
+            return category, rest
+    return fallback_category, content
+
+
+@_tool()
+def pm_outbox_pending(
+    filter_project: str | None = None,
+    filter_type: str | None = None,
+    filter_status: str = "pending",
+    limit: int = 50,
+    offset: int = 0,
+) -> dict:
+    """List entries in the Desktop outbox (~/.pm/desktop/desktop.db).
+
+    Pagination (amendment f8) is mandatory: limit defaults to 50 and offset
+    starts at 0. Response includes total + has_more + next_offset so the
+    caller can iterate without hanging on hundreds of pending entries.
+
+    filter_status: 'pending' (default) | 'merged' | 'rejected' | 'all'
+    filter_type: 'memory' | 'log' | 'lesson' | 'artifact'
+    """
+    if filter_type is not None and filter_type not in {"memory", "log", "lesson", "artifact"}:
+        return {
+            "status": "error",
+            "code": "invalid_filter_type",
+            "message": (
+                f"filter_type must be one of memory/log/lesson/artifact, got {filter_type!r}"
+            ),
+        }
+    if filter_status not in {"pending", "merged", "rejected", "all"}:
+        return {
+            "status": "error",
+            "code": "invalid_filter_status",
+            "message": (
+                f"filter_status must be one of pending/merged/rejected/all, got {filter_status!r}"
+            ),
+        }
+    if limit < 0 or offset < 0:
+        return {
+            "status": "error",
+            "code": "invalid_pagination",
+            "message": "limit and offset must be non-negative",
+        }
+
+    store = get_outbox_store(db_path=default_outbox_db_path())
+    page = store.pending(
+        filter_project=filter_project,
+        filter_type=filter_type,  # type: ignore[arg-type]
+        filter_status=filter_status,
+        limit=limit,
+        offset=offset,
+    )
+    return {
+        "status": "ok",
+        **page,
+    }
+
+
+@_tool()
+def pm_outbox_merge(
+    ids: list[int],
+    target_project: str | None = None,
+) -> dict:
+    """Promote pending outbox entries into the target project's main store.
+
+    type='memory' or 'lesson' → MemoryStore.save() on .pm/memory.db.
+    type='log' → add_daily_log() on .pm/daily/YYYY-MM-DD.yaml.
+    type='artifact' → not yet supported (Phase 2.2); recorded as warning.
+
+    target_project (project path) overrides each row's source_project hint.
+    Already-merged / already-rejected ids are silently skipped and surface
+    via warnings[] so the caller can distinguish skips from successful
+    merges (idempotent guarantee).
+    """
+    store = get_outbox_store(db_path=default_outbox_db_path())
+    merged: list[dict] = []
+    skipped: list[dict] = []
+    warnings: list[dict] = []
+
+    for outbox_id in ids:
+        row = store.get(outbox_id)
+        if row is None:
+            warnings.append({"id": outbox_id, "reason": "not_found"})
+            continue
+        if row["status"] != "pending":
+            skipped.append(
+                {"id": outbox_id, "status": row["status"], "reason": "already_processed"}
+            )
+            continue
+
+        project_path = target_project or row["source_project"]
+        if not project_path:
+            warnings.append(
+                {
+                    "id": outbox_id,
+                    "reason": "no_target_project",
+                    "remediation": "pass target_project or set source_project on insert",
+                }
+            )
+            continue
+
+        row_type = row["type"]
+        if row_type in ("memory", "lesson"):
+            try:
+                memory_store = _get_memory_store(project_path)
+                pm_path = _get_pm_path(project_path)
+                project = load_project(pm_path)
+                memory = Memory(
+                    session_id=_current_session_id,
+                    type=_OUTBOX_TYPE_TO_MEMORY_TYPE[row_type],
+                    content=row["content"],
+                    tags=[t.strip() for t in (row["tags"] or "").split(",") if t.strip()],
+                    project=project.name,
+                )
+                new_id = memory_store.save(memory)
+            except (PmServerError, ProjectNotFoundError) as exc:
+                warnings.append(
+                    {"id": outbox_id, "reason": "target_store_unavailable", "detail": str(exc)}
+                )
+                continue
+            store.mark_merged(outbox_id, new_id, str(_get_pm_path(project_path) / "memory.db"))
+            merged.append(
+                {
+                    "id": outbox_id,
+                    "type": row_type,
+                    "merged_to_id": new_id,
+                    "target_project": project_path,
+                }
+            )
+        elif row_type == "log":
+            try:
+                pm_path = _get_pm_path(project_path)
+                category, entry_text = _parse_log_prefix(row["content"])
+                now = _dt.datetime.now()
+                log_entry = DailyLogEntry(
+                    time=now.strftime("%H:%M"),
+                    category=LogCategory(category),
+                    entry=entry_text,
+                )
+                log = add_daily_log(pm_path, log_entry)
+            except (PmServerError, ProjectNotFoundError) as exc:
+                warnings.append(
+                    {"id": outbox_id, "reason": "target_log_unavailable", "detail": str(exc)}
+                )
+                continue
+            target_path = f"daily/{log.date.isoformat()}.yaml"
+            store.mark_merged(outbox_id, None, target_path)
+            merged.append(
+                {
+                    "id": outbox_id,
+                    "type": "log",
+                    "target_path": target_path,
+                    "target_project": project_path,
+                }
+            )
+        elif row_type == "artifact":
+            warnings.append(
+                {
+                    "id": outbox_id,
+                    "reason": "artifact_merge_phase_2_2",
+                    "remediation": "Phase 2.2 will add pm_outbox_merge_artifact",
+                }
+            )
+        else:
+            warnings.append({"id": outbox_id, "reason": "unknown_type", "type": row_type})
+
+    return {
+        "status": "ok" if merged or not warnings else "partial",
+        "merged": merged,
+        "skipped": skipped,
+        "warnings": warnings,
+    }
+
+
+@_tool()
+def pm_outbox_reject(
+    ids: list[int],
+    reason: str,
+) -> dict:
+    """Reject pending outbox entries with an auditable reason.
+
+    Already-processed (merged / rejected) ids are silently skipped and
+    surface via warnings[]. Reason is required (empty string raises a
+    user-facing error response).
+    """
+    if not reason or not reason.strip():
+        return {
+            "status": "error",
+            "code": "reason_required",
+            "message": "reason is required and must be non-empty",
+        }
+    store = get_outbox_store(db_path=default_outbox_db_path())
+    rejected: list[int] = []
+    skipped: list[dict] = []
+    warnings: list[dict] = []
+
+    for outbox_id in ids:
+        row = store.get(outbox_id)
+        if row is None:
+            warnings.append({"id": outbox_id, "reason": "not_found"})
+            continue
+        if row["status"] != "pending":
+            skipped.append(
+                {"id": outbox_id, "status": row["status"], "reason": "already_processed"}
+            )
+            continue
+        if store.mark_rejected(outbox_id, reason):
+            rejected.append(outbox_id)
+        else:
+            # Race: status changed between get() and mark_rejected().
+            warnings.append({"id": outbox_id, "reason": "race_condition_skipped"})
+
+    return {
+        "status": "ok" if rejected or not warnings else "partial",
+        "rejected": rejected,
+        "skipped": skipped,
+        "warnings": warnings,
+    }
+
+
 @_tool()
 def pm_add_decision(
     title: str,
