@@ -36,6 +36,15 @@ def isolated_registry(tmp_path, monkeypatch):
     # monkeypatch alone leaves the server-side binding pointing at the real
     # ~/.pm/. Patch both to keep all GLOBAL_PM_DIR consumers in lock-step.
     monkeypatch.setattr(pm_server.server, "GLOBAL_PM_DIR", fake_global_pm)
+    # ADR-019 / WF-028: clear the module-level outbox factory so each test
+    # starts with a fresh DesktopOutboxStore. Otherwise the cached store
+    # from a previous test points at a tmp_path that pytest has deleted,
+    # and any test that calls pm_status (which probes outbox_pending) gets
+    # a stale handle. The factory's first call after this fixture re-binds
+    # to the current monkeypatched GLOBAL_PM_DIR via default_outbox_db_path().
+    from pm_server.outbox import clear_outbox_store
+
+    clear_outbox_store()
 
 
 @pytest.fixture

@@ -406,6 +406,29 @@ def pm_status(project_path: str | None = None) -> dict:
     # Next PM actions — contextual reminders for the LLM
     next_actions = _build_next_actions(active_tasks, tasks)
 
+    # ADR-019 / WF-028 — Desktop outbox pending count, Claude Code mode only.
+    # Hidden under PM_LENS=1 to avoid implying "you should merge" on a host
+    # that has no merger tools registered. Surfacing only when there are
+    # entries to merge keeps pm_status output uncluttered.
+    diagnostics: dict = {
+        "utils_fingerprint": get_utils_fingerprint(),
+        "builtin_templates_dir": get_builtin_templates_dir_status(),
+    }
+    if not PM_LENS_ENABLED:
+        try:
+            outbox_pending = get_outbox_store(
+                db_path=default_outbox_db_path()
+            ).get_pending_count()
+        except Exception:
+            outbox_pending = 0
+        diagnostics["outbox_pending"] = outbox_pending
+        if outbox_pending > 0:
+            next_actions = [
+                *next_actions,
+                f"Desktop outbox has {outbox_pending} pending entries — "
+                "call pm_outbox_pending to review and pm_outbox_merge to promote",
+            ]
+
     return {
         "project": {
             "name": project.name,
@@ -425,10 +448,7 @@ def pm_status(project_path: str | None = None) -> dict:
         "rules": get_rules_status(root),
         "hooks": hooks_status,
         "next_pm_actions": next_actions,
-        "diagnostics": {
-            "utils_fingerprint": get_utils_fingerprint(),
-            "builtin_templates_dir": get_builtin_templates_dir_status(),
-        },
+        "diagnostics": diagnostics,
     }
 
 
