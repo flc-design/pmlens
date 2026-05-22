@@ -292,3 +292,155 @@ def test_default_path_honors_monkeypatched_global_pm_dir(monkeypatch, tmp_path: 
     fake.mkdir()
     monkeypatch.setattr(_outbox._storage, "GLOBAL_PM_DIR", fake)
     assert default_outbox_db_path() == fake / "desktop" / "desktop.db"
+
+
+# ─── Tool-level passthrough tests (PMSERV-101 final) ──────────────────
+
+
+def _make_project(tmp_path: Path, name: str = "proj") -> Path:
+    """Minimal project root with .pm/project.yaml + .pm/tasks.yaml + daily/."""
+    proj = tmp_path / name
+    (proj / ".pm" / "daily").mkdir(parents=True)
+    (proj / ".pm" / "project.yaml").write_text(
+        f"name: {name}\n"
+        f"display_name: {name}\n"
+        "version: 0.0.1\n"
+        "status: development\n"
+        "started: 2026-01-01\n"
+        "description: outbox tool tests\n"
+        "phases: []\n",
+        encoding="utf-8",
+    )
+    (proj / ".pm" / "tasks.yaml").write_text("[]\n", encoding="utf-8")
+    return proj
+
+
+def test_pm_outbox_remember_invalid_type_returns_error(tmp_path: Path) -> None:
+    """Tool boundary: invalid type returns a structured error (not raises)."""
+    import pm_server.server as srv
+
+    res = srv.pm_outbox_remember(content="x", type="bogus")
+    assert res["status"] == "error"
+    assert res["code"] == "invalid_type"
+
+
+def test_pm_outbox_log_invalid_category_returns_error(tmp_path: Path) -> None:
+    import pm_server.server as srv
+
+    res = srv.pm_outbox_log(entry="x", category="bogus")
+    assert res["status"] == "error"
+    assert res["code"] == "invalid_category"
+
+
+def test_pm_outbox_pending_invalid_pagination_returns_error(tmp_path: Path) -> None:
+    import pm_server.server as srv
+
+    res = srv.pm_outbox_pending(limit=-1)
+    assert res["status"] == "error"
+    assert res["code"] == "invalid_pagination"
+
+
+def test_pm_outbox_reject_requires_reason(tmp_path: Path) -> None:
+    import pm_server.server as srv
+
+    res = srv.pm_outbox_reject(ids=[1], reason="")
+    assert res["status"] == "error"
+    assert res["code"] == "reason_required"
+
+
+def test_pm_outbox_merge_routes_memory_and_log_to_target(tmp_path: Path) -> None:
+    """End-to-end tool: pm_outbox_remember (memory) + pm_outbox_log (log) →
+    pm_outbox_merge promotes both into the right targets."""
+    import pm_server.server as srv
+
+    proj = _make_project(tmp_path)
+    mem_res = srv.pm_outbox_remember(
+        content="from tool", type="memory", source_project=str(proj)
+    )
+    log_res = srv.pm_outbox_log(entry="ship it", category="milestone", source_project=str(proj))
+    assert mem_res["status"] == "saved"
+    assert log_res["status"] == "saved"
+
+    merge = srv.pm_outbox_merge(
+        ids=[mem_res["outbox_id"], log_res["outbox_id"]], target_project=str(proj)
+    )
+    assert merge["status"] == "ok"
+    assert len(merge["merged"]) == 2
+    assert merge["skipped"] == []
+    assert merge["warnings"] == []
+
+    # Verify the project's main memory.db received the memory entry.
+    db = proj / ".pm" / "memory.db"
+    assert db.exists()
+    conn = sqlite3.connect(str(db))
+    try:
+        types = [r[0] for r in conn.execute("SELECT type FROM memories")]
+    finally:
+        conn.close()
+    assert "observation" in types
+
+    # Verify the daily log received the log entry (with category recovered
+    # from the "[milestone] ship it" prefix written by pm_outbox_log).
+    import yaml as _yaml
+
+    daily_files = list((proj / ".pm" / "daily").glob("*.yaml"))
+    assert len(daily_files) == 1
+    log_data = _yaml.safe_load(daily_files[0].read_text(encoding="utf-8"))
+    assert log_data["entries"][0]["category"] == "milestone"
+    assert log_data["entries"][0]["entry"] == "ship it"
+
+
+def test_pm_outbox_merge_idempotent_skip_already_processed(tmp_path: Path) -> None:
+    """Re-merging an already-merged id surfaces in skipped[], not merged[]."""
+    import pm_server.server as srv
+
+    proj = _make_project(tmp_path)
+    rid = srv.pm_outbox_remember(
+        content="once", type="memory", source_project=str(proj)
+    )["outbox_id"]
+    first = srv.pm_outbox_merge(ids=[rid], target_project=str(proj))
+    second = srv.pm_outbox_merge(ids=[rid], target_project=str(proj))
+    assert len(first["merged"]) == 1
+    assert second["merged"] == []
+    assert len(second["skipped"]) == 1
+    assert second["skipped"][0]["reason"] == "already_processed"
+
+
+def test_pm_outbox_merge_no_target_project_yields_warning(tmp_path: Path) -> None:
+    """Outbox entries without source_project and without target_project arg
+    cannot be merged — must surface in warnings[] (not raise)."""
+    import pm_server.server as srv
+
+    rid = srv.pm_outbox_remember(content="no target", type="memory")["outbox_id"]
+    res = srv.pm_outbox_merge(ids=[rid])
+    assert res["merged"] == []
+    assert any(w["reason"] == "no_target_project" for w in res["warnings"])
+
+
+def test_pm_status_diagnostics_includes_outbox_pending(tmp_path: Path) -> None:
+    """pm_status.diagnostics.outbox_pending surfaces in Claude Code mode and
+    triggers a next_pm_actions hint when N > 0."""
+    import pm_server.server as srv
+
+    proj = _make_project(tmp_path, name="statproj")
+    # Inject two pending entries via the desktop writer.
+    srv.pm_outbox_remember(content="a", type="memory")
+    srv.pm_outbox_remember(content="b", type="memory")
+
+    status = srv.pm_status(project_path=str(proj))
+    assert "outbox_pending" in status["diagnostics"]
+    assert status["diagnostics"]["outbox_pending"] == 2
+    assert any(
+        "Desktop outbox" in line and "2 pending" in line for line in status["next_pm_actions"]
+    )
+
+
+def test_pm_status_diagnostics_outbox_zero_omits_hint(tmp_path: Path) -> None:
+    """When outbox_pending == 0, the next_pm_actions hint must NOT appear so
+    pm_status stays uncluttered."""
+    import pm_server.server as srv
+
+    proj = _make_project(tmp_path, name="emptystatproj")
+    status = srv.pm_status(project_path=str(proj))
+    assert status["diagnostics"]["outbox_pending"] == 0
+    assert not any("Desktop outbox" in line for line in status["next_pm_actions"])
