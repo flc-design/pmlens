@@ -38,6 +38,7 @@ from .models import (
     TaskStatus,
     WorkflowStatus,
 )
+from .outbox import default_outbox_db_path, get_outbox_store
 from .storage import (
     GLOBAL_PM_DIR,
     _next_task_number_from_list,
@@ -86,6 +87,18 @@ mcp = FastMCP("pm-server")
 
 PM_LENS_ENABLED: bool = os.environ.get("PM_LENS", "").lower() in {"1", "true", "yes", "on"}
 
+# ─── Desktop Outbox Mode (ADR-019, WF-028) ──────────
+# PM_LENS=1 + PM_DESKTOP_WRITE=1 で Claude Desktop が ~/.pm/desktop/desktop.db
+# に書き込み可能になる。main `.pm/memory.db` の不変条件は保持されたまま、
+# OUTBOX_WRITE_ALLOWLIST の限定 tools のみ writable surface として開放される。
+
+PM_DESKTOP_WRITE_ENABLED: bool = os.environ.get("PM_DESKTOP_WRITE", "").lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+
 RO_ALLOWLIST: frozenset[str] = frozenset(
     {
         "pm_status",
@@ -106,25 +119,50 @@ RO_ALLOWLIST: frozenset[str] = frozenset(
     }
 )
 
+# Tools that are read-only on main memory.db but RW on the Desktop outbox
+# (~/.pm/desktop/desktop.db). Registered under PM_LENS=1 only when
+# PM_DESKTOP_WRITE=1 is also set, otherwise hidden alongside other mutators.
+OUTBOX_WRITE_ALLOWLIST: frozenset[str] = frozenset(
+    {
+        "pm_outbox_remember",
+        "pm_outbox_log",
+    }
+)
+
 REGISTERED_TOOLS: set[str] = set()
 
 
 def _tool():
-    """``@_tool()`` をラップして PM_LENS モードを尊重するデコレータ。
+    """``@_tool()`` をラップして PM_LENS / PM_DESKTOP_WRITE モードを尊重する。
 
-    PM_LENS=1 の時、RO_ALLOWLIST 外の関数は FastMCP に登録されず素の関数を返す。
-    これにより MCP クライアントからは到達不能になる。Python レベルで関数は
-    残るため、テストや他モジュールからの内部呼び出しは可能。
+    Gating logic:
+    - PM_LENS=0 (Claude Code): すべての tool を登録する。
+    - PM_LENS=1, PM_DESKTOP_WRITE=0 (Lens viewer): RO_ALLOWLIST のみ登録、
+      RO_ALLOWLIST 外は素の関数を返して MCP 経由で不可視にする。
+    - PM_LENS=1, PM_DESKTOP_WRITE=1 (Desktop outbox host, ADR-019): 上記に加えて
+      OUTBOX_WRITE_ALLOWLIST も登録する。これにより pm_outbox_remember /
+      pm_outbox_log が Desktop で reach 可能となり Phase 2 の機能経路が成立する。
     """
 
     def decorator(fn):
         tool_name = fn.__name__
         if PM_LENS_ENABLED and tool_name not in RO_ALLOWLIST:
-            return fn
+            if not (PM_DESKTOP_WRITE_ENABLED and tool_name in OUTBOX_WRITE_ALLOWLIST):
+                return fn
         REGISTERED_TOOLS.add(tool_name)
         return mcp.tool()(fn)
 
     return decorator
+
+
+def _outbox_host_id() -> str:
+    """Identify the writing host on outbox entries.
+
+    PM_LENS=1 の Desktop (or Cowork) は "claude-desktop"、Claude Code default
+    は "claude-code"。LLM が pending list を眺めたとき origin が判別可能な
+    ことが outbox UX の前提なので env 由来で機械的に決定する。
+    """
+    return "claude-desktop" if PM_LENS_ENABLED else "claude-code"
 
 
 # ─── Session ID (one per server process = one per Claude Code session) ───
@@ -1065,6 +1103,108 @@ def pm_log(
     if auto_linked:
         result["auto_linked_task"] = task_id
     return result
+
+
+# ─── Desktop Outbox tools (ADR-019, WF-028) ──────────
+# Reach pattern:
+# - pm_outbox_remember / pm_outbox_log : Desktop RW under PM_LENS=1 +
+#   PM_DESKTOP_WRITE=1 (OUTBOX_WRITE_ALLOWLIST). Claude Code can also call
+#   them under PM_LENS=0 (dual-use, no-op gating).
+# - Note field embeds next-action guidance per UX principle established in
+#   v0.7.1 hotfix (memory:148): "状況 + 次行動 を tool response に embed".
+
+_OUTBOX_REMEMBER_NOTE = (
+    "Saved to ~/.pm/desktop/desktop.db (Desktop outbox). "
+    "In Claude Code, call pm_outbox_pending to review and "
+    "pm_outbox_merge to promote into the project's main memory store."
+)
+
+_OUTBOX_LOG_NOTE = (
+    "Logged to Desktop outbox. "
+    "Merge in Claude Code via pm_outbox_merge to append to daily/YYYY-MM-DD.yaml."
+)
+
+
+@_tool()
+def pm_outbox_remember(
+    content: str,
+    type: str = "memory",
+    source_project: str | None = None,
+    tags: str | None = None,
+) -> dict:
+    """Capture a memory or lesson from Claude Desktop into the cross-host outbox.
+
+    Writes to ~/.pm/desktop/desktop.db (separate from any project's main
+    memory store). Use pm_outbox_pending + pm_outbox_merge from Claude Code
+    to promote entries into the target project's memory.db.
+
+    type: memory | lesson (artifact is reserved for Phase 2.2)
+    source_project: optional project path hint for the merger
+    tags: comma-separated string
+    """
+    if type not in {"memory", "lesson"}:
+        return {
+            "status": "error",
+            "code": "invalid_type",
+            "message": f"type must be 'memory' or 'lesson', got {type!r}",
+        }
+    store = get_outbox_store(db_path=default_outbox_db_path())
+    outbox_id = store.append(
+        host_id=_outbox_host_id(),
+        source_session=_current_session_id,
+        type=type,  # type: ignore[arg-type]
+        content=content,
+        source_project=source_project,
+        tags=tags,
+    )
+    return {
+        "status": "saved",
+        "outbox_id": outbox_id,
+        "session_id": _current_session_id,
+        "type": type,
+        "note": _OUTBOX_REMEMBER_NOTE,
+    }
+
+
+@_tool()
+def pm_outbox_log(
+    entry: str,
+    category: str = "progress",
+    source_project: str | None = None,
+) -> dict:
+    """Capture a daily-log entry from Claude Desktop into the cross-host outbox.
+
+    Stored as type='log' so that pm_outbox_merge can later append it to the
+    target project's daily/YYYY-MM-DD.yaml. category mirrors pm_log
+    (progress | decision | blocker | note | milestone) and is embedded into
+    the content for downstream parsing.
+    """
+    valid_categories = {"progress", "decision", "blocker", "note", "milestone"}
+    if category not in valid_categories:
+        return {
+            "status": "error",
+            "code": "invalid_category",
+            "message": f"category must be one of {sorted(valid_categories)}, got {category!r}",
+        }
+    store = get_outbox_store(db_path=default_outbox_db_path())
+    # Prefix with category for traceability after merge into the daily log.
+    log_content = f"[{category}] {entry}"
+    outbox_id = store.append(
+        host_id=_outbox_host_id(),
+        source_session=_current_session_id,
+        type="log",
+        content=log_content,
+        source_project=source_project,
+        tags=category,
+    )
+    return {
+        "status": "saved",
+        "outbox_id": outbox_id,
+        "session_id": _current_session_id,
+        "type": "log",
+        "category": category,
+        "note": _OUTBOX_LOG_NOTE,
+    }
 
 
 @_tool()

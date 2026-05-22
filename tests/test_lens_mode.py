@@ -452,3 +452,69 @@ def test_pm_recall_with_initialized_db_omits_note(lens_server, tmp_path):
     result = lens_server.pm_recall(project_path=str(tmp_path))
     assert "note" not in result
     lens_server._memory_stores.clear()
+
+
+# ─── ADR-019 / WF-028 C1 amendment: PM_DESKTOP_WRITE gating ──────────
+# Lens host (PM_LENS=1) must still be able to write into the cross-host
+# outbox when PM_DESKTOP_WRITE=1 is set — otherwise Phase 2 is functional
+# zero on Desktop. The inverse: PM_DESKTOP_WRITE=0 must keep the outbox-write
+# tools hidden so the Lens viewer remains read-only by default.
+
+_OUTBOX_WRITE_TOOLS: frozenset[str] = frozenset({"pm_outbox_remember", "pm_outbox_log"})
+
+
+@pytest.fixture
+def desktop_write_server(monkeypatch):
+    """PM_LENS=1 + PM_DESKTOP_WRITE=1 (Phase 2 Desktop outbox host)."""
+    monkeypatch.setenv("PM_LENS", "1")
+    monkeypatch.setenv("PM_DESKTOP_WRITE", "1")
+    _reload_server({"PM_LENS": "1", "PM_DESKTOP_WRITE": "1"})
+    yield pm_server.server
+    monkeypatch.delenv("PM_LENS", raising=False)
+    monkeypatch.delenv("PM_DESKTOP_WRITE", raising=False)
+    _reload_server({"PM_LENS": None, "PM_DESKTOP_WRITE": None})
+
+
+def test_lens_only_hides_outbox_write_tools(lens_server):
+    """PM_LENS=1, PM_DESKTOP_WRITE unset → outbox writers must NOT register.
+    The Lens viewer must remain strictly read-only by default."""
+    leaked = _OUTBOX_WRITE_TOOLS & lens_server.REGISTERED_TOOLS
+    assert leaked == set(), f"outbox-write tools leaked into Lens-only mode: {leaked}"
+    assert lens_server.PM_DESKTOP_WRITE_ENABLED is False
+
+
+def test_desktop_write_mode_exposes_outbox_writers(desktop_write_server):
+    """PM_LENS=1 + PM_DESKTOP_WRITE=1 → outbox writers MUST register so the
+    Desktop host can actually reach pm_outbox_remember / pm_outbox_log.
+    Catches the WF-028 cross-check C1 BLOCKER regression."""
+    missing = _OUTBOX_WRITE_TOOLS - desktop_write_server.REGISTERED_TOOLS
+    assert missing == set(), f"outbox-write tools missing under PM_DESKTOP_WRITE=1: {missing}"
+    assert desktop_write_server.PM_LENS_ENABLED is True
+    assert desktop_write_server.PM_DESKTOP_WRITE_ENABLED is True
+
+
+def test_desktop_write_mode_still_hides_other_mutators(desktop_write_server):
+    """PM_LENS=1 + PM_DESKTOP_WRITE=1 must NOT widen the surface beyond
+    OUTBOX_WRITE_ALLOWLIST — pm_remember / pm_log / pm_add_task etc. stay
+    hidden. The Desktop outbox is the ONLY writable surface."""
+    other_mutators = MUTATOR_TOOLS - _OUTBOX_WRITE_TOOLS
+    leaked = other_mutators & desktop_write_server.REGISTERED_TOOLS
+    assert leaked == set(), f"non-outbox mutators leaked under PM_DESKTOP_WRITE=1: {leaked}"
+
+
+def test_normal_mode_with_desktop_write_is_noop(monkeypatch):
+    """PM_LENS=0 + PM_DESKTOP_WRITE=1 → full RW (Claude Code default).
+    PM_DESKTOP_WRITE is harmlessly recognised but does not gate anything
+    additional. All mutators including outbox writers are reachable."""
+    monkeypatch.delenv("PM_LENS", raising=False)
+    monkeypatch.setenv("PM_DESKTOP_WRITE", "1")
+    _reload_server({"PM_LENS": None, "PM_DESKTOP_WRITE": "1"})
+    try:
+        expected = MUTATOR_TOOLS | _OUTBOX_WRITE_TOOLS
+        missing = expected - pm_server.server.REGISTERED_TOOLS
+        assert missing == set(), f"tools missing in normal+desktop-write mode: {missing}"
+        assert pm_server.server.PM_LENS_ENABLED is False
+        assert pm_server.server.PM_DESKTOP_WRITE_ENABLED is True
+    finally:
+        monkeypatch.delenv("PM_DESKTOP_WRITE", raising=False)
+        _reload_server({"PM_LENS": None, "PM_DESKTOP_WRITE": None})

@@ -77,7 +77,7 @@ BEFORE UPDATE OF
     suggested_path, created_at
 ON desktop_outbox
 BEGIN
-    SELECT RAISE(ABORT, 'desktop_outbox is append-only; only status/merged_to_*/merged_at/reject_reason updates allowed');
+    SELECT RAISE(ABORT, 'desktop_outbox append-only; only state/merge updates allowed');
 END;
 """
 
@@ -209,9 +209,7 @@ class DesktopOutboxStore:
         """Fetch a single row by id, or None if not found."""
         conn = self._connect()
         try:
-            row = conn.execute(
-                "SELECT * FROM desktop_outbox WHERE id = ?", (id,)
-            ).fetchone()
+            row = conn.execute("SELECT * FROM desktop_outbox WHERE id = ?", (id,)).fetchone()
             return dict(row) if row else None
         finally:
             conn.close()
@@ -252,9 +250,7 @@ class DesktopOutboxStore:
         conn = self._connect()
         try:
             total = int(
-                conn.execute(
-                    f"SELECT COUNT(*) FROM desktop_outbox{where}", params
-                ).fetchone()[0]
+                conn.execute(f"SELECT COUNT(*) FROM desktop_outbox{where}", params).fetchone()[0]
             )
             rows = conn.execute(
                 f"SELECT * FROM desktop_outbox{where} "
