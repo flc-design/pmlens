@@ -12,8 +12,8 @@ import sqlite3
 from pathlib import Path
 from typing import Literal
 
+from . import storage as _storage
 from .memory import _apply_pragmas
-from .storage import GLOBAL_PM_DIR
 
 OutboxType = Literal["memory", "log", "lesson", "artifact"]
 OutboxStatus = Literal["pending", "merged", "rejected"]
@@ -21,8 +21,15 @@ OutboxStatus = Literal["pending", "merged", "rejected"]
 _VALID_TYPES: frozenset[str] = frozenset({"memory", "log", "lesson", "artifact"})
 _VALID_STATUSES: frozenset[str] = frozenset({"pending", "merged", "rejected"})
 
-# Default location: ~/.pm/desktop/desktop.db (per ADR-019).
-DEFAULT_OUTBOX_DB_PATH: Path = GLOBAL_PM_DIR / "desktop" / "desktop.db"
+
+def default_outbox_db_path() -> Path:
+    """Resolve ~/.pm/desktop/desktop.db dynamically (ADR-019).
+
+    Looked up via the ``pm_server.storage`` module so test fixtures that
+    monkeypatch ``GLOBAL_PM_DIR`` are honored at call time (mirrors the
+    ``server.py`` GLOBAL_PM_DIR double-patch pattern in conftest.py).
+    """
+    return _storage.GLOBAL_PM_DIR / "desktop" / "desktop.db"
 
 
 # ─── Schema SQL (PRAGMA user_version=1, independent of memory.db versioning) ──
@@ -109,7 +116,7 @@ class DesktopOutboxStore:
     """
 
     def __init__(self, db_path: Path | None = None) -> None:
-        self.db_path: Path = Path(db_path) if db_path is not None else DEFAULT_OUTBOX_DB_PATH
+        self.db_path: Path = Path(db_path) if db_path is not None else default_outbox_db_path()
         _ensure_schema(self.db_path)
 
     def _connect(self) -> sqlite3.Connection:
