@@ -1500,3 +1500,181 @@ class TestCliInstallation:
         assert result.exit_code == 0
         assert captured == {"target": "claude-code", "dry_run": False}
         assert "✓ claude-code: PM Server unregistered" in result.output
+
+
+# ─── PMSERV-100 / ADR-019 — PM_DESKTOP_WRITE propagation ───────────
+
+
+class TestDesktopWriteModeActive:
+    """PMSERV-100: _desktop_write_mode_active reads PM_DESKTOP_WRITE env."""
+
+    @pytest.mark.parametrize("truthy", ["1", "true", "True", "yes", "ON"])
+    def test_truthy_values(self, truthy, monkeypatch):
+        from pm_server.installer import _desktop_write_mode_active
+
+        monkeypatch.setenv("PM_DESKTOP_WRITE", truthy)
+        assert _desktop_write_mode_active() is True
+
+    @pytest.mark.parametrize("falsy", ["0", "false", "no", "", "off"])
+    def test_falsy_values(self, falsy, monkeypatch):
+        from pm_server.installer import _desktop_write_mode_active
+
+        monkeypatch.setenv("PM_DESKTOP_WRITE", falsy)
+        assert _desktop_write_mode_active() is False
+
+    def test_unset_is_false(self, monkeypatch):
+        from pm_server.installer import _desktop_write_mode_active
+
+        monkeypatch.delenv("PM_DESKTOP_WRITE", raising=False)
+        assert _desktop_write_mode_active() is False
+
+
+class TestInstallClaudeCodeDesktopWritePropagation:
+    """PMSERV-100: install_claude_code propagates PM_DESKTOP_WRITE to `claude mcp add`."""
+
+    def test_desktop_write_alone_injects_env_flag(self, monkeypatch):
+        monkeypatch.delenv("PM_LENS", raising=False)
+        monkeypatch.setenv("PM_DESKTOP_WRITE", "1")
+
+        def which(name):
+            return f"/usr/bin/{name}"
+
+        call_count = 0
+        captured_cmds: list[list[str]] = []
+
+        def mock_run(cmd, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            captured_cmds.append(list(cmd))
+            return _make_result(1) if call_count == 1 else _make_result(0)
+
+        with (
+            patch("pm_server.installer.shutil.which", side_effect=which),
+            patch("pm_server.installer.subprocess.run", side_effect=mock_run),
+        ):
+            r = install_claude_code()
+
+        assert r.status == "installed"
+        add_cmd = captured_cmds[1]
+        # PM_DESKTOP_WRITE=1 must appear as a --env pair.
+        env_pairs = [
+            add_cmd[i + 1] for i, tok in enumerate(add_cmd) if tok == "--env"
+        ]
+        assert "PM_DESKTOP_WRITE=1" in env_pairs
+
+    def test_lens_plus_desktop_write_injects_both(self, monkeypatch):
+        monkeypatch.setenv("PM_LENS", "1")
+        monkeypatch.setenv("PM_DESKTOP_WRITE", "1")
+
+        def which(name):
+            return f"/usr/bin/{name}"
+
+        call_count = 0
+        captured_cmds: list[list[str]] = []
+
+        def mock_run(cmd, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            captured_cmds.append(list(cmd))
+            return _make_result(1) if call_count == 1 else _make_result(0)
+
+        with (
+            patch("pm_server.installer.shutil.which", side_effect=which),
+            patch("pm_server.installer.subprocess.run", side_effect=mock_run),
+        ):
+            r = install_claude_code()
+
+        assert r.status == "installed"
+        assert r.lens_mode is True
+        add_cmd = captured_cmds[1]
+        env_pairs = [
+            add_cmd[i + 1] for i, tok in enumerate(add_cmd) if tok == "--env"
+        ]
+        assert "PM_LENS=1" in env_pairs
+        assert "PM_DESKTOP_WRITE=1" in env_pairs
+
+    def test_desktop_write_unset_omits_env(self, monkeypatch):
+        monkeypatch.delenv("PM_LENS", raising=False)
+        monkeypatch.delenv("PM_DESKTOP_WRITE", raising=False)
+
+        def which(name):
+            return f"/usr/bin/{name}"
+
+        call_count = 0
+        captured_cmds: list[list[str]] = []
+
+        def mock_run(cmd, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            captured_cmds.append(list(cmd))
+            return _make_result(1) if call_count == 1 else _make_result(0)
+
+        with (
+            patch("pm_server.installer.shutil.which", side_effect=which),
+            patch("pm_server.installer.subprocess.run", side_effect=mock_run),
+        ):
+            install_claude_code()
+
+        assert "--env" not in captured_cmds[1]
+
+
+class TestInstallCodexDesktopWritePropagation:
+    """PMSERV-100: install_codex writes PM_DESKTOP_WRITE into TOML env table."""
+
+    def test_desktop_write_writes_env_table_on_fresh_install(
+        self, fake_codex_config, tmp_path, monkeypatch
+    ):
+        monkeypatch.delenv("PM_LENS", raising=False)
+        monkeypatch.setenv("PM_DESKTOP_WRITE", "1")
+        fake_codex_config.write_text("", encoding="utf-8")
+        monkeypatch.setattr(
+            "pm_server.installer._resolve_pm_server_path", lambda: tmp_path / "pm-server"
+        )
+
+        r = install_codex()
+        assert r.status == "installed"
+        config_text = fake_codex_config.read_text(encoding="utf-8")
+        assert "PM_DESKTOP_WRITE" in config_text
+        assert '"1"' in config_text  # value is quoted as string
+
+    def test_lens_plus_desktop_write_both_in_env_table(
+        self, fake_codex_config, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("PM_LENS", "1")
+        monkeypatch.setenv("PM_DESKTOP_WRITE", "1")
+        fake_codex_config.write_text("", encoding="utf-8")
+        monkeypatch.setattr(
+            "pm_server.installer._resolve_pm_server_path", lambda: tmp_path / "pm-server"
+        )
+
+        r = install_codex()
+        assert r.status == "installed"
+        assert r.lens_mode is True
+        config_text = fake_codex_config.read_text(encoding="utf-8")
+        assert "PM_LENS" in config_text
+        assert "PM_DESKTOP_WRITE" in config_text
+
+    def test_reinstall_drops_stale_desktop_write_when_unset(
+        self, fake_codex_config, tmp_path, monkeypatch
+    ):
+        """Reinstall without PM_DESKTOP_WRITE must strip a previously-written key
+        so the spawned server starts in the requested mode (no stale env)."""
+        # Seed an existing registration that already has PM_DESKTOP_WRITE=1.
+        seed = (
+            "[mcp_servers.pm-server]\n"
+            f'command = "{tmp_path / "pm-server"}"\n'
+            "args = [\"serve\"]\n"
+            "startup_timeout_sec = 30\n"
+            "env = { PM_DESKTOP_WRITE = \"1\" }\n"
+        )
+        fake_codex_config.write_text(seed, encoding="utf-8")
+        monkeypatch.delenv("PM_LENS", raising=False)
+        monkeypatch.delenv("PM_DESKTOP_WRITE", raising=False)
+        monkeypatch.setattr(
+            "pm_server.installer._resolve_pm_server_path", lambda: tmp_path / "pm-server"
+        )
+
+        r = install_codex()
+        assert r.status == "installed"
+        config_text = fake_codex_config.read_text(encoding="utf-8")
+        assert "PM_DESKTOP_WRITE" not in config_text

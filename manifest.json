@@ -32,7 +32,8 @@
     },
     "mcp_config": {
       "env": {
-        "PM_LENS": "1"
+        "PM_LENS": "1",
+        "PM_DESKTOP_WRITE": "1"
       }
     }
   },

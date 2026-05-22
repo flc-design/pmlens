@@ -53,6 +53,17 @@ def _lens_mode_active() -> bool:
     return os.environ.get("PM_LENS", "").lower() in {"1", "true", "yes", "on"}
 
 
+def _desktop_write_mode_active() -> bool:
+    """True when PM_DESKTOP_WRITE is set to a truthy value (ADR-019 / WF-028).
+
+    Mirror of ``_lens_mode_active``. When True, install_* functions
+    propagate ``PM_DESKTOP_WRITE=1`` into the host config so the spawned
+    pm-server process engages the Desktop outbox writers (OUTBOX_WRITE_ALLOWLIST
+    becomes reachable under PM_LENS=1).
+    """
+    return os.environ.get("PM_DESKTOP_WRITE", "").lower() in {"1", "true", "yes", "on"}
+
+
 # --- Result types ---------------------------------------------------------
 
 
@@ -131,6 +142,7 @@ def install_claude_code(*, dry_run: bool = False) -> InstallResult:
         the outcome that *would* have occurred.
     """
     lens_mode = _lens_mode_active()
+    desktop_write_mode = _desktop_write_mode_active()
     pm_server_path = shutil.which("pm-server")
     if pm_server_path is None:
         return InstallResult(
@@ -191,6 +203,11 @@ def install_claude_code(*, dry_run: bool = False) -> InstallResult:
         # distribution that re-uses install_claude_code) leaves Lens mode
         # disengaged at server startup.
         add_cmd.extend(["--env", "PM_LENS=1"])
+    if desktop_write_mode:
+        # PMSERV-100 / ADR-019: propagate PM_DESKTOP_WRITE=1 so the spawned
+        # server registers the outbox-write tools. Mirrors the PM_LENS
+        # propagation contract; harmless under PM_LENS=0 (no-op gating).
+        add_cmd.extend(["--env", "PM_DESKTOP_WRITE=1"])
     add_cmd.extend(["pm-server", "--", pm_server_path, "serve"])
 
     result = subprocess.run(
@@ -351,6 +368,7 @@ def install_codex(*, dry_run: bool = False) -> InstallResult:
         dry-run).
     """
     lens_mode = _lens_mode_active()
+    desktop_write_mode = _desktop_write_mode_active()
     config_path = _codex_config_path()
     if not config_path.exists():
         return InstallResult(
@@ -366,18 +384,20 @@ def install_codex(*, dry_run: bool = False) -> InstallResult:
     doc = tomlkit.parse(config_path.read_text(encoding="utf-8"))
 
     # Early return if already registered with matching command AND matching
-    # PM_LENS env presence — no mutation, no backup needed. PMSERV-087:
-    # we also compare env, so re-running `PM_LENS=1 pm-server install` on a
-    # previously RW-registered Codex flips it into Lens (and vice versa).
+    # PM_LENS/PM_DESKTOP_WRITE env presence — no mutation, no backup needed.
+    # PMSERV-087 + PMSERV-100: we compare both env flags, so flipping either
+    # one across reinstalls re-registers cleanly without stale env left over.
     if "mcp_servers" in doc and "pm-server" in doc["mcp_servers"]:
         existing = doc["mcp_servers"]["pm-server"]
         existing_command = existing.get("command")
         existing_env = existing.get("env") or {}
         existing_has_lens = str(existing_env.get("PM_LENS", "")) == "1"
+        existing_has_desktop_write = str(existing_env.get("PM_DESKTOP_WRITE", "")) == "1"
         if (
             existing_command is not None
             and str(existing_command) == str(pm_server_path)
             and existing_has_lens == lens_mode
+            and existing_has_desktop_write == desktop_write_mode
         ):
             return InstallResult(
                 target="codex",
@@ -419,9 +439,12 @@ def install_codex(*, dry_run: bool = False) -> InstallResult:
         section["command"] = str(pm_server_path)
         section["args"] = ["serve"]
         section["startup_timeout_sec"] = 30
-        if lens_mode:
+        if lens_mode or desktop_write_mode:
             env_table = tomlkit.inline_table()
-            env_table["PM_LENS"] = "1"
+            if lens_mode:
+                env_table["PM_LENS"] = "1"
+            if desktop_write_mode:
+                env_table["PM_DESKTOP_WRITE"] = "1"
             section["env"] = env_table
         doc["mcp_servers"]["pm-server"] = section
         suffix = " in Lens (read-only) mode" if lens_mode else ""
@@ -435,19 +458,27 @@ def install_codex(*, dry_run: bool = False) -> InstallResult:
         section["args"] = ["serve"]
         if "startup_timeout_sec" not in section:
             section["startup_timeout_sec"] = 30
-        if lens_mode:
-            env_table = section.get("env")
+        env_table = section.get("env")
+        if lens_mode or desktop_write_mode:
             if env_table is None:
                 env_table = tomlkit.inline_table()
-            env_table["PM_LENS"] = "1"
+            if lens_mode:
+                env_table["PM_LENS"] = "1"
+            elif "PM_LENS" in env_table:
+                del env_table["PM_LENS"]
+            if desktop_write_mode:
+                env_table["PM_DESKTOP_WRITE"] = "1"
+            elif "PM_DESKTOP_WRITE" in env_table:
+                del env_table["PM_DESKTOP_WRITE"]
             section["env"] = env_table
         else:
-            # Non-Lens reinstall must clear any stale PM_LENS=1 so the
-            # process starts in the requested mode. Leave other env keys
-            # untouched (users may have added their own).
-            env_table = section.get("env")
-            if env_table is not None and "PM_LENS" in env_table:
-                del env_table["PM_LENS"]
+            # Non-Lens, non-DesktopWrite reinstall must clear any stale flags
+            # so the process starts in the requested mode. Leave other env
+            # keys untouched (users may have added their own).
+            if env_table is not None:
+                for stale_key in ("PM_LENS", "PM_DESKTOP_WRITE"):
+                    if stale_key in env_table:
+                        del env_table[stale_key]
                 if len(env_table) == 0:
                     del section["env"]
         suffix = " in Lens (read-only) mode" if lens_mode else ""
