@@ -1557,9 +1557,7 @@ class TestInstallClaudeCodeDesktopWritePropagation:
         assert r.status == "installed"
         add_cmd = captured_cmds[1]
         # PM_DESKTOP_WRITE=1 must appear as a --env pair.
-        env_pairs = [
-            add_cmd[i + 1] for i, tok in enumerate(add_cmd) if tok == "--env"
-        ]
+        env_pairs = [add_cmd[i + 1] for i, tok in enumerate(add_cmd) if tok == "--env"]
         assert "PM_DESKTOP_WRITE=1" in env_pairs
 
     def test_lens_plus_desktop_write_injects_both(self, monkeypatch):
@@ -1587,9 +1585,7 @@ class TestInstallClaudeCodeDesktopWritePropagation:
         assert r.status == "installed"
         assert r.lens_mode is True
         add_cmd = captured_cmds[1]
-        env_pairs = [
-            add_cmd[i + 1] for i, tok in enumerate(add_cmd) if tok == "--env"
-        ]
+        env_pairs = [add_cmd[i + 1] for i, tok in enumerate(add_cmd) if tok == "--env"]
         assert "PM_LENS=1" in env_pairs
         assert "PM_DESKTOP_WRITE=1" in env_pairs
 
@@ -1663,9 +1659,9 @@ class TestInstallCodexDesktopWritePropagation:
         seed = (
             "[mcp_servers.pm-server]\n"
             f'command = "{tmp_path / "pm-server"}"\n'
-            "args = [\"serve\"]\n"
+            'args = ["serve"]\n'
             "startup_timeout_sec = 30\n"
-            "env = { PM_DESKTOP_WRITE = \"1\" }\n"
+            'env = { PM_DESKTOP_WRITE = "1" }\n'
         )
         fake_codex_config.write_text(seed, encoding="utf-8")
         monkeypatch.delenv("PM_LENS", raising=False)

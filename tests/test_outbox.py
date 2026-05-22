@@ -354,9 +354,7 @@ def test_pm_outbox_merge_routes_memory_and_log_to_target(tmp_path: Path) -> None
     import pm_server.server as srv
 
     proj = _make_project(tmp_path)
-    mem_res = srv.pm_outbox_remember(
-        content="from tool", type="memory", source_project=str(proj)
-    )
+    mem_res = srv.pm_outbox_remember(content="from tool", type="memory", source_project=str(proj))
     log_res = srv.pm_outbox_log(entry="ship it", category="milestone", source_project=str(proj))
     assert mem_res["status"] == "saved"
     assert log_res["status"] == "saved"
@@ -395,9 +393,9 @@ def test_pm_outbox_merge_idempotent_skip_already_processed(tmp_path: Path) -> No
     import pm_server.server as srv
 
     proj = _make_project(tmp_path)
-    rid = srv.pm_outbox_remember(
-        content="once", type="memory", source_project=str(proj)
-    )["outbox_id"]
+    rid = srv.pm_outbox_remember(content="once", type="memory", source_project=str(proj))[
+        "outbox_id"
+    ]
     first = srv.pm_outbox_merge(ids=[rid], target_project=str(proj))
     second = srv.pm_outbox_merge(ids=[rid], target_project=str(proj))
     assert len(first["merged"]) == 1

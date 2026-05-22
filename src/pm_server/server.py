@@ -416,9 +416,7 @@ def pm_status(project_path: str | None = None) -> dict:
     }
     if not PM_LENS_ENABLED:
         try:
-            outbox_pending = get_outbox_store(
-                db_path=default_outbox_db_path()
-            ).get_pending_count()
+            outbox_pending = get_outbox_store(db_path=default_outbox_db_path()).get_pending_count()
         except Exception:
             outbox_pending = 0
         diagnostics["outbox_pending"] = outbox_pending
