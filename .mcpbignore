@@ -1,0 +1,41 @@
+# Files/dirs excluded from the .mcpb bundle (server.type = "uv", MCPB v0.4).
+#
+# MCPB spec requires we NOT ship .venv or server/lib — the host installs the
+# dependencies declared in pyproject.toml via `uv run` at extension-launch time.
+
+# Python build / cache artifacts
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+build/
+
+# Dev tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage*
+htmlcov/
+
+# Repo metadata / VCS
+.git/
+.github/
+.gitignore
+.gitattributes
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+
+# Tests + previously built bundles never need to ship
+tests/
+dist/
+*.mcpb
+
+# Local pm-server state must not leak into a distributed bundle
+.pm/
+
+# Scratch / docs already covered separately
+scratch/
