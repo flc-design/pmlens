@@ -1,0 +1,181 @@
+# PM Server — Brainstorming Workflow Template
+# Scope → Diverge (3 Agents) ↔ Evaluate (Scoring Matrix) → Converge →
+# Requirements → Spec → Cross-Check → Record (ADR).
+# An application of super-research optimized for creative ideation:
+# the 3-agent pattern is reused, but agent roles are re-cast for divergent
+# thinking (Idea Generator / Devil's Advocate / Synthesizer) instead of
+# knowledge construction.
+# Chains to "development" workflow on completion.
+
+name: Brainstorming
+description: >
+  Idea ideation, evaluation, convergence, and requirements/spec extraction.
+  Double Diamond pattern: diverge (3 parallel agents) ↔ evaluate
+  (scoring matrix) loop, then converge → requirements → spec → ADR.
+  Use when shaping new ideas, deciding requirements, or drafting specs
+  before development. Produces a Knowledge Record (requirement + spec)
+  and an ADR, then chains to development.
+
+chain_to: development
+
+steps:
+  - id: scope
+    name: Problem Scoping
+    description: >
+      Define the problem clearly. What are we trying to solve, and for whom?
+      Identify constraints (technical, business, timeline, budget),
+      success criteria, and what is explicitly out of scope.
+      Consider reframing the problem as a "How Might We" question to keep
+      the solution space open during divergence.
+    tool_hint: pm_remember
+    produces:
+      - problem_statement
+      - constraints
+
+  # NOTE: diverge and evaluate share loop_group "diverge_evaluate".
+  # When evaluate's top-ranked ideas score below threshold (suggested < 3.5
+  # average), advance with proceed=False to loop back to diverge for another
+  # iteration — typically with refined constraints or a reframed problem.
+  # The workflow engine resets all "diverge_evaluate" steps and increments
+  # the iteration counter.
+  - id: diverge
+    name: Diverge (3 Agents — Parallel Ideation)
+    description: >
+      Launch 3 sub-agents in parallel for divergent ideation
+      (quantity over quality at this stage):
+      1. Idea Generator — broad, generative, "yes-and" thinking. Aim wide.
+      2. Devil's Advocate — counter-ideas, anti-patterns, opposite framings.
+         Not "criticism of ideas" but generation of contrarian ideas.
+      3. Synthesizer — cross-domain analogies, hybrid combinations,
+         patterns borrowed from unrelated fields.
+      Use Claude Code's Agent tool to run them concurrently.
+      Target 10-30 raw ideas per agent; defer judgment to evaluate step.
+    skill_hint: >
+      Apply the super-research 3-agent pattern, re-cast for ideation:
+      the goal is divergent generation, not knowledge construction.
+    agent_hint: >
+      Launch 3 agents in parallel using the Agent tool:
+      Agent 1 (Idea Generator): Generate as many diverse ideas as possible.
+      Agent 2 (Devil's Advocate): Generate counter-ideas and challenge assumptions.
+      Agent 3 (Synthesizer): Cross-domain patterns and hybrid combinations.
+      Send all 3 Agent calls in a single message for concurrent execution.
+    loop: true
+    loop_group: diverge_evaluate
+    consumes:
+      - problem_statement
+      - constraints
+    produces:
+      - idea_pool
+
+  - id: evaluate
+    name: Evaluate (Scoring Matrix)
+    description: >
+      Evaluate each idea against six dimensions:
+      1. Impact — how much does it move the needle?
+      2. Feasibility — can we build it with current resources and skills?
+      3. Effort — how costly to implement (inverse: lower effort scores higher)?
+      4. Risk — what could go wrong (inverse: lower risk scores higher)?
+      5. Novelty — is this differentiated from existing solutions?
+      6. Strategic fit — alignment with project/product goals?
+      Score each 1-5. Rank ideas; drop the bottom half.
+      If the top-ranked ideas average < 3.5, advance with proceed=False to
+      loop back to diverge — typically with refined constraints or a
+      reframed problem (the iteration is not a failure, it is the design).
+    agent_hint: >
+      Use a review sub-agent for independent scoring to reduce confirmation bias.
+    loop: true
+    loop_group: diverge_evaluate
+    consumes:
+      - idea_pool
+    produces:
+      - evaluated_ideas
+      - scoring_matrix
+
+  - id: converge
+    name: Converge (Select Top Candidates)
+    description: >
+      Present the top 1-3 candidate ideas to the user, along with the
+      scoring matrix. Summarize trade-offs, key strengths, and remaining
+      open questions. The user selects which candidate(s) to advance into
+      requirements definition. Wait for user approval before proceeding.
+    gate: user_approval
+    consumes:
+      - evaluated_ideas
+      - scoring_matrix
+    produces:
+      - selected_idea
+
+  - id: requirements
+    name: Requirements Definition
+    description: >
+      Translate the selected idea into concrete requirements:
+      - Functional requirements (what the system must do)
+      - Non-functional requirements (performance, security, accessibility,
+        observability, compliance)
+      - Priority labels (must-have / should-have / nice-to-have)
+      - Acceptance criteria (testable conditions)
+      Record as a Knowledge Record with category=requirement.
+    tool_hint: pm_record
+    consumes:
+      - selected_idea
+    produces:
+      - requirements
+
+  - id: spec
+    name: Specification Draft
+    description: >
+      Draft a specification based on the requirements:
+      - Interface design (APIs, data models, UI sketches, CLI shapes)
+      - Edge cases and error handling
+      - Integration points with existing systems
+      - Migration / rollout strategy if applicable
+      For complex specs that need deeper investigation, optionally invoke
+      the super-research skill for a technical spike on the hard parts.
+      Record as a Knowledge Record with category=spec (or api_design).
+    tool_hint: pm_record
+    skill_hint: Use super-research for spec-level technical spikes if needed.
+    consumes:
+      - requirements
+    produces:
+      - spec
+
+  - id: cross_check
+    name: Cross-Check
+    description: >
+      Final validation across requirements, spec, and the original problem
+      statement. Check for:
+      - Consistency between requirements and spec
+      - Feasibility within the constraints declared at scope
+      - Missing edge cases or unhandled error paths
+      - Alignment with the success criteria from scope
+      - Any new risks introduced during specification
+      Get a second opinion from a review sub-agent.
+    agent_hint: Use a review sub-agent for independent cross-validation.
+    consumes:
+      - requirements
+      - spec
+      - problem_statement
+    produces:
+      - validated_spec
+
+  - id: record
+    name: Record Decision (ADR)
+    description: >
+      Record the final design decision as an ADR. Capture:
+      - Context — why we are deciding now and what triggered it
+      - Decision — which idea we chose and the rationale
+      - Consequences — positive, negative, mitigations
+      - Rejected alternatives — briefly, with the reasoning for rejection
+        (this preserves the "why we did not do X" thread that future
+        readers will need)
+      The Knowledge Records (requirements + spec) and the ADR together
+      form the handoff package for the development workflow.
+    tool_hint: pm_add_decision
+    gate: user_approval
+    required_artifacts:
+      - KR
+      - ADR
+    consumes:
+      - validated_spec
+    produces:
+      - ADR

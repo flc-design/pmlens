@@ -264,6 +264,41 @@ class TestWorkflowTemplates:
         assert research_step.skill_hint is not None
         assert "super-research" in research_step.skill_hint
 
+    def test_load_builtin_brainstorming(self):
+        tmpl = load_workflow_template("brainstorming")
+        assert tmpl.name == "Brainstorming"
+        assert len(tmpl.steps) == 8
+        assert tmpl.chain_to == "development"
+        # Step shape
+        step_ids = [s.id for s in tmpl.steps]
+        assert step_ids == [
+            "scope",
+            "diverge",
+            "evaluate",
+            "converge",
+            "requirements",
+            "spec",
+            "cross_check",
+            "record",
+        ]
+        # diverge ↔ evaluate share a loop group for the Double Diamond loop
+        loop_steps = [s for s in tmpl.steps if s.loop_group == "diverge_evaluate"]
+        assert len(loop_steps) == 2
+        assert {s.id for s in loop_steps} == {"diverge", "evaluate"}
+        # Two user_approval gates: converge (candidate selection) and record (final ADR)
+        gated_ids = [s.id for s in tmpl.steps if s.gate == "user_approval"]
+        assert gated_ids == ["converge", "record"]
+        # Final step requires both KR and ADR as the development hand-off
+        record_step = tmpl.steps[-1]
+        assert record_step.id == "record"
+        assert set(record_step.required_artifacts) == {"KR", "ADR"}
+        # 3-agent ideation hint on diverge step (super-research re-cast for ideation)
+        diverge_step = next(s for s in tmpl.steps if s.id == "diverge")
+        assert diverge_step.agent_hint is not None
+        assert "Idea Generator" in diverge_step.agent_hint
+        assert "Devil's Advocate" in diverge_step.agent_hint
+        assert "Synthesizer" in diverge_step.agent_hint
+
     def test_load_nonexistent_template(self):
         with pytest.raises(PmServerError, match="not found"):
             load_workflow_template("nonexistent")
@@ -291,9 +326,13 @@ class TestWorkflowTemplates:
         assert "development" in names
         assert "discovery" in names
         assert "super-research" in names
+        assert "brainstorming" in names
         for t in templates:
             assert t["source"] == "builtin"
             assert t["steps"] > 0
+        # brainstorming chains into development (mirrors discovery)
+        bs = next(t for t in templates if t["name"] == "brainstorming")
+        assert bs["chain_to"] == "development"
 
     def test_list_templates_custom_overrides(self, tmp_pm_path):
         custom_dir = tmp_pm_path / "workflow_templates"

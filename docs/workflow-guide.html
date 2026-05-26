@@ -123,7 +123,7 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
 <body>
 <header class="hero">
   <h1>PM Server — Workflow Guide</h1>
-  <div class="subtitle">Workflow Engine の仕組み・3 builtin templates・カスタム workflow の作り方</div>
+  <div class="subtitle">Workflow Engine の仕組み・4 builtin templates・カスタム workflow の作り方</div>
   <div class="meta">バージョン 0.8.0 (2026-05-25) · 関連: <a href="architecture.html">Architecture</a> · <a href="user-guide.html">User Guide</a></div>
 </header>
 
@@ -410,6 +410,23 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
   <p>3 並列エージェント (Domain Expert / Critical Analyst / Lateral Thinker) を起動して
      6 dimension で depth scoring。スコア &lt; 3.0 で <code>parallel_research</code> へループバック。
      完了時は <code>pm_record</code> で Knowledge Record (KR-NNN) として保存。</p>
+
+  <h3>5.4 <code>brainstorming</code> (8 steps, diverge↔evaluate ループ, chain → development)</h3>
+  <p>アイデアの発散から要件・仕様化までを一貫して扱う workflow。Double Diamond パターンで、
+     <code>diverge</code> (3 並列エージェント: <em>Idea Generator</em> / <em>Devil's Advocate</em> / <em>Synthesizer</em>) と
+     <code>evaluate</code> (6 dimension scoring: Impact/Feasibility/Effort/Risk/Novelty/Strategic fit) が
+     <code>loop_group: diverge_evaluate</code> でループ可。Top 案の平均スコア &lt; 3.5 なら
+     <code>pm_workflow_advance(proceed=False)</code> で diverge に戻り再発散。</p>
+  <p>収束後は <code>converge</code> (user 承認) → <code>requirements</code> (KR/category=requirement) →
+     <code>spec</code> (KR/category=spec) → <code>cross_check</code> → <code>record</code> (ADR 起票, user 承認, 必須 artifacts=KR+ADR)
+     → chain_to: development。<strong>super-research の 3 agents パターンを発散思考に応用</strong>した位置付け
+     (research 用の Domain Expert/Critical Analyst/Lateral Thinker を ideation 用に再キャスト)。</p>
+  <p>使い分けの指針:</p>
+  <ul>
+    <li><strong>discovery</strong>: 既存解の<em>調査</em>と方向性承認 (research-leaning)。</li>
+    <li><strong>super-research</strong>: 知識構築としての多角的<em>深掘り</em> (KR を生成)。</li>
+    <li><strong>brainstorming</strong>: アイデアの<em>創発</em>と要件・仕様への結晶化 (KR + ADR を生成)。</li>
+  </ul>
 
   <div class="tip">
     <strong>builtin を上書き:</strong> <code>.pm/workflow_templates/development.yaml</code> を作ると、同名の builtin より優先される

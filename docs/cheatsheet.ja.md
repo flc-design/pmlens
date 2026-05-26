@@ -272,7 +272,8 @@ Claude:   → pm_workflow_advance(skip=True)
 
 ユーザー: どんなワークフローテンプレートがある？
 Claude:   → pm_workflow_templates()
-          discovery (5 steps, builtin), development (9 steps, builtin)
+          brainstorming (8 steps, builtin), discovery (5 steps, builtin),
+          development (9 steps, builtin), super-research (6 steps, builtin)
 ```
 
 ### カスタムテンプレート

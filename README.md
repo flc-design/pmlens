@@ -269,7 +269,7 @@ dataclasses, atomic-write helpers).
 
 | Tool | Description |
 |---|---|
-| `pm_workflow_start` | Start a workflow from a template (development / discovery / super-research) |
+| `pm_workflow_start` | Start a workflow from a template (development / discovery / super-research / brainstorming) |
 | `pm_workflow_status` | View current step, progress, and guidance for active workflow |
 | `pm_workflow_advance` | Advance to next step with artifacts and notes; supports loops and skip |
 | `pm_workflow_abandon` | Abandon a workflow (transition to ABANDONED, preserves step history) |
