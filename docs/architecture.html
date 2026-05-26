@@ -66,6 +66,7 @@ tr:hover { background: #fafbfc; }
 .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
 .badge-ro { background: #dbeafe; color: var(--ro); }
 .badge-rw { background: #fee2e2; color: var(--rw); }
+.badge-outbox { background: #ede9fe; color: #6d28d9; }
 .badge-gate { background: #fef3c7; color: var(--gate); }
 .badge-done { background: #dcfce7; color: var(--done); }
 .legend { display: flex; gap: 16px; flex-wrap: wrap; margin: 12px 0; font-size: 13px; }
@@ -88,7 +89,8 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
 <header class="hero">
   <h1>PM Server — Architecture &amp; Behavior</h1>
   <div class="subtitle">Claude Code 用プロジェクト管理 MCP サーバーの全体機能・データフロー・状態遷移マップ</div>
-  <div class="meta">バージョン 0.6.2 (2026-05-20 時点) · 33 MCP tools · 15 RO_ALLOWLIST (Lens) · 698+ tests · MIT</div>
+  <div class="meta">バージョン 0.8.0 (2026-05-25 時点) · 37 MCP tools · 15 RO + 2 outbox-RW + 20 full-RW · 783+ tests · MIT</div>
+  <div class="meta">関連ドキュメント: <a href="user-guide.html">User Guide (CLI &amp; UX Tips)</a> · <a href="workflow-guide.html">Workflow Guide (作り方)</a> · <a href="cheatsheet.ja.md">Cheatsheet (ja)</a></div>
 </header>
 
 <div class="layout">
@@ -103,6 +105,7 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
     <li><a href="#tasks">6. Task &amp; Issue Lifecycle</a></li>
     <li><a href="#data">7. Data Layout</a></li>
     <li><a href="#dist">8. Distribution Channels</a></li>
+    <li><a href="#outbox">9. Desktop Outbox (Phase 2)</a></li>
   </ol>
 </nav>
 
@@ -118,18 +121,20 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
   <table>
     <tr><td><strong>言語</strong></td><td>Python 3.11+</td></tr>
     <tr><td><strong>主要フレームワーク</strong></td><td>FastMCP, Pydantic v2, Click, Jinja2, tomlkit</td></tr>
-    <tr><td><strong>データ形式</strong></td><td>YAML (human-readable, git-friendly) + SQLite (per-project + global)</td></tr>
-    <tr><td><strong>配布</strong></td><td>PyPI <code>pm-server</code> (RW) + <code>.mcpb</code> bundle (Lens, read-only)</td></tr>
+    <tr><td><strong>データ形式</strong></td><td>YAML (human-readable, git-friendly) + SQLite per-project (<code>.pm/memory.db</code>) + global (<code>~/.pm/memory.db</code>) + outbox (<code>~/.pm/desktop/desktop.db</code>)</td></tr>
+    <tr><td><strong>配布</strong></td><td>PyPI <code>pm-server</code> (Full RW) + <code>.mcpb</code> bundle (Lens RO / Desktop Outbox)</td></tr>
     <tr><td><strong>対象ホスト</strong></td><td>Claude Code, Claude Desktop, Claude Cowork, Codex CLI</td></tr>
+    <tr><td><strong>動作モード</strong></td><td><code>PM_LENS=0</code> Full RW / <code>PM_LENS=1</code> Lens RO / <code>PM_LENS=1 + PM_DESKTOP_WRITE=1</code> Outbox bridge (Phase 2)</td></tr>
     <tr><td><strong>ライセンス</strong></td><td>MIT</td></tr>
   </table>
 </section>
 
 <section class="card" id="modules">
   <h2>2. Module Architecture</h2>
-  <p>17 個の Python モジュールが <code>server.py</code> (FastMCP インスタンス) を中心に連携する。
-     データ層 (models / storage / memory) が下位、機能層 (workflow / hooks / installer / discovery /
-     velocity / dashboard / recall) が中位、orchestration (server / __main__) が上位。</p>
+  <p>18 個の Python モジュールが <code>server.py</code> (FastMCP インスタンス) を中心に連携する。
+     データ層 (models / storage / memory / outbox) が下位、機能層 (workflow / hooks / installer /
+     discovery / velocity / dashboard / recall / rules) が中位、orchestration (server / __main__) が上位。
+     <code>outbox.py</code> は v0.8.0 で追加された Phase 2 Desktop Outbox SQLite store (ADR-019)。</p>
   <div class="svg-wrap">
   <svg viewBox="0 0 880 480" xmlns="http://www.w3.org/2000/svg" font-family="ui-monospace, SF Mono, monospace" font-size="12">
     <defs>
@@ -144,8 +149,8 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
 
     <rect x="340" y="90" width="200" height="56" rx="6" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
     <text x="440" y="111" text-anchor="middle" font-weight="700">server.py</text>
-    <text x="440" y="126" text-anchor="middle" fill="#666" font-size="11">FastMCP + 33 @_tool()</text>
-    <text x="440" y="140" text-anchor="middle" fill="#666" font-size="11">PM_LENS gating</text>
+    <text x="440" y="126" text-anchor="middle" fill="#666" font-size="11">FastMCP + 37 @_tool()</text>
+    <text x="440" y="140" text-anchor="middle" fill="#666" font-size="11">PM_LENS + PM_DESKTOP_WRITE gating</text>
 
     <!-- Mid layer: features -->
     <rect x="20" y="200" width="130" height="44" rx="6" fill="#fff" stroke="#999"/>
@@ -189,17 +194,21 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
     <text x="685" y="294" text-anchor="middle" fill="#666" font-size="10">CLI bootstrap</text>
 
     <!-- Bottom: data layer -->
-    <rect x="180" y="360" width="160" height="48" rx="6" fill="#dcfce7" stroke="#16a34a" stroke-width="1.5"/>
-    <text x="260" y="380" text-anchor="middle" font-weight="700">storage.py</text>
-    <text x="260" y="396" text-anchor="middle" fill="#666" font-size="10">YAML I/O</text>
+    <rect x="40" y="360" width="150" height="48" rx="6" fill="#dcfce7" stroke="#16a34a" stroke-width="1.5"/>
+    <text x="115" y="380" text-anchor="middle" font-weight="700">storage.py</text>
+    <text x="115" y="396" text-anchor="middle" fill="#666" font-size="10">YAML I/O</text>
 
-    <rect x="360" y="360" width="160" height="48" rx="6" fill="#dcfce7" stroke="#16a34a" stroke-width="1.5"/>
-    <text x="440" y="380" text-anchor="middle" font-weight="700">memory.py</text>
-    <text x="440" y="396" text-anchor="middle" fill="#666" font-size="10">SQLite + FTS5 (RO/RW)</text>
+    <rect x="210" y="360" width="150" height="48" rx="6" fill="#dcfce7" stroke="#16a34a" stroke-width="1.5"/>
+    <text x="285" y="380" text-anchor="middle" font-weight="700">memory.py</text>
+    <text x="285" y="396" text-anchor="middle" fill="#666" font-size="10">SQLite + FTS5 (RO/RW)</text>
 
-    <rect x="540" y="360" width="160" height="48" rx="6" fill="#dcfce7" stroke="#16a34a" stroke-width="1.5"/>
-    <text x="620" y="380" text-anchor="middle" font-weight="700">models.py</text>
-    <text x="620" y="396" text-anchor="middle" fill="#666" font-size="10">Pydantic v2 (17 models)</text>
+    <rect x="380" y="360" width="150" height="48" rx="6" fill="#dcfce7" stroke="#16a34a" stroke-width="1.5"/>
+    <text x="455" y="380" text-anchor="middle" font-weight="700">outbox.py</text>
+    <text x="455" y="396" text-anchor="middle" fill="#666" font-size="10">append-only (ADR-019)</text>
+
+    <rect x="550" y="360" width="150" height="48" rx="6" fill="#dcfce7" stroke="#16a34a" stroke-width="1.5"/>
+    <text x="625" y="380" text-anchor="middle" font-weight="700">models.py</text>
+    <text x="625" y="396" text-anchor="middle" fill="#666" font-size="10">Pydantic v2 (17 models)</text>
 
     <rect x="340" y="430" width="200" height="40" rx="6" fill="#fce7f3" stroke="#be185d"/>
     <text x="440" y="455" text-anchor="middle" font-weight="700">utils.py — shared helpers</text>
@@ -215,15 +224,17 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
     <line x1="500" y1="146" x2="685" y2="200" stroke="#bbb" stroke-width="1" marker-end="url(#arrow)"/>
 
     <!-- arrows mid to data -->
-    <line x1="100" y1="244" x2="260" y2="360" stroke="#bbb" stroke-width="1" marker-end="url(#arrow)"/>
-    <line x1="235" y1="304" x2="260" y2="360" stroke="#bbb" stroke-width="1" marker-end="url(#arrow)"/>
-    <line x1="385" y1="304" x2="440" y2="360" stroke="#bbb" stroke-width="1" marker-end="url(#arrow)"/>
-    <line x1="535" y1="244" x2="440" y2="360" stroke="#bbb" stroke-width="1" marker-end="url(#arrow)"/>
+    <line x1="100" y1="244" x2="115" y2="360" stroke="#bbb" stroke-width="1" marker-end="url(#arrow)"/>
+    <line x1="235" y1="304" x2="115" y2="360" stroke="#bbb" stroke-width="1" marker-end="url(#arrow)"/>
+    <line x1="385" y1="304" x2="285" y2="360" stroke="#bbb" stroke-width="1" marker-end="url(#arrow)"/>
+    <line x1="535" y1="244" x2="285" y2="360" stroke="#bbb" stroke-width="1" marker-end="url(#arrow)"/>
+    <!-- server.py → outbox.py (Phase 2) -->
+    <line x1="440" y1="146" x2="455" y2="360" stroke="#be185d" stroke-width="1.2" marker-end="url(#arrow)"/>
 
     <!-- utils.py at bottom is referenced by many; show dashed lines -->
-    <line x1="260" y1="408" x2="380" y2="430" stroke="#be185d" stroke-dasharray="3 3" stroke-width="1"/>
-    <line x1="440" y1="408" x2="440" y2="430" stroke="#be185d" stroke-dasharray="3 3" stroke-width="1"/>
-    <line x1="620" y1="408" x2="500" y2="430" stroke="#be185d" stroke-dasharray="3 3" stroke-width="1"/>
+    <line x1="115" y1="408" x2="380" y2="430" stroke="#be185d" stroke-dasharray="3 3" stroke-width="1"/>
+    <line x1="285" y1="408" x2="440" y2="430" stroke="#be185d" stroke-dasharray="3 3" stroke-width="1"/>
+    <line x1="625" y1="408" x2="500" y2="430" stroke="#be185d" stroke-dasharray="3 3" stroke-width="1"/>
 
     <!-- Legend -->
     <rect x="20" y="30" width="14" height="14" fill="#fef3c7" stroke="#d97706"/>
@@ -246,12 +257,14 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
 
 <section class="card" id="tools">
   <h2>3. MCP Tool Catalog</h2>
-  <p>33 個の MCP ツールがカテゴリ別に提供される。
-     <span class="badge badge-ro">RO</span> は Lens モード (PM_LENS=1) で利用可能、
-     <span class="badge badge-rw">RW</span> は full pm-server (Claude Code 配布) のみ。</p>
+  <p>37 個の MCP ツールがカテゴリ別に提供される。配布モードによって登録される ツール集合が異なる:
+     <span class="badge badge-ro">RO</span> は Lens モード (<code>PM_LENS=1</code>) で利用可能、
+     <span class="badge" style="background:#ede9fe;color:#6d28d9">OUTBOX</span> は Lens + <code>PM_DESKTOP_WRITE=1</code> で追加開放される Desktop Outbox 書込み tool、
+     <span class="badge badge-rw">RW</span> は full pm-server (Claude Code / Codex 配布) のみ。</p>
   <div class="legend">
-    <div class="legend-item"><span class="swatch" style="background:#dbeafe;border-color:#2563eb"></span>RO (Lens 可)</div>
-    <div class="legend-item"><span class="swatch" style="background:#fee2e2;border-color:#dc2626"></span>RW (mutator / subprocess)</div>
+    <div class="legend-item"><span class="swatch" style="background:#dbeafe;border-color:#2563eb"></span>RO (Lens で利用可)</div>
+    <div class="legend-item"><span class="swatch" style="background:#ede9fe;border-color:#6d28d9"></span>OUTBOX-RW (Desktop bridge only)</div>
+    <div class="legend-item"><span class="swatch" style="background:#fee2e2;border-color:#dc2626"></span>Full-RW (mutator / subprocess)</div>
   </div>
   <table>
     <tr><th>カテゴリ</th><th>ツール</th><th>用途</th><th>モード</th></tr>
@@ -286,6 +299,13 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
     <tr><td><code>pm_log</code></td><td>daily log エントリ追記 (progress/decision/blocker/milestone)</td><td><span class="badge badge-rw">RW</span></td></tr>
     <tr><td><code>pm_session_summary</code></td><td>session summary の save/get/list</td><td><span class="badge badge-rw">RW</span></td></tr>
 
+    <tr><td rowspan="5">Cross-host Outbox<br><span class="muted">(Phase 2, ADR-019)</span></td>
+      <td><code>pm_outbox_remember</code></td><td>Desktop → 共有 outbox に memory/lesson を append (host 共有 bridge)</td><td><span class="badge badge-outbox">OUTBOX</span></td></tr>
+    <tr><td><code>pm_outbox_log</code></td><td>Desktop → outbox に daily log entry を append (category 保持)</td><td><span class="badge badge-outbox">OUTBOX</span></td></tr>
+    <tr><td><code>pm_outbox_pending</code></td><td>outbox の pending/merged/rejected 一覧 (paginated)</td><td><span class="badge badge-rw">RW</span></td></tr>
+    <tr><td><code>pm_outbox_merge</code></td><td>pending entries を target project の memory.db / daily log へ promote</td><td><span class="badge badge-rw">RW</span></td></tr>
+    <tr><td><code>pm_outbox_reject</code></td><td>pending entries を reason 付きで reject (append-only 保持)</td><td><span class="badge badge-rw">RW</span></td></tr>
+
     <tr><td rowspan="1">Decisions (ADR)</td>
       <td><code>pm_add_decision</code></td><td>Architecture Decision Record の登録</td><td><span class="badge badge-rw">RW</span></td></tr>
 
@@ -302,8 +322,9 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
     <tr><td><code>pm_workflow_list</code></td><td>active/completed/paused/abandoned 一覧</td><td><span class="badge badge-ro">RO</span></td></tr>
     <tr><td><code>pm_workflow_templates</code></td><td>builtin + custom テンプレート一覧</td><td><span class="badge badge-ro">RO</span></td></tr>
   </table>
-  <p class="muted">15 RO / 18 RW = 33 ツール (2026-05-20 時点)。Lens 配布では RO_ALLOWLIST 外のツールが FastMCP に
-     未登録 = 構造的不変条件 (ADR-015/017/018)。</p>
+  <p class="muted">15 RO + 2 OUTBOX-RW + 20 Full-RW = 37 ツール (2026-05-25, v0.8.0)。Lens 配布では RO_ALLOWLIST 外の
+     ツールが FastMCP に未登録 = 構造的不変条件 (ADR-015/017/018)。OUTBOX 2 ツールは <code>PM_DESKTOP_WRITE=1</code>
+     が追加で立った時のみ登録され、main <code>.pm/memory.db</code> は touch しない (ADR-019)。</p>
 </section>
 
 <section class="card" id="lens">
@@ -371,13 +392,13 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
     <text x="260" y="264" text-anchor="middle" fill="#666" font-size="10">pm_memory_search, pm_dashboard, pm_workflow_status …</text>
 
     <rect x="460" y="210" width="320" height="60" rx="6" fill="#fee2e2" stroke="#dc2626" stroke-width="1.5"/>
-    <text x="620" y="232" text-anchor="middle" font-weight="700">FastMCP 未登録 (18 tools)</text>
+    <text x="620" y="232" text-anchor="middle" font-weight="700">FastMCP 未登録 (22 tools)</text>
     <text x="620" y="250" text-anchor="middle" fill="#666" font-size="10">pm_add_task, pm_update_task, pm_log, pm_remember,</text>
-    <text x="620" y="264" text-anchor="middle" fill="#666" font-size="10">pm_init, pm_cleanup, pm_workflow_start, …</text>
+    <text x="620" y="264" text-anchor="middle" fill="#666" font-size="10">pm_init, pm_cleanup, pm_workflow_start, pm_outbox_pending …</text>
 
     <!-- Result -->
     <rect x="280" y="300" width="320" height="40" rx="6" fill="#fff" stroke="#888"/>
-    <text x="440" y="324" text-anchor="middle" font-weight="700">MCP クライアントは RO 15 tools のみ確認</text>
+    <text x="440" y="324" text-anchor="middle" font-weight="700">MCP クライアントは RO 15 tools のみ確認 (+OUTBOX 2 if PM_DESKTOP_WRITE=1)</text>
 
     <line x1="260" y1="270" x2="400" y2="300" stroke="#888" stroke-width="1" marker-end="url(#arrow2)"/>
     <line x1="620" y1="270" x2="480" y2="300" stroke="#dc2626" stroke-width="1" marker-end="url(#redarrow)"/>
@@ -595,31 +616,133 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
 
 <section class="card" id="dist">
   <h2>8. Distribution Channels</h2>
-  <p>同一コードベースが 2 つの配布形態を持つ。PyPI は完全 RW、.mcpb は構造的 RO (Lens)。</p>
+  <p>同一コードベースが 3 つの配布モードを持つ。PyPI は Full RW、.mcpb は構造的 RO (Lens)、
+     .mcpb + <code>PM_DESKTOP_WRITE=1</code> は Lens に Outbox 書込みだけを足した bridge モード。</p>
   <table>
-    <tr><th></th><th>PyPI <code>pm-server</code></th><th>.mcpb bundle</th></tr>
-    <tr><td><strong>対象 host</strong></td><td>Claude Code (CLI) / Codex CLI</td><td>Claude Desktop / Claude Cowork</td></tr>
-    <tr><td><strong>インストール</strong></td><td><code>pip install pm-server</code> &rarr; <code>claude mcp add</code> / <code>pm-server install</code></td><td>.mcpb ファイルを host に drag &amp; drop (host が <code>uv</code> 経由で PyPI から fetch)</td></tr>
-    <tr><td><strong>権限</strong></td><td>full RW (33 tools)</td><td>Lens RO (15 tools)</td></tr>
-    <tr><td><strong>PM_LENS env</strong></td><td>未設定 (RW)</td><td>manifest <code>server.mcp_config.env.PM_LENS = "1"</code></td></tr>
-    <tr><td><strong>SQLite モード</strong></td><td>RW (WAL OK)</td><td><code>?mode=ro&amp;immutable=1</code></td></tr>
-    <tr><td><strong>同一バイナリ?</strong></td><td>はい</td><td>はい (PyPI から host が install)</td></tr>
-    <tr><td><strong>バージョン同期</strong></td><td>pyproject.toml が source of truth</td><td>manifest.json が pyproject と lockstep (<code>build_mcpb.py</code> validator で CI 強制)</td></tr>
+    <tr><th></th><th>PyPI <code>pm-server</code></th><th>.mcpb bundle (Lens)</th><th>.mcpb + PM_DESKTOP_WRITE</th></tr>
+    <tr><td><strong>対象 host</strong></td><td>Claude Code (CLI) / Codex CLI</td><td>Claude Cowork / その他 viewer</td><td>Claude Desktop (Phase 2 bridge)</td></tr>
+    <tr><td><strong>インストール</strong></td><td><code>pip install pm-server</code> &rarr; <code>pm-server install</code></td><td>.mcpb ファイルを host に drag &amp; drop</td><td>.mcpb + manifest が <code>PM_DESKTOP_WRITE=1</code> を auto-propagate (PMSERV-100)</td></tr>
+    <tr><td><strong>登録 tools</strong></td><td>Full RW (37 tools)</td><td>Lens RO (15 tools)</td><td>RO 15 + OUTBOX-RW 2 = 17 tools</td></tr>
+    <tr><td><strong>環境変数</strong></td><td>未設定</td><td><code>PM_LENS=1</code></td><td><code>PM_LENS=1, PM_DESKTOP_WRITE=1</code></td></tr>
+    <tr><td><strong>SQLite モード</strong></td><td>RW main + outbox</td><td><code>?mode=ro&amp;immutable=1</code> main / outbox 不触</td><td>main は RO 不変、outbox <code>~/.pm/desktop/desktop.db</code> は append-only RW</td></tr>
+    <tr><td><strong>同一バイナリ?</strong></td><td>はい — 配布物は 1 種類、env で role gating</td><td colspan="2" style="text-align:center">←</td></tr>
+    <tr><td><strong>バージョン同期</strong></td><td colspan="3">pyproject.toml が source of truth、<code>manifest.json</code> は <code>build_mcpb.py</code> validator で lockstep (CI 強制)</td></tr>
   </table>
   <div class="callout">
     <strong>共有 surface の安全性:</strong> 両者は <code>~/.pm/</code> と project 内 <code>.pm/memory.db</code> を共有しうるが、
     Lens 側は <code>memory.py:98-117</code> の <code>?mode=ro&amp;immutable=1</code> で RO 接続するため、
     Claude Code 側が WAL を書いていても -shm sidecar の意図せぬ生成は発生しない (PMSERV-080 / FINDING-J)。
   </div>
-  <h3>installer.py の PM_LENS 認識 (PMSERV-087, 2026-05-20)</h3>
-  <p><code>install_claude_code()</code> は <code>--env PM_LENS=1</code> を <code>claude mcp add</code> に注入、
-    <code>install_codex()</code> は TOML inline_table <code>env = { PM_LENS = "1" }</code> を section に書き込む。
-    <code>InstallResult.lens_mode</code> フィールドで RW/Lens を caller が判別可能。
-    既存 RW 登録 → Lens 再インストールは env 追加で flip、その逆は env から PM_LENS=1 を削除して flip back する。</p>
+  <h3>installer.py の PM_LENS / PM_DESKTOP_WRITE 認識</h3>
+  <p><code>install_claude_code()</code> は <code>--env PM_LENS=1</code> (+ <code>PM_DESKTOP_WRITE=1</code>) を
+    <code>claude mcp add</code> に注入、<code>install_codex()</code> は TOML inline_table
+    <code>env = { PM_LENS = "1" }</code> を section に書き込む。
+    <code>InstallResult.lens_mode</code> / <code>InstallResult.desktop_write</code> で caller が role を判別可能。
+    Phase 2 (PMSERV-100) で <code>.mcpb</code> manifest が PM_DESKTOP_WRITE を auto-propagate するため、
+    Desktop ユーザーは bundle drag &amp; drop だけで outbox bridge が成立する。</p>
+</section>
+
+<section class="card" id="outbox">
+  <h2>9. Desktop Outbox (Phase 2 — ADR-019)</h2>
+  <p>Claude Desktop (Lens) は本来 RO だが、<code>PM_DESKTOP_WRITE=1</code> 時に限り
+     <code>~/.pm/desktop/desktop.db</code> という<strong>専用 SQLite</strong> へ append-only で書き込める。
+     main の per-project <code>.pm/memory.db</code> は依然不可触 (Lens 不変条件保持)。
+     書込みは「outbox」として一旦溜まり、Claude Code 側で <code>pm_outbox_pending</code> &rarr;
+     <code>pm_outbox_merge</code> / <code>pm_outbox_reject</code> でレビューして promote する。</p>
+
+  <h3>9.1 Cross-host data flow</h3>
+  <div class="svg-wrap">
+  <svg viewBox="0 0 880 360" xmlns="http://www.w3.org/2000/svg" font-family="ui-monospace, SF Mono, monospace" font-size="12">
+    <defs>
+      <marker id="arrow5" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="strokeWidth">
+        <path d="M0,0 L8,4 L0,8 z" fill="#6d28d9"/>
+      </marker>
+      <marker id="arrow6" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="strokeWidth">
+        <path d="M0,0 L8,4 L0,8 z" fill="#16a34a"/>
+      </marker>
+    </defs>
+
+    <!-- Left: Claude Desktop -->
+    <rect x="20" y="40" width="200" height="80" rx="6" fill="#ede9fe" stroke="#6d28d9" stroke-width="1.5"/>
+    <text x="120" y="62" text-anchor="middle" font-weight="700">Claude Desktop</text>
+    <text x="120" y="80" text-anchor="middle" fill="#666" font-size="10">PM_LENS=1 + PM_DESKTOP_WRITE=1</text>
+    <text x="120" y="96" text-anchor="middle" fill="#6d28d9" font-size="11">pm_outbox_remember</text>
+    <text x="120" y="110" text-anchor="middle" fill="#6d28d9" font-size="11">pm_outbox_log</text>
+
+    <!-- Center: Outbox DB -->
+    <rect x="320" y="40" width="240" height="200" rx="6" fill="#fff" stroke="#6d28d9" stroke-width="2"/>
+    <text x="440" y="62" text-anchor="middle" font-weight="700">~/.pm/desktop/desktop.db</text>
+    <text x="440" y="80" text-anchor="middle" fill="#666" font-size="10">append-only SQLite (PRAGMA user_version=1)</text>
+    <line x1="320" y1="92" x2="560" y2="92" stroke="#ddd"/>
+
+    <text x="335" y="112" font-size="11" font-weight="600">desktop_outbox 行</text>
+    <text x="335" y="128" font-size="10" fill="#444">• host_id / source_session</text>
+    <text x="335" y="142" font-size="10" fill="#444">• type: memory | lesson | log | artifact</text>
+    <text x="335" y="156" font-size="10" fill="#444">• content / tags / source_project</text>
+    <text x="335" y="170" font-size="10" fill="#444">• status: pending → merged | rejected</text>
+    <text x="335" y="184" font-size="10" fill="#444">• merged_to_id / merged_to_path / merged_at</text>
+
+    <line x1="320" y1="196" x2="560" y2="196" stroke="#ddd"/>
+    <text x="335" y="214" font-size="11" font-weight="600" fill="#dc2626">trg_outbox_append_only</text>
+    <text x="335" y="228" font-size="10" fill="#666">immutable columns への UPDATE は BEFORE で ABORT</text>
+
+    <!-- Right: Claude Code -->
+    <rect x="660" y="40" width="200" height="120" rx="6" fill="#dcfce7" stroke="#16a34a" stroke-width="1.5"/>
+    <text x="760" y="62" text-anchor="middle" font-weight="700">Claude Code</text>
+    <text x="760" y="80" text-anchor="middle" fill="#666" font-size="10">Full RW (PM_LENS unset)</text>
+    <text x="760" y="100" text-anchor="middle" fill="#16a34a" font-size="11">pm_outbox_pending</text>
+    <text x="760" y="116" text-anchor="middle" fill="#16a34a" font-size="11">pm_outbox_merge</text>
+    <text x="760" y="132" text-anchor="middle" fill="#16a34a" font-size="11">pm_outbox_reject</text>
+
+    <!-- Bottom: target project main DB -->
+    <rect x="560" y="270" width="280" height="64" rx="6" fill="#dcfce7" stroke="#16a34a" stroke-width="1.5"/>
+    <text x="700" y="292" text-anchor="middle" font-weight="700">target &lt;project&gt;/.pm/memory.db</text>
+    <text x="700" y="308" text-anchor="middle" fill="#666" font-size="10">MemoryStore.save() (memory/lesson)</text>
+    <text x="700" y="322" text-anchor="middle" fill="#666" font-size="10">add_daily_log() (log → daily/YYYY-MM-DD.yaml)</text>
+
+    <!-- Arrows -->
+    <line x1="220" y1="80" x2="320" y2="80" stroke="#6d28d9" stroke-width="1.5" marker-end="url(#arrow5)"/>
+    <text x="240" y="72" font-size="10" fill="#6d28d9">append</text>
+
+    <line x1="660" y1="100" x2="560" y2="120" stroke="#16a34a" stroke-width="1.5" marker-end="url(#arrow6)"/>
+    <text x="580" y="92" font-size="10" fill="#16a34a">poll pending</text>
+
+    <line x1="690" y1="160" x2="690" y2="270" stroke="#16a34a" stroke-width="1.5" marker-end="url(#arrow6)"/>
+    <text x="700" y="220" font-size="10" fill="#16a34a">promote on merge</text>
+
+    <line x1="560" y1="170" x2="560" y2="200" stroke="#6d28d9" stroke-dasharray="3 3"/>
+    <text x="200" y="270" font-size="11" fill="#666" font-weight="600">
+      main &lt;project&gt;/.pm/memory.db は Desktop 側から決して触られない (Lens 不変条件保持)
+    </text>
+  </svg>
+  </div>
+
+  <h3>9.2 状態遷移と invariant</h3>
+  <table>
+    <tr><th>段階</th><th>tool</th><th>結果</th><th>不変条件</th></tr>
+    <tr><td>capture</td><td><code>pm_outbox_remember</code> / <code>pm_outbox_log</code></td><td>desktop.db に INSERT (status=pending)</td><td>main memory.db 不変</td></tr>
+    <tr><td>review</td><td><code>pm_outbox_pending</code></td><td>filter (project/type/status) + paginate</td><td>RO クエリのみ</td></tr>
+    <tr><td>promote</td><td><code>pm_outbox_merge</code></td><td>main project の memory / daily log に追記 → status=merged</td><td>append-only trigger により past 行は immutable</td></tr>
+    <tr><td>discard</td><td><code>pm_outbox_reject</code></td><td>status=rejected + reason 保存</td><td>履歴は失われない (audit trail)</td></tr>
+  </table>
+
+  <div class="callout">
+    <strong>なぜ別 DB か:</strong> Desktop は信頼境界が薄いため (LLM が直接書込み)、main project の memory.db に
+    そのまま書くと「LLM の hallucination が project の正史を汚染する」リスクがある。
+    Outbox を hop 1 段挟むことで、Code 側の human-in-the-loop review が必須化される。
+    append-only SQL trigger は「過去行を後から書き換える攻撃」を DB レイヤで構造的に防ぐ
+    (= Lens RO 構造的不変条件と同じ防御哲学を写像)。
+  </div>
+
+  <h3>9.3 関連 ADR / 実装</h3>
+  <p class="muted">ADR-019 (Phase 2 設計) / ADR-020 (ADR-017 amendment) / ADR-021 (ADR-018 amendment) ·
+     PMSERV-094..104 (実装), PMSERV-100 (manifest 自動伝播), PMSERV-105 (v0.8.0 release) ·
+     outbox.py + tests 30 cases + lens invariant 4 amendment tests (test_lens_mode.py) ·
+     storage 設計: <code>~/.pm/desktop/desktop.db</code> (cross-project shared, project ローカルではない)</p>
 </section>
 
 <footer style="text-align: center; color: var(--muted); font-size: 12px; margin: 24px 0;">
-  Generated 2026-05-20 · pm-server v0.6.2 · WF-025/WF-026 fixes applied (PMSERV-084..087)
+  Generated 2026-05-25 · pm-server v0.8.0 · Phase 2 Desktop Outbox (ADR-019) shipped · 783+ tests · 37 MCP tools
 </footer>
 
 </main>

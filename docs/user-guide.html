@@ -1,0 +1,668 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>PM Server — User Guide (CLI &amp; UX Tips)</title>
+<style>
+:root {
+  --bg: #fafafa;
+  --fg: #1a1a1a;
+  --muted: #666;
+  --line: #ddd;
+  --accent: #0066cc;
+  --ro: #2563eb;
+  --rw: #dc2626;
+  --gate: #d97706;
+  --done: #16a34a;
+  --warn: #f59e0b;
+  --tip: #0ea5e9;
+  --card: #ffffff;
+  --code-bg: #f3f4f6;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+* { box-sizing: border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--fg);
+  margin: 0;
+  line-height: 1.6;
+  font-size: 15px;
+}
+.layout { display: grid; grid-template-columns: 240px 1fr; gap: 24px; max-width: 1280px; margin: 0 auto; padding: 24px; }
+nav.toc {
+  position: sticky;
+  top: 24px;
+  align-self: start;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 16px;
+  font-size: 13px;
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
+}
+nav.toc h3 { margin: 0 0 8px; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+nav.toc ol { list-style: none; padding-left: 0; margin: 0; }
+nav.toc li { margin: 4px 0; }
+nav.toc a { color: var(--fg); text-decoration: none; padding: 4px 8px; display: block; border-radius: 4px; }
+nav.toc a:hover { background: var(--code-bg); color: var(--accent); }
+main { min-width: 0; }
+section.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 24px;
+  margin-bottom: 20px;
+}
+h1 { font-size: 28px; margin-top: 0; }
+h2 { font-size: 22px; margin: 0 0 12px; padding-bottom: 6px; border-bottom: 2px solid var(--accent); }
+h3 { font-size: 16px; margin: 18px 0 8px; }
+h4 { font-size: 14px; margin: 12px 0 6px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+p { margin: 8px 0; }
+.muted { color: var(--muted); font-size: 13px; }
+code { background: var(--code-bg); padding: 2px 6px; border-radius: 3px; font-family: var(--mono); font-size: 13px; }
+pre { background: #0f172a; color: #f1f5f9; padding: 12px 14px; border-radius: 6px; overflow-x: auto; font-family: var(--mono); font-size: 12.5px; line-height: 1.55; }
+pre .prompt { color: #94a3b8; }
+pre .cmd { color: #fbbf24; }
+pre .comment { color: #64748b; font-style: italic; }
+pre .ok { color: #34d399; }
+table { border-collapse: collapse; width: 100%; font-size: 13.5px; margin-top: 8px; }
+th { background: var(--code-bg); text-align: left; padding: 8px 10px; font-weight: 600; border-bottom: 2px solid var(--line); }
+td { padding: 6px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+tr:hover { background: #fafbfc; }
+.badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+.badge-tip { background: #e0f2fe; color: #0369a1; }
+.badge-warn { background: #fef3c7; color: #92400e; }
+.badge-pro { background: #ede9fe; color: #6d28d9; }
+.badge-cli { background: #dcfce7; color: var(--done); }
+.badge-llm { background: #dbeafe; color: var(--ro); }
+.callout { background: #fffbeb; border-left: 4px solid var(--warn); padding: 12px 16px; border-radius: 4px; margin: 12px 0; }
+.callout strong { color: #92400e; }
+.tip { background: #ecfeff; border-left: 4px solid var(--tip); padding: 12px 16px; border-radius: 4px; margin: 12px 0; }
+.tip strong { color: #0369a1; }
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+header.hero { padding: 24px 24px 0; max-width: 1280px; margin: 0 auto; }
+header.hero .subtitle { color: var(--muted); margin-top: 4px; }
+.meta { font-size: 12.5px; color: var(--muted); margin-top: 8px; }
+.cmd-card {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin: 8px 0;
+  background: #fbfdff;
+}
+.cmd-card .cmd-name { font-family: var(--mono); font-weight: 700; color: var(--accent); }
+.cmd-card .cmd-purpose { color: var(--muted); font-size: 13px; margin-left: 8px; }
+.kv { display: grid; grid-template-columns: 140px 1fr; gap: 4px 12px; font-size: 13px; margin-top: 6px; }
+.kv dt { color: var(--muted); font-family: var(--mono); }
+.kv dd { margin: 0; }
+.workflow-day { background: #f8fafc; border: 1px solid var(--line); border-radius: 8px; padding: 16px; margin: 12px 0; }
+.workflow-day h4 { margin-top: 0; color: var(--accent); font-size: 13px; }
+.workflow-step { display: grid; grid-template-columns: 80px 1fr; gap: 10px; margin: 6px 0; align-items: start; font-size: 13px; }
+.workflow-step .when { color: var(--muted); font-family: var(--mono); font-size: 11.5px; }
+.faq-q { font-weight: 600; color: var(--accent); margin-top: 14px; }
+.faq-a { margin-left: 4px; padding-left: 12px; border-left: 2px solid var(--line); }
+</style>
+</head>
+<body>
+<header class="hero">
+  <h1>PM Server — User Guide</h1>
+  <div class="subtitle">CLI コマンド・LLM セッション中の UX Tips・進捗管理のベストプラクティス</div>
+  <div class="meta">バージョン 0.8.0 (2026-05-25) · 関連: <a href="architecture.html">Architecture</a> · <a href="workflow-guide.html">Workflow Guide</a> · <a href="cheatsheet.ja.md">Cheatsheet (ja)</a></div>
+</header>
+
+<div class="layout">
+<nav class="toc">
+  <h3>Sections</h3>
+  <ol>
+    <li><a href="#concepts">1. 基本コンセプト</a></li>
+    <li><a href="#quickstart">2. クイックスタート</a></li>
+    <li><a href="#cli">3. CLI コマンド</a></li>
+    <li><a href="#session">4. 1日のセッションフロー</a></li>
+    <li><a href="#progress">5. 進捗チェック Tips</a></li>
+    <li><a href="#memory">6. メモリ活用</a></li>
+    <li><a href="#issue">7. Issue 管理</a></li>
+    <li><a href="#dashboard">8. Dashboard</a></li>
+    <li><a href="#multihost">9. Multi-Host (Code/Desktop/Codex)</a></li>
+    <li><a href="#outbox">10. Desktop Outbox (Phase 2)</a></li>
+    <li><a href="#hooks">11. Hooks &amp; CLAUDE.md</a></li>
+    <li><a href="#tips">12. 上級 Tips &amp; 落とし穴</a></li>
+    <li><a href="#faq">13. FAQ &amp; トラブルシューティング</a></li>
+  </ol>
+</nav>
+
+<main>
+
+<section class="card" id="concepts">
+  <h2>1. 基本コンセプト — pm-server は 3 つの層から成る</h2>
+  <p>PM Server を効率よく使うために、最初に「<strong>誰が pm-server を呼ぶか</strong>」を整理する。</p>
+  <table>
+    <tr><th>呼び手</th><th>使う経路</th><th>例</th></tr>
+    <tr>
+      <td><span class="badge badge-llm">LLM</span> Claude Code / Desktop</td>
+      <td>MCP ツール (<code>pm_status</code>, <code>pm_add_task</code> 等)</td>
+      <td>「進捗を表示して」と頼むと Claude が <code>pm_status</code> を実行</td>
+    </tr>
+    <tr>
+      <td><span class="badge badge-cli">CLI</span> shell (人間)</td>
+      <td><code>pm-server &lt;subcommand&gt;</code></td>
+      <td>bootstrap・install・migrate・dry-run</td>
+    </tr>
+    <tr>
+      <td><span class="badge badge-pro">Hook</span> Claude Code</td>
+      <td>PostToolUse hook (自動)</td>
+      <td>ツール実行直後に context を pm-server に流す</td>
+    </tr>
+  </table>
+  <div class="tip">
+    <strong>UX の鍵:</strong> 日常運用では <strong>LLM に普通の日本語で頼むだけ</strong>でよい。
+    CLAUDE.md の auto-action rules によって、Claude が必要な <code>pm_*</code> ツールを自動で呼ぶ。
+    CLI を叩くのは <em>セットアップ時と troubleshoot 時に限定される</em>。
+  </div>
+
+  <h3>1.1 用語 mini 辞書</h3>
+  <dl class="kv">
+    <dt>task</dt><dd>作業単位 (todo / in_progress / review / done / blocked) — <code>PMSERV-NNN</code> ID</dd>
+    <dt>issue</dt><dd>task の子として起票される欠陥/改善 — defect は親を auto-revert</dd>
+    <dt>ADR</dt><dd>Architecture Decision Record — 設計判断の永続記録 (<code>ADR-NNN</code>)</dd>
+    <dt>KR</dt><dd>Knowledge Record — research / spec / tradeoff / risk_analysis の構造化記録 (<code>KR-NNN</code>)</dd>
+    <dt>memory</dt><dd>SQLite + FTS5 に保存される observation / insight / lesson</dd>
+    <dt>workflow</dt><dd>テンプレートベースの状態マシン (<code>WF-NNN</code>) — discovery / development / super-research</dd>
+    <dt>outbox</dt><dd>Phase 2 で追加。Desktop ⇄ Code 間の append-only 共有 bridge</dd>
+    <dt>Lens</dt><dd>RO 配布モード (<code>PM_LENS=1</code>) — Desktop/Cowork 等の viewer host 用</dd>
+  </dl>
+</section>
+
+<section class="card" id="quickstart">
+  <h2>2. クイックスタート — 5 分で動かす</h2>
+
+  <h3>2.1 インストール</h3>
+<pre><span class="prompt">$</span> <span class="cmd">pip install pm-server</span>
+<span class="prompt">$</span> <span class="cmd">pm-server install</span>           <span class="comment"># Claude Code に MCP サーバーを登録</span>
+<span class="ok">✓ claude-code: registered pm-server</span>
+
+<span class="prompt">$</span> <span class="cmd">pm-server install-hooks</span>     <span class="comment"># 自動 context 注入の hook を有効化 (任意)</span>
+<span class="ok">✓ installed</span></pre>
+
+  <h3>2.2 プロジェクトの初期化</h3>
+  <p>Claude Code セッションを開いて、初期化を依頼するだけ。</p>
+<pre><span class="prompt">&gt;</span> PM 初期化して
+
+<span class="comment"># Claude が pm_init を実行</span>
+<span class="comment"># project 名・version・phases を自動推定 (discovery.py)</span>
+<span class="comment"># &lt;repo&gt;/.pm/ ディレクトリが作成される</span>
+<span class="ok">✓ Initialized .pm/ for "my-app"</span></pre>
+
+  <h3>2.3 CLAUDE.md ルールの注入</h3>
+  <p>auto-action rules (CLAUDE.md / AGENTS.md) を注入すると、セッション開始時に Claude が自動で
+     <code>pm_status / pm_next / pm_recall</code> を呼ぶようになる。</p>
+<pre><span class="prompt">$</span> <span class="cmd">pm-server update-rules</span>             <span class="comment"># auto detect → 該当 host の rule file を更新</span>
+<span class="prompt">$</span> <span class="cmd">pm-server update-rules --target=all</span> <span class="comment"># 強制的に全 host (CLAUDE.md + AGENTS.md)</span>
+<span class="prompt">$</span> <span class="cmd">pm-server update-rules --dry-run</span>    <span class="comment"># 差分を表示するだけ</span></pre>
+
+  <h3>2.4 動作確認</h3>
+<pre><span class="prompt">&gt;</span> 現在の進捗は？
+<span class="comment"># → pm_status → "Tasks: 0 total — todo:0 in_progress:0 done:0 blocked:0"</span>
+
+<span class="prompt">&gt;</span> "ログイン機能を実装する" タスクを追加して
+<span class="comment"># → pm_add_task → PMSERV-001 が採番される</span>
+
+<span class="prompt">&gt;</span> 次にやるべきことは？
+<span class="comment"># → pm_next → PMSERV-001 が推薦される</span></pre>
+
+  <div class="tip">
+    <strong>動かない時:</strong> <code>pm-server status</code> (CLI) を直接叩いて bootstrap を切り分ける。
+    Claude 側で見えない場合は <code>claude mcp list</code> で MCP 登録を確認、
+    あるいは <code>pm-server install --dry-run</code> で何が起きるか確認。
+  </div>
+</section>
+
+<section class="card" id="cli">
+  <h2>3. CLI コマンド完全リファレンス</h2>
+  <p>CLI コマンドは <strong>セットアップ・診断・自動化スクリプト用</strong>。日常運用では LLM 越し MCP の方が早い。</p>
+
+  <h3>3.1 サーバー管理</h3>
+  <div class="cmd-card">
+    <span class="cmd-name">pm-server install</span><span class="cmd-purpose">— 指定 host に MCP として登録</span>
+    <dl class="kv">
+      <dt>--target</dt><dd><code>claude-code</code> (default) / <code>codex</code> / <code>auto</code> / <code>all</code></dd>
+      <dt>--dry-run</dt><dd>変更内容だけ表示</dd>
+    </dl>
+  </div>
+
+  <div class="cmd-card">
+    <span class="cmd-name">pm-server uninstall</span><span class="cmd-purpose">— 登録を解除</span>
+    <dl class="kv">
+      <dt>--target</dt><dd><code>install</code> と同じ choices</dd>
+      <dt>--dry-run</dt><dd>変更内容だけ表示</dd>
+    </dl>
+  </div>
+
+  <div class="cmd-card">
+    <span class="cmd-name">pm-server migrate</span><span class="cmd-purpose">— 旧 <code>pm-agent</code> からの移行</span>
+  </div>
+
+  <div class="cmd-card">
+    <span class="cmd-name">pm-server serve</span><span class="cmd-purpose">— MCP サーバーを stdio で起動 (Claude Code が内部で呼ぶ)</span>
+  </div>
+
+  <h3>3.2 プロジェクト操作</h3>
+  <div class="cmd-card">
+    <span class="cmd-name">pm-server discover [SCAN_PATH]</span><span class="cmd-purpose">— サブツリーを scan して <code>.pm/</code> を持つ project を一括登録</span>
+    <p class="muted">depth-5 cap + excluded dirs + <code>~/.pm/</code> skip で bounded walk を保証 (PMSERV-081)。
+       単一トランザクションで registry に書き込む (PMSERV-066)。</p>
+  </div>
+
+  <div class="cmd-card">
+    <span class="cmd-name">pm-server status</span><span class="cmd-purpose">— カレント project の summary を表示</span>
+    <p class="muted">CLI からの diagnostics 用。MCP 経由 (<code>pm_status</code>) と同じデータを 1 行ずつ表示する。</p>
+  </div>
+
+  <h3>3.3 ルール / hook 管理</h3>
+  <div class="cmd-card">
+    <span class="cmd-name">pm-server update-rules</span><span class="cmd-purpose">— CLAUDE.md / AGENTS.md に auto-action rules を注入</span>
+    <dl class="kv">
+      <dt>--target</dt><dd><code>auto</code> (default 検出) / <code>claude-code</code> / <code>codex</code> / <code>all</code></dd>
+      <dt>--all</dt><dd>全 registered project に対して実行</dd>
+      <dt>--dry-run</dt><dd>差分のみ表示</dd>
+    </dl>
+  </div>
+
+  <div class="cmd-card">
+    <span class="cmd-name">pm-server update-claudemd</span><span class="cmd-purpose"><span class="badge badge-warn">deprecated</span> v0.6.0 以降 — <code>update-rules</code> の alias</span>
+    <p class="muted">後方互換用。新規スクリプトでは <code>update-rules</code> を使う。</p>
+  </div>
+
+  <div class="cmd-card">
+    <span class="cmd-name">pm-server install-hooks</span><span class="cmd-purpose">— Claude Code settings.json に hook を登録</span>
+  </div>
+  <div class="cmd-card">
+    <span class="cmd-name">pm-server uninstall-hooks</span><span class="cmd-purpose">— hook 登録を解除</span>
+  </div>
+
+  <h3>3.4 補助</h3>
+  <div class="cmd-card">
+    <span class="cmd-name">pm-server context-inject</span><span class="cmd-purpose">— session context block を stdout 出力 (将来の SessionStart hook 用)</span>
+  </div>
+  <div class="cmd-card">
+    <span class="cmd-name">pm-server --version</span><span class="cmd-purpose">— version 確認</span>
+  </div>
+</section>
+
+<section class="card" id="session">
+  <h2>4. 1日のセッションフロー</h2>
+  <p>CLAUDE.md auto-action rules が full deployment されていれば、下記は <strong>Claude が自律的に</strong>進める。
+     人間が叩くのは「タスクを依頼する」「Yes/No を返す」だけ。</p>
+
+  <div class="workflow-day">
+    <h4>朝 — セッション開始</h4>
+    <div class="workflow-step"><span class="when">auto</span><div>Claude が <code>pm_status</code> + <code>pm_next</code> + <code>pm_recall</code> を実行<br><span class="muted">前回 session の summary、blockers、おすすめタスク 3 件が表示される</span></div></div>
+    <div class="workflow-step"><span class="when">user</span><div>「今日は X をやろう」と方針宣言</div></div>
+  </div>
+
+  <div class="workflow-day">
+    <h4>作業中 — タスク着手</h4>
+    <div class="workflow-step"><span class="when">user</span><div>「PMSERV-042 に着手する」</div></div>
+    <div class="workflow-step"><span class="when">auto</span><div>Claude が <code>pm_update_task(..., status="in_progress")</code></div></div>
+    <div class="workflow-step"><span class="when">auto</span><div>重要な発見が出たら Claude が <code>pm_remember</code> で memory 保存<br><span class="muted">compaction 対策。task_id 紐付けで後で <code>pm_recall(task_id=...)</code> から復元可</span></div></div>
+    <div class="workflow-step"><span class="when">user</span><div>設計判断があれば「ADR にしますか？」と Claude が確認 → 承認したら <code>pm_add_decision</code></div></div>
+  </div>
+
+  <div class="workflow-day">
+    <h4>タスク完了 — atomic commit</h4>
+    <div class="workflow-step"><span class="when">user</span><div>「テスト通った、完了」</div></div>
+    <div class="workflow-step"><span class="when">auto</span><div>Claude が <code>pm_update_task(..., status="done")</code></div></div>
+    <div class="workflow-step"><span class="when">auto</span><div><code>all_issues_resolved</code> フラグが返れば「親タスクも完了しますか？」と提案</div></div>
+    <div class="workflow-step"><span class="when">auto</span><div><code>pm_log</code> に成果記録 → <code>pm_next</code> で次タスク推薦</div></div>
+    <div class="workflow-step"><span class="when">user</span><div>atomic commit を作成</div></div>
+  </div>
+
+  <div class="workflow-day">
+    <h4>夕 — セッション終了 / /clear 前</h4>
+    <div class="workflow-step"><span class="when">user</span><div>「session 終了」または <code>/clear</code> 宣言</div></div>
+    <div class="workflow-step"><span class="when">auto</span><div>Claude が <code>pm_session_summary</code> を保存 (次セッション開始時の <code>pm_recall</code> で復元可)</div></div>
+    <div class="workflow-step"><span class="when">auto</span><div>未コミット変更があれば commit を提案</div></div>
+  </div>
+
+  <div class="tip">
+    <strong>compaction 対策のキモ:</strong> Claude Code は context window 圧縮 (compaction) が予測不能なタイミングで起きる。
+    <code>pm_remember</code> を「重要発見の <strong>即時</strong> 保存」として運用すれば、context が消えても <code>pm_recall</code> で
+    再現できる。session 終了時にまとめて保存ではなく <em>発生時点で都度</em> が鉄則。
+  </div>
+</section>
+
+<section class="card" id="progress">
+  <h2>5. 進捗チェック Tips — 4 つのツールの使い分け</h2>
+  <table>
+    <tr><th>知りたいこと</th><th>使うツール</th><th>典型的な聞き方</th></tr>
+    <tr>
+      <td>今 project はどんな状態か (全景)</td>
+      <td><code>pm_status</code></td>
+      <td>「進捗を教えて」「現状サマリは？」</td>
+    </tr>
+    <tr>
+      <td>次に何をすべきか (優先度)</td>
+      <td><code>pm_next</code></td>
+      <td>「次やるべきは？」「Top 3 を出して」</td>
+    </tr>
+    <tr>
+      <td>blocked / 障害になっているもの</td>
+      <td><code>pm_blockers</code></td>
+      <td>「ブロッカーは？」「止まってる作業は？」</td>
+    </tr>
+    <tr>
+      <td>遅延予測・リスク</td>
+      <td><code>pm_risks</code></td>
+      <td>「リスク一覧を出して」「期限ヤバそうなのは？」</td>
+    </tr>
+    <tr>
+      <td>速度・トレンド</td>
+      <td><code>pm_velocity</code></td>
+      <td>「直近 4 週のベロシティは？」</td>
+    </tr>
+    <tr>
+      <td>視覚的に俯瞰したい (HTML)</td>
+      <td><code>pm_dashboard</code></td>
+      <td>「ダッシュボードを HTML で出して」</td>
+    </tr>
+    <tr>
+      <td>特定の絞り込み (priority/tag)</td>
+      <td><code>pm_tasks</code></td>
+      <td>「P1 タスクだけ表示」「tag=installer を絞って」</td>
+    </tr>
+  </table>
+
+  <h3>5.1 「Claude を信頼して状況把握だけお願いする」 pattern</h3>
+<pre><span class="prompt">&gt;</span> 朝の状況確認お願い
+
+<span class="comment"># Claude が auto で実行: pm_status + pm_next + pm_recall + pm_blockers</span>
+<span class="comment"># それぞれの結果を要約して提示</span>
+<span class="comment"># ブロッカーや期限超過があれば警告</span></pre>
+
+  <h3>5.2 specific フィルタの例</h3>
+<pre><span class="prompt">&gt;</span> phase-8 の todo タスクだけ priority 順で出して
+<span class="comment"># → pm_tasks(phase="phase-8", status="todo", sort="priority")</span>
+
+<span class="prompt">&gt;</span> "installer" tag がついてるタスク全部
+<span class="comment"># → pm_tasks(tags=["installer"])</span></pre>
+
+  <div class="tip">
+    <strong>Tips:</strong> <code>pm_status</code> のレスポンスには <code>diagnostics.utils_fingerprint</code> / <code>outbox_pending</code>
+    が含まれる。これは「pm-server バイナリと現在の <code>utils.py</code> が一致するか」「Desktop からの未処理 outbox が何件あるか」を返す。
+    <em>セッション開始時に毎回これらを見れば、stale binary や見落とし outbox を早期発見できる。</em>
+  </div>
+</section>
+
+<section class="card" id="memory">
+  <h2>6. メモリ活用 — pm-server の心臓部</h2>
+  <p>SQLite + FTS5 のメモリ層は「compaction で失われる文脈を永続化する」中核機能。タイミングと粒度がコツ。</p>
+
+  <h3>6.1 type の使い分け</h3>
+  <table>
+    <tr><th>type</th><th>用途</th><th>例</th></tr>
+    <tr><td><code>observation</code></td><td>事実の記録 (中立)</td><td>「API は 429 を返す時 Retry-After header を持つ」</td></tr>
+    <tr><td><code>insight</code></td><td>気付き・仮説 (推論を含む)</td><td>「retry の root cause は upstream の rate limit、自前で 429 を返してない」</td></tr>
+    <tr><td><code>lesson</code></td><td>再発防止 / 教訓</td><td>「外部 API の 429 は upstream か自前か必ず先に切り分ける」</td></tr>
+  </table>
+
+  <h3>6.2 保存の典型 pattern</h3>
+<pre><span class="prompt">&gt;</span> 今の発見を覚えておいて: "X は Y のときだけ動く"
+<span class="comment"># → pm_remember(content="X は Y のときだけ動く", type="insight", tags=["..."])</span>
+
+<span class="prompt">&gt;</span> このタスク (PMSERV-042) に紐付けて記憶: "Z を試したが失敗"
+<span class="comment"># → pm_remember(content="...", task_id="PMSERV-042", type="observation")</span></pre>
+
+  <h3>6.3 想起 (recall) の使い分け</h3>
+  <table>
+    <tr><th>聞き方</th><th>裏で動くツール</th></tr>
+    <tr><td>「前回の続きから」「session 復元」</td><td><code>pm_recall()</code> — last session + recent memories</td></tr>
+    <tr><td>「PMSERV-042 についての memory を全部出して」</td><td><code>pm_recall(task_id="PMSERV-042")</code></td></tr>
+    <tr><td>「retry 周りの記憶を検索」</td><td><code>pm_memory_search(query="retry")</code> — FTS5</td></tr>
+    <tr><td>「tag=auth がついてる insight だけ」</td><td><code>pm_memory_search(tags=["auth"], type="insight")</code></td></tr>
+    <tr><td>「全 project 横断で X を探す」</td><td><code>pm_memory_search(cross_project=True)</code></td></tr>
+  </table>
+
+  <div class="tip">
+    <strong>tag 設計のコツ:</strong> tag は後から検索性を決定する。
+    <code>wf-028-step5</code> のような workflow step 紐付け / <code>brainstorm-2026-05-22</code> のような日付 tag /
+    <code>phase3-vision</code> のような階層 tag を併用すると、後で「あの日のあのトピック」が即発見できる。
+  </div>
+
+  <h3>6.4 cleanup (定期メンテ)</h3>
+<pre><span class="prompt">&gt;</span> 30 日以上前の memory を dry-run で出して
+<span class="comment"># → pm_memory_cleanup(days=30, dry_run=True)</span>
+<span class="comment"># 危険なので default dry_run=True、actual=True で実削除</span></pre>
+</section>
+
+<section class="card" id="issue">
+  <h2>7. Issue 管理 — defect vs enhancement</h2>
+  <p>レビュー中に「課題」を発見した時、<strong>欠陥 (defect)</strong> か <strong>将来改善 (enhancement)</strong> かで挙動が変わる。</p>
+
+  <table>
+    <tr><th></th><th><code>severity=defect</code> (default)</th><th><code>severity=enhancement</code></th></tr>
+    <tr><td>親タスクの status</td><td><strong>auto-revert: done → review</strong></td><td>変更なし</td></tr>
+    <tr><td>warnings[]</td><td><code>parent_reverted</code> を返す</td><td>—</td></tr>
+    <tr><td>phase</td><td>親タスクから自動継承</td><td>親タスクから自動継承</td></tr>
+    <tr><td>使い分け</td><td>品質レビューで「これは直すべき」</td><td>「将来改善・ナイスツーハブ」</td></tr>
+  </table>
+
+  <h3>7.1 典型的な flow</h3>
+<pre><span class="prompt">&gt;</span> PMSERV-042 を完了。
+<span class="comment"># → pm_update_task(..., status="done")</span>
+
+<span class="prompt">&gt;</span> レビュー中に edge case の漏れを発見。issue 起票。
+<span class="comment"># → pm_add_issue(parent_id="PMSERV-042", title="...", severity="defect")</span>
+<span class="comment"># → warnings: [{ "code": "parent_reverted", "message": "PMSERV-042 done → review" }]</span>
+
+<span class="comment"># ⚠ Claude は必ず warnings を user に明示すること (CLAUDE.md ルール)</span>
+
+<span class="prompt">&gt;</span> 欠陥を修正、issue 完了。
+<span class="comment"># → pm_update_task(child_id, status="done")</span>
+<span class="comment"># → all_issues_resolved=true なら「親 PMSERV-042 を done に戻しますか？」と提案</span></pre>
+
+  <div class="callout">
+    <strong>silent な warnings は禁忌:</strong> pm-server は副作用 (parent revert / quality gate 巻き戻し) を
+    <code>warnings[]</code> で必ず返す。Claude がこれを user に提示しないと「バグっぽく見える」事故が起きる
+    (CLAUDE.md auto-action rules で明示的に要求されている)。
+  </div>
+</section>
+
+<section class="card" id="dashboard">
+  <h2>8. Dashboard</h2>
+  <p>HTML / テキスト両形式のダッシュボード。<code>pm_dashboard</code> はカレント project、portfolio dashboard は全 project 横断。</p>
+<pre><span class="prompt">&gt;</span> dashboard を HTML で出力
+<span class="comment"># → pm_dashboard(format="html") → file path を返す</span>
+
+<span class="prompt">&gt;</span> portfolio dashboard を出して
+<span class="comment"># → 全 registered project を集約した HTML を生成</span></pre>
+
+  <h3>8.1 ファイルの場所</h3>
+  <table>
+    <tr><th>scope</th><th>HTML 出力先</th></tr>
+    <tr><td>single project</td><td><code>&lt;project&gt;/.pm/dashboard.html</code></td></tr>
+    <tr><td>portfolio</td><td><code>~/.pm/dashboard.html</code></td></tr>
+  </table>
+
+  <div class="tip">
+    <strong>運用 Tip:</strong> dashboard.html を Mac の Stickies / Notion embed / iOS の Safari 共有 で見る環境を作っておくと、
+    「Code を開かなくても今日の進捗が確認できる」状態になる。Dock の Stage Manager 等にピン留めも有効。
+  </div>
+</section>
+
+<section class="card" id="multihost">
+  <h2>9. Multi-Host 対応 — Claude Code / Desktop / Codex の役割分担</h2>
+
+  <table>
+    <tr><th>Host</th><th>役割</th><th>登録ツール数</th><th>典型シナリオ</th></tr>
+    <tr><td><strong>Claude Code</strong> (CLI)</td><td>Full RW — 主要開発環境</td><td>37 (全部)</td><td>実装、test、commit、PR</td></tr>
+    <tr><td><strong>Claude Desktop</strong></td><td>Lens RO + Outbox bridge</td><td>15 RO + 2 OUTBOX</td><td>iPad/iPhone で進捗確認、新アイデアを Desktop で <code>pm_outbox_remember</code> で書き留めて後で Code から merge</td></tr>
+    <tr><td><strong>Claude Cowork</strong></td><td>Lens RO のみ</td><td>15 RO</td><td>passive viewer (進捗確認のみ)</td></tr>
+    <tr><td><strong>Codex CLI</strong></td><td>Full RW (AGENTS.md 経由)</td><td>37</td><td>Code を補完する secondary CLI、cross-check 用</td></tr>
+  </table>
+
+  <h3>9.1 install / update のターゲット切り替え</h3>
+<pre><span class="prompt">$</span> <span class="cmd">pm-server install --target=auto</span>      <span class="comment"># 環境を自動検出</span>
+<span class="prompt">$</span> <span class="cmd">pm-server install --target=all</span>       <span class="comment"># 全 host (Code + Codex)</span>
+<span class="prompt">$</span> <span class="cmd">pm-server install --target=codex</span>     <span class="comment"># Codex CLI のみ</span>
+
+<span class="prompt">$</span> <span class="cmd">pm-server update-rules --target=all --all</span>  <span class="comment"># 全 host × 全 project の rule 注入</span></pre>
+
+  <div class="tip">
+    <strong>auto detection の仕組み:</strong> <code>installer.py</code> は filesystem (<code>~/.claude/</code>, <code>~/.codex/</code>)、
+    marker file、環境変数 (<code>CLAUDE_*</code>, <code>CODEX_*</code>) を順に確認する。検出失敗時は <code>claude-code</code>
+    にフォールバックし、<code>detection_source: "fallback"</code> warning を出す。
+  </div>
+</section>
+
+<section class="card" id="outbox">
+  <h2>10. Desktop Outbox (Phase 2) — Desktop ⇄ Code の bridge</h2>
+  <p>Claude Desktop は本来 RO だが、Phase 2 (ADR-019) で「<strong>専用 outbox DB に append-only で書ける</strong>」拡張が入った。
+     main の <code>.pm/memory.db</code> は不可触のまま、Desktop ユーザーが「あとで Code 側で memory に取り込みたいアイデア」を
+     その場で保存できる。</p>
+
+  <h3>10.1 Desktop 側 — 思いついた瞬間に保存</h3>
+<pre><span class="prompt">&gt;</span> (Desktop で) このアイデアを覚えておいて: "X を Y で実装したい"
+<span class="comment"># → pm_outbox_remember(content="...", type="memory", source_project="/path/to/my-app")</span>
+<span class="comment"># → ~/.pm/desktop/desktop.db に append (status=pending)</span>
+
+<span class="prompt">&gt;</span> (Desktop で) 今日のメモ: "Z に着手"
+<span class="comment"># → pm_outbox_log(entry="Z に着手", category="progress")</span></pre>
+
+  <h3>10.2 Code 側 — レビューして promote</h3>
+<pre><span class="prompt">&gt;</span> (Code で) Desktop 未処理を見せて
+<span class="comment"># → pm_outbox_pending() → status=pending の一覧 (paginated, limit=50)</span>
+
+<span class="prompt">&gt;</span> id=3, 5, 7 を my-app project に merge
+<span class="comment"># → pm_outbox_merge(ids=[3, 5, 7], target_project="/path/to/my-app")</span>
+<span class="comment"># type=memory/lesson → MemoryStore.save()</span>
+<span class="comment"># type=log → daily/YYYY-MM-DD.yaml に追記</span>
+
+<span class="prompt">&gt;</span> id=4 は要らない、reject
+<span class="comment"># → pm_outbox_reject(id=4, reason="duplicate of memory:120")</span></pre>
+
+  <div class="callout">
+    <strong>append-only invariant:</strong> outbox の行は INSERT 後、<code>status</code> / <code>merged_to_*</code> / <code>reject_reason</code>
+    以外は SQL trigger によって UPDATE 不能。「過去ログ改ざん」攻撃を DB レイヤで防ぐ。
+    詳細は <a href="architecture.html#outbox">Architecture Section 9</a>。
+  </div>
+
+  <h3>10.3 manifest 自動伝播 (v0.8.0)</h3>
+  <p>v0.8.0 の <code>.mcpb</code> manifest は <code>PM_DESKTOP_WRITE=1</code> を自動 propagate する (PMSERV-100)。
+     Desktop ユーザーは bundle を drag &amp; drop するだけで outbox bridge が成立する。</p>
+</section>
+
+<section class="card" id="hooks">
+  <h2>11. Hooks &amp; CLAUDE.md — pm-server を「自律」させる 2 つの経路</h2>
+  <p>pm-server が「ユーザーが叩かないのに動く」のは <strong>2 つの違う仕組み</strong>のおかげ。</p>
+
+  <h3>11.1 CLAUDE.md auto-action rules (LLM レイヤ)</h3>
+  <p><code>pm-server update-rules</code> が CLAUDE.md / AGENTS.md に注入する「自動行動ルール」セクション。
+     Claude が prompt 解釈時にこれを参照し、適切なタイミングで <code>pm_*</code> ツールを発火する。</p>
+  <p class="muted">例: 「セッション開始時に <code>pm_status / pm_next / pm_recall</code> を実行する」「タスクに着手する前に in_progress に変更する」等。</p>
+
+  <h3>11.2 Claude Code hooks (ランタイムレイヤ)</h3>
+  <p><code>pm-server install-hooks</code> が <code>~/.claude/settings.json</code> に登録する PostToolUse hook。
+     ツール実行<strong>直後</strong>に pm-server がコールバックされ、context を memory に転写したり diagnostic を更新する。</p>
+
+  <h3>11.3 二経路の使い分け</h3>
+  <table>
+    <tr><th>レイヤ</th><th>強み</th><th>弱み</th></tr>
+    <tr><td>CLAUDE.md rule</td><td>LLM の判断を介す柔軟性</td><td>compaction で rule が一時的に弱まる可能性</td></tr>
+    <tr><td>Hooks</td><td>確実な発火 (LLM 判断なし)</td><td>柔軟性なし (yes/no の発火のみ)</td></tr>
+  </table>
+  <div class="tip">
+    <strong>推奨:</strong> 両方有効化する。<code>update-rules</code> で柔軟性を、<code>install-hooks</code> で確実性を
+    それぞれカバーする <em>defense in depth</em> 構成。
+  </div>
+</section>
+
+<section class="card" id="tips">
+  <h2>12. 上級 Tips &amp; よくある落とし穴</h2>
+
+  <h3>12.1 「複数 project を扱う日」のお作法</h3>
+  <p><code>resolve_project_path()</code> は cwd から最も近い <code>.pm/</code> を探す。
+     別 project に切り替える時は <strong>必ず cd してから</strong> Claude に頼むか、明示的に <code>project_path</code> を指定する。</p>
+<pre><span class="prompt">&gt;</span> /Users/me/repo-B の pm_status を出して
+<span class="comment"># → pm_status(project_path="/Users/me/repo-B")</span></pre>
+
+  <h3>12.2 <code>pm_status.diagnostics</code> を毎朝チェック</h3>
+  <ul>
+    <li><code>utils_fingerprint.stale</code>: 旧 binary が cache されてないか</li>
+    <li><code>builtin_templates_dir.exists</code>: workflow テンプレートが壊れてないか</li>
+    <li><code>outbox_pending</code>: Desktop からの未処理アイデアが溜まってないか</li>
+  </ul>
+
+  <h3>12.3 cross_project 検索を有効活用</h3>
+  <p>「過去の project でこれと似たことやらなかったか」を <code>pm_memory_search(cross_project=True)</code> で全 project 横断検索。
+     <em>再発明を防ぐ唯一の手段</em>。</p>
+
+  <h3>12.4 quote するなら ID で</h3>
+  <p>memory の <code>content</code> 内で他の memory / ADR / KR を参照する時は <code>memory:152</code> / <code>ADR-019</code> /
+     <code>KR-005</code> の形式で書く。後で <code>pm_memory_search("ADR-019")</code> で逆引きできる。</p>
+
+  <h3>12.5 YAML を直接編集しない</h3>
+  <p><code>.pm/*.yaml</code> は基本的に MCP ツール経由で書き換える。手動編集が必要な場合は <strong>commit 前にロード</strong>
+     (<code>pm_status</code> 等) して schema 妥当性を確認すること。</p>
+
+  <h3>12.6 commit 粒度</h3>
+  <p>1 task = 1 commit (atomic) を厳守すると <code>pm_velocity</code> の精度が上がる。
+     PR 単位ではなく task 単位で commit を切る (CLAUDE.md rule)。</p>
+</section>
+
+<section class="card" id="faq">
+  <h2>13. FAQ &amp; トラブルシューティング</h2>
+
+  <p class="faq-q">Q. <code>claude mcp list</code> に pm-server が出ない</p>
+  <p class="faq-a">A. <code>pm-server install --dry-run</code> で何が起きるか確認、必要なら <code>pm-server install</code> 再実行。
+     <code>~/.claude/mcp_servers.json</code> も直接 grep してみる。</p>
+
+  <p class="faq-q">Q. Claude が auto で <code>pm_status</code> を呼んでくれない</p>
+  <p class="faq-a">A. CLAUDE.md の auto-action rules セクションが古いか欠落している可能性。
+     <code>pm-server update-rules</code> を実行。global CLAUDE.md (<code>~/.claude/CLAUDE.md</code>) と project CLAUDE.md
+     の両方を確認する。</p>
+
+  <p class="faq-q">Q. <code>pm_recall</code> が前回 session を返さない</p>
+  <p class="faq-a">A. 前回 <code>pm_session_summary</code> が呼ばれていない可能性。
+     CLAUDE.md rule に「<code>/clear</code> 前に <code>pm_session_summary</code>」とあるが、
+     クラッシュ等で呼ばれない時は <code>~/.pm/memory.db</code> に session が残っているか
+     <code>sqlite3 ... "select session_id from session_summaries"</code> で直接確認できる。</p>
+
+  <p class="faq-q">Q. Desktop で <code>pm_outbox_remember</code> がない</p>
+  <p class="faq-a">A. <code>PM_DESKTOP_WRITE=1</code> が立ってない。v0.8.0 .mcpb なら manifest で自動伝播されるが、
+     既存の旧 config を手動更新する必要がある場合は <code>claude_desktop_config.json</code> の env に
+     <code>PM_DESKTOP_WRITE</code> を追加する。</p>
+
+  <p class="faq-q">Q. WAL sidecar (<code>memory.db-shm</code>) が大量に生成される</p>
+  <p class="faq-a">A. v0.7.0+ で Lens モードでは <code>?mode=ro&amp;immutable=1</code> で接続するため発生しないはず
+     (PMSERV-080)。発生する場合は pm-server の version を <code>pm-server --version</code> で確認。</p>
+
+  <p class="faq-q">Q. <code>pm_add_issue(severity=defect)</code> で親 task が done に戻った警告を見逃した</p>
+  <p class="faq-a">A. CLAUDE.md rule で warnings[] を明示するよう書かれているが、Claude が拾い損ねる場合がある。
+     疑わしい時は <code>pm_tasks(parent_id="PMSERV-XXX")</code> で親と子の整合性を確認。</p>
+
+  <p class="faq-q">Q. workflow を間違えて start してしまった</p>
+  <p class="faq-a">A. <code>pm_workflow_abandon</code> で放棄できる (履歴は残る)。state は preserve されるので、
+     後で <code>pm_workflow_list(status="abandoned")</code> で見返せる。</p>
+
+  <p class="faq-q">Q. cross-project 検索が遅い</p>
+  <p class="faq-a">A. <code>~/.pm/memory.db</code> が大きくなりすぎている可能性。
+     <code>pm_memory_stats</code> でサイズ確認後、<code>pm_memory_cleanup(days=180)</code> で古い observation を整理。</p>
+
+  <h3>13.1 もっと深く知りたい時</h3>
+  <ul>
+    <li>内部実装 → <a href="architecture.html">Architecture &amp; Behavior</a></li>
+    <li>workflow テンプレート作成 → <a href="workflow-guide.html">Workflow Guide</a></li>
+    <li>全 MCP ツール一覧 (簡潔版) → <a href="cheatsheet.ja.md">Cheatsheet (ja)</a></li>
+    <li>設計判断の経緯 → <a href="design.md">design.md</a></li>
+  </ul>
+</section>
+
+<footer style="text-align: center; color: var(--muted); font-size: 12px; margin: 24px 0;">
+  PM Server v0.8.0 · User Guide · 2026-05-25
+</footer>
+
+</main>
+</div>
+</body>
+</html>
