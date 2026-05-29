@@ -25,6 +25,7 @@ from pm_server.rules import (
     TARGET_FILES,
     TEMPLATE_VERSION,
     InjectResult,
+    InjectStatus,
     InjectSummary,
     _has_pm_marker,
     detect_hosts,
@@ -642,6 +643,19 @@ class TestAggregateOverallStatus:
         from pm_server.rules import _aggregate_overall_status
 
         assert _aggregate_overall_status([]) == "skipped"
+
+    def test_inject_status_priority_covers_all_statuses(self):
+        """PMSERV-110: every InjectStatus member must have a priority slot, so
+        _aggregate_overall_status never falls through to the empty-results
+        sentinel for a non-empty result list. Guards the InjectStatus Literal
+        and _INJECT_STATUS_PRIORITY against drifting apart (mirrors the
+        installer.InstallStatus drift guard)."""
+        from typing import get_args
+
+        from pm_server.rules import _INJECT_STATUS_PRIORITY
+
+        assert set(_INJECT_STATUS_PRIORITY) == set(get_args(InjectStatus))
+        assert len(_INJECT_STATUS_PRIORITY) == len(get_args(InjectStatus))  # no dupes
 
 
 class TestCliUpdateRules:

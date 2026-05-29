@@ -17,6 +17,7 @@ import re
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
 from .utils import _atomic_write_text, _codex_config_path, _timestamped_backup
 
@@ -366,6 +367,22 @@ def detect_hosts(project_root: Path) -> tuple[list[str], str]:
     return ["claude-code"], "fallback"
 
 
+#: The statuses a single rule-file injection can yield. Annotating
+#: ``InjectResult.status`` (and the aggregate ``InjectSummary.overall_status``)
+#: with this Literal pushes validation to the type checker, mirroring
+#: ``installer.InstallStatus`` (PMSERV-110 / PMSERV-054 follow-up). Note the
+#: aggregate never surfaces ``"appended"`` — ``_aggregate_overall_status``
+#: collapses it into ``"updated"`` — but a single shared Literal keeps the
+#: vocabulary in one place; the aggregate value is a documented subset.
+InjectStatus = Literal[
+    "created",
+    "appended",
+    "updated",
+    "skipped",
+    "failed",
+]
+
+
 @dataclass(frozen=True)
 class InjectResult:
     """Outcome of injecting PM Server rules into a single rule file.
@@ -393,7 +410,7 @@ class InjectResult:
 
     target_file: str
     host: str
-    status: str
+    status: InjectStatus
     message: str
     backup_path: Path | None = None
     is_dry_run: bool = False
@@ -422,7 +439,7 @@ class InjectSummary:
     detection_source: str = "explicit"
     created: list[str] = field(default_factory=list)
     updated: list[str] = field(default_factory=list)
-    overall_status: str = "skipped"
+    overall_status: InjectStatus = "skipped"
 
 
 def _inject_into_file(
@@ -572,14 +589,31 @@ def _safe_inject(path: Path, host: str, *, dry_run: bool) -> InjectResult:
         )
 
 
-def _aggregate_overall_status(results: list[InjectResult]) -> str:
+#: Aggregation priority for ``_aggregate_overall_status`` (worst → best).
+#: Typed against :data:`InjectStatus` so a stray value is a type error;
+#: ``test_inject_status_priority_covers_all_statuses`` guards the inverse
+#: (a status added to the Literal without a priority slot) (PMSERV-110).
+_INJECT_STATUS_PRIORITY: tuple[InjectStatus, ...] = (
+    "failed",
+    "skipped",
+    "updated",
+    "appended",
+    "created",
+)
+
+
+def _aggregate_overall_status(results: list[InjectResult]) -> InjectStatus:
     """Compute ``InjectSummary.overall_status`` with priority order
-    ``failed > skipped > updated > created`` (cross-check D1)."""
+    ``failed > skipped > updated > created`` (cross-check D1).
+
+    ``"appended"`` collapses to ``"updated"`` in the aggregate since both
+    represent on-disk modification of an existing file, so the returned
+    value is always one of ``created/updated/skipped/failed`` — a documented
+    subset of :data:`InjectStatus`.
+    """
     statuses = {r.status for r in results}
-    for level in ("failed", "skipped", "updated", "appended", "created"):
+    for level in _INJECT_STATUS_PRIORITY:
         if level in statuses:
-            # Collapse "appended" → "updated" for the aggregate, since
-            # both represent on-disk modification of an existing file.
             return "updated" if level == "appended" else level
     return "skipped"
 
