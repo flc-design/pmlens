@@ -384,9 +384,10 @@ class InjectResult:
             exclusively by ``__main__._print_inject_summary`` (PMSERV-044
             cross-check R6, applies PMSERV-039 L1 lesson).
         backup_path: Path to ``.bak.<timestamp>`` if created, else None.
-            CLAUDE.md does NOT get a backup in v0.5.0 (v0.4.0 parity);
-            AGENTS.md always does (ADR-008 #11). Symmetrising is tracked
-            in PMSERV-058 (still pending).
+            Both CLAUDE.md and AGENTS.md are backed up before an existing
+            file is overwritten (PMSERV-058 / ADR-008 amendment A5
+            symmetrised the former v0.5.0 CLAUDE.md no-backup behaviour).
+            ``None`` for newly created files and dry runs.
         is_dry_run: True if no on-disk side effects occurred.
     """
 
@@ -433,10 +434,11 @@ def _inject_into_file(
     """Inject the pm-server marker section into a single rule file.
 
     Generalises the v0.4.x ``update_claudemd`` "always-replace"
-    semantics to any rule file. Per ADR-008 #11 a timestamped backup
-    is created for ``AGENTS.md`` only — ``CLAUDE.md`` keeps the v0.4.0
-    no-backup behaviour for compat (deprecation timeline in ADR-008
-    amendment).
+    semantics to any rule file. A timestamped ``.bak.<timestamp>`` is
+    created before overwriting any *existing* rule file — both
+    ``CLAUDE.md`` and ``AGENTS.md`` (PMSERV-058 / ADR-008 amendment A5,
+    which retired the v0.5.0 CLAUDE.md no-backup asymmetry). Newly created
+    files have nothing to back up.
 
     Returned status reflects on-disk transition:
         * ``"created"`` — file did not exist
@@ -512,9 +514,11 @@ def _inject_into_file(
         status = "appended"
         message = f"appended PM Server rules to {target_file}"
 
-    # Backup before write — AGENTS.md only (ADR-008 #11; v0.5.0 asymmetry)
+    # Backup before write — for every existing rule file (PMSERV-058 /
+    # ADR-008 amendment A5: symmetrise CLAUDE.md with AGENTS.md). New files
+    # take the create path above and need no backup.
     backup_path: Path | None = None
-    if not dry_run and target_file == "AGENTS.md":
+    if not dry_run:
         try:
             backup_path = _timestamped_backup(resolved)
         except OSError as e:

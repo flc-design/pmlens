@@ -330,8 +330,9 @@ class TestInjectPmRules:
     """``inject_pm_rules`` orchestrator: target dispatch + per-host inject.
 
     Covers the full 4 detection scenarios × {explicit/auto} matrix plus
-    dry-run, backup asymmetry, partial-failure isolation, and the
-    user-described UC8 acceptance scenario.
+    dry-run, backup symmetry (CLAUDE.md + AGENTS.md, PMSERV-058),
+    partial-failure isolation, and the user-described UC8 acceptance
+    scenario.
     """
 
     # --- target="claude-code" (single-host explicit) ------------------
@@ -346,7 +347,7 @@ class TestInjectPmRules:
         assert len(summary.results) == 1
         assert summary.results[0].host == "claude-code"
         assert summary.results[0].is_dry_run is False
-        # CLAUDE.md does NOT get a backup (v0.5.0 asymmetry per ADR-008 #11)
+        # No backup for a *new* file (nothing to back up)
         assert summary.results[0].backup_path is None
 
     def test_claude_code_target_updates_existing_with_old_marker(self, tmp_path):
@@ -374,7 +375,32 @@ class TestInjectPmRules:
         assert "# Existing project notes" in new_content
         assert "<!-- pm-server:begin" in new_content
 
-    # --- target="codex" (AGENTS.md path + backup asymmetry) -----------
+    def test_claude_code_target_creates_backup_when_claude_md_exists(self, tmp_path):
+        # PMSERV-058 / ADR-008 amendment A5: CLAUDE.md is now backed up before
+        # an existing file is overwritten, symmetric with AGENTS.md.
+        (tmp_path / "CLAUDE.md").write_text(
+            "# Header\n\n<!-- pm-server:begin v=0 -->\nold\n<!-- pm-server:end -->\n"
+        )
+
+        summary = inject_pm_rules(tmp_path, target="claude-code")
+
+        assert summary.overall_status == "updated"
+        assert summary.results[0].backup_path is not None
+        assert summary.results[0].backup_path.exists()
+        assert summary.results[0].backup_path.name.startswith("CLAUDE.md.bak.")
+
+    def test_claude_code_target_no_backup_in_dry_run(self, tmp_path):
+        # Dry-run symmetry: no backup, no write (PMSERV-058).
+        (tmp_path / "CLAUDE.md").write_text(
+            f"<!-- pm-server:begin v={TEMPLATE_VERSION} -->\nx\n<!-- pm-server:end -->\n"
+        )
+
+        summary = inject_pm_rules(tmp_path, target="claude-code", dry_run=True)
+
+        assert summary.results[0].backup_path is None
+        assert list(tmp_path.glob("CLAUDE.md.bak.*")) == []
+
+    # --- target="codex" (AGENTS.md path + backup symmetry) ------------
 
     def test_codex_target_creates_agents_md_no_backup_for_new_file(self, tmp_path):
         summary = inject_pm_rules(tmp_path, target="codex")
