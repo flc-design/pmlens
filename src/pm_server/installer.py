@@ -31,6 +31,7 @@ import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
 import tomlkit
 
@@ -67,6 +68,20 @@ def _desktop_write_mode_active() -> bool:
 # --- Result types ---------------------------------------------------------
 
 
+#: The statuses a single-host (un)install can yield. Annotating
+#: ``InstallResult.status`` with this Literal pushes validation to the type
+#: checker: every ``InstallResult(status=...)`` construction site is checked
+#: statically, so the runtime "unexpected value" fallback that used to guard
+#: ``InstallSummary.overall_status`` is no longer load-bearing (PMSERV-054).
+InstallStatus = Literal[
+    "installed",
+    "uninstalled",
+    "already_registered",
+    "skipped",
+    "failed",
+]
+
+
 @dataclass(frozen=True)
 class InstallResult:
     """Outcome of (un)registering pm-server in a single host.
@@ -89,11 +104,24 @@ class InstallResult:
     """
 
     target: str
-    status: str
+    status: InstallStatus
     message: str
     backup_path: str | None = None
     is_dry_run: bool = False
     lens_mode: bool = False
+
+
+#: Aggregation priority for ``InstallSummary.overall_status`` — most to least
+#: significant. Typed against :data:`InstallStatus` so a stray value is a type
+#: error; ``test_status_priority_covers_all_statuses`` guards the inverse
+#: (a status added to the Literal but not given a priority slot) (PMSERV-054).
+_STATUS_PRIORITY: tuple[InstallStatus, ...] = (
+    "failed",
+    "installed",
+    "uninstalled",
+    "already_registered",
+    "skipped",
+)
 
 
 @dataclass(frozen=True)
@@ -103,13 +131,19 @@ class InstallSummary:
     results: list[InstallResult] = field(default_factory=list)
 
     @property
-    def overall_status(self) -> str:
+    def overall_status(self) -> InstallStatus:
         """Aggregate status across hosts.
 
-        Priority order:
-            failed > installed > uninstalled > already_registered > skipped.
+        Priority order: failed > installed > uninstalled >
+        already_registered > skipped (see :data:`_STATUS_PRIORITY`).
+
+        Returns ``"skipped"`` for an empty summary. Because every
+        ``InstallResult.status`` is a valid :data:`InstallStatus` (enforced
+        statically), a non-empty summary always matches one priority level —
+        the final ``return`` is reached only when there are no results, not
+        as a runtime defense against an unexpected value (PMSERV-054).
         """
-        for level in ("failed", "installed", "uninstalled", "already_registered", "skipped"):
+        for level in _STATUS_PRIORITY:
             if any(r.status == level for r in self.results):
                 return level
         return "skipped"

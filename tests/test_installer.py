@@ -11,6 +11,7 @@ import tomlkit
 
 from pm_server.installer import (
     InstallResult,
+    InstallStatus,
     InstallSummary,
     install,
     install_claude_code,
@@ -525,6 +526,23 @@ class TestInstallSummary:
             ]
         )
         assert s.overall_status == "installed"
+
+    def test_overall_status_empty_summary_is_skipped(self):
+        """An empty summary resolves to 'skipped' — the only surviving role of
+        the final return now that InstallStatus is a Literal (PMSERV-054)."""
+        assert InstallSummary().overall_status == "skipped"
+
+    def test_status_priority_covers_all_statuses(self):
+        """PMSERV-054: every InstallStatus member must have a priority slot, so
+        overall_status can never fall through to the empty-summary sentinel for
+        a *non-empty* summary. Guards against the Literal and _STATUS_PRIORITY
+        drifting apart."""
+        from typing import get_args
+
+        from pm_server.installer import _STATUS_PRIORITY
+
+        assert set(_STATUS_PRIORITY) == set(get_args(InstallStatus))
+        assert len(_STATUS_PRIORITY) == len(get_args(InstallStatus))  # no dupes
 
     def test_install_result_is_dry_run_default_false(self):
         """is_dry_run defaults to False; positional construction stays compatible (PMSERV-039)."""
