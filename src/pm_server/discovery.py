@@ -6,6 +6,7 @@ import json
 import os
 import tomllib
 from pathlib import Path
+from typing import NamedTuple
 
 # Hard cap when reading .git/config as text (defensive against a
 # pathologically large or crafted file). 1 MiB is far beyond any real
@@ -163,11 +164,31 @@ def detect_project_info(project_path: Path) -> dict:
     return info
 
 
-def discover_projects(
+class DiscoveryResult(NamedTuple):
+    """Outcome of a bounded project scan (:func:`scan_projects`).
+
+    Attributes:
+        projects: Discovered project roots, each ``{"path", "name"}``. This
+            is the historical return value of :func:`discover_projects`.
+        depth_capped: Directories that were *not* descended into solely
+            because they sat at ``max_depth`` (after excluded-name and
+            global-``~/.pm`` filtering). A non-empty list means projects
+            deeper than the cap may have been missed — callers should warn
+            the user rather than report "found nothing" silently
+            (PMSERV-089, WF-026 FINDING-H).
+        max_depth: The depth cap that was applied to this scan.
+    """
+
+    projects: list[dict]
+    depth_capped: list[str]
+    max_depth: int
+
+
+def scan_projects(
     scan_path: Path,
     *,
     max_depth: int = _DISCOVERY_MAX_DEPTH,
-) -> list[dict]:
+) -> DiscoveryResult:
     """Recursively scan for projects with ``.pm/project.yaml``.
 
     The walk is bounded to defend against pathological inputs and to avoid
@@ -183,12 +204,18 @@ def discover_projects(
       must never be enumerated as one, especially under Desktop/Cowork.
     * **Symlinks** are not followed (``os.walk(followlinks=False)``) to
       prevent cycles and escapes via attacker-influenced links.
+
+    Unlike :func:`discover_projects`, the returned :class:`DiscoveryResult`
+    also reports the directories skipped *purely* because of ``max_depth``
+    (``depth_capped``) so callers can surface that a deeper project may have
+    gone undetected instead of failing silently.
     """
     found: list[dict] = []
+    depth_capped: list[str] = []
     scan_path = scan_path.expanduser().resolve()
 
     if not scan_path.is_dir():
-        return found
+        return DiscoveryResult(projects=found, depth_capped=depth_capped, max_depth=max_depth)
 
     try:
         global_pm = (Path.home() / ".pm").resolve()
@@ -219,15 +246,34 @@ def discover_projects(
         for d in dirnames:
             if d in _DISCOVERY_EXCLUDED_DIRS or d == ".pm":
                 continue
-            if depth + 1 > max_depth:
-                continue
             if global_pm is not None:
                 try:
                     if (current_path / d).resolve() == global_pm:
                         continue
                 except OSError:
                     continue
+            # Depth-capping is the *last* filter so that only directories we
+            # would otherwise have descended into are recorded — never an
+            # excluded-name dir or the global ~/.pm (PMSERV-089).
+            if depth + 1 > max_depth:
+                depth_capped.append(str(current_path / d))
+                continue
             pruned.append(d)
         dirnames[:] = pruned
 
-    return found
+    return DiscoveryResult(projects=found, depth_capped=depth_capped, max_depth=max_depth)
+
+
+def discover_projects(
+    scan_path: Path,
+    *,
+    max_depth: int = _DISCOVERY_MAX_DEPTH,
+) -> list[dict]:
+    """Recursively scan for projects with ``.pm/project.yaml``.
+
+    Backward-compatible convenience wrapper that returns only the list of
+    discovered project roots. Use :func:`scan_projects` when you also need
+    the depth-cap diagnostic (``DiscoveryResult.depth_capped``) to warn the
+    user that deeper projects may have been skipped.
+    """
+    return scan_projects(scan_path, max_depth=max_depth).projects

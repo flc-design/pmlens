@@ -221,6 +221,34 @@ class TestPmDiscover:
     def test_discover_empty(self, tmp_path):
         result = pm_discover(scan_path=str(tmp_path))
         assert result["found"] == 0
+        # PMSERV-089: warnings key is always present, empty when nothing skipped.
+        assert result["warnings"] == []
+
+    def test_discover_emits_depth_cap_warning(self, tmp_path):
+        """PMSERV-089 (WF-026 FINDING-H): a project deeper than the depth cap
+        must not be dropped silently — pm_discover emits a structured warning
+        even though it finds nothing to register.
+        """
+        pm = tmp_path / "a" / "b" / "c" / "d" / "e" / "f" / "deep" / ".pm"
+        pm.mkdir(parents=True)
+        (pm / "project.yaml").write_text("name: deep\n")
+
+        result = pm_discover(scan_path=str(tmp_path))
+        assert result["found"] == 0
+        codes = {w["code"] for w in result["warnings"]}
+        assert "discover_depth_capped" in codes
+        warning = next(w for w in result["warnings"] if w["code"] == "discover_depth_capped")
+        assert warning["level"] == "info"
+        assert "remediation" in warning
+
+    def test_discover_no_warning_when_within_cap(self, tmp_path):
+        pm = tmp_path / "shallow" / ".pm"
+        pm.mkdir(parents=True)
+        (pm / "project.yaml").write_text("name: shallow\n")
+
+        result = pm_discover(scan_path=str(tmp_path))
+        assert result["found"] == 1
+        assert result["warnings"] == []
 
     def test_discover_batches_save_into_one_call(self, tmp_path, monkeypatch):
         """PMSERV-066: ``pm_discover`` must commit N new entries with a

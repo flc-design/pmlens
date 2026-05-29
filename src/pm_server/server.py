@@ -10,7 +10,7 @@ from pathlib import Path
 from fastmcp import FastMCP
 
 from . import storage as _storage
-from .discovery import detect_project_info, discover_projects
+from .discovery import detect_project_info, scan_projects
 from .memory import MemoryStore, _has_pm_server_schema
 from .models import (
     ConfidenceLevel,
@@ -1591,14 +1591,46 @@ def pm_discover(scan_path: str = ".") -> dict:
     This is the same "lift the lock one level up and call raw load/save
     directly" idiom established by ADR-012 for ``pm_add_issue`` — see
     ``storage.py`` module docstring for the compound-op discipline.
+
+    The response always contains a ``warnings`` list. When the bounded walk
+    skipped directories purely because of the depth cap (PMSERV-089,
+    WF-026 FINDING-H), a ``discover_depth_capped`` warning is emitted so the
+    caller can tell the user that a project deeper than the cap may have
+    gone undetected — rather than reporting "found nothing" silently.
     """
-    found = discover_projects(Path(scan_path))
+    scan = scan_projects(Path(scan_path))
+    found = scan.projects
+
+    warnings: list[dict] = []
+    if scan.depth_capped:
+        n = len(scan.depth_capped)
+        sample = scan.depth_capped[:3]
+        more = f"（ほか {n - len(sample)} 件）" if n > len(sample) else ""
+        warnings.append(
+            _build_warning(
+                level="info",
+                code="discover_depth_capped",
+                message=(
+                    f"探索の深さ上限（{scan.max_depth} 階層）により {n} 個の"
+                    f"ディレクトリをスキャンしませんでした。これより深い場所にある "
+                    f".pm プロジェクトは検出されていない可能性があります。"
+                    f"対象例: {', '.join(sample)}{more}"
+                ),
+                remediation=(
+                    "対象プロジェクトがこれより深い階層にある場合は、scan_path を"
+                    "そのプロジェクトの近くに指定して pm_discover を再実行するか、"
+                    "そのプロジェクト内で pm_init を実行して手動登録してください。"
+                ),
+            )
+        )
+
     if not found:
         return {
             "scanned": scan_path,
             "found": 0,
             "newly_registered": 0,
             "projects": [],
+            "warnings": warnings,
         }
 
     newly_registered: list[dict] = []
@@ -1620,6 +1652,7 @@ def pm_discover(scan_path: str = ".") -> dict:
         "found": len(found),
         "newly_registered": len(newly_registered),
         "projects": newly_registered,
+        "warnings": warnings,
     }
 
 

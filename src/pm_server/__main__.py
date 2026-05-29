@@ -132,7 +132,7 @@ def discover(scan_path: str):
     """
     from pathlib import Path
 
-    from .discovery import discover_projects
+    from .discovery import scan_projects
     from .models import RegistryEntry
     from .storage import (
         GLOBAL_PM_DIR,
@@ -141,7 +141,17 @@ def discover(scan_path: str):
         save_registry,
     )
 
-    found = discover_projects(Path(scan_path))
+    scan = scan_projects(Path(scan_path))
+    found = scan.projects
+
+    if scan.depth_capped:
+        n = len(scan.depth_capped)
+        click.echo(
+            f"⚠ Depth cap ({scan.max_depth} levels) skipped {n} director"
+            f"{'y' if n == 1 else 'ies'}; projects deeper than the cap may be "
+            f"undetected. Re-run with a scan_path closer to them, or pm_init there."
+        )
+
     if not found:
         click.echo("No projects with .pm/ found.")
         return

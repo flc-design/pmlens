@@ -3,7 +3,7 @@
 import json
 from pathlib import Path
 
-from pm_server.discovery import detect_project_info, discover_projects
+from pm_server.discovery import detect_project_info, discover_projects, scan_projects
 
 
 class TestDetectProjectInfo:
@@ -229,3 +229,61 @@ class TestDiscoverProjectsBounded:
         names = {f["name"] for f in found}
         assert "outer" in names
         assert "ghost" not in names
+
+
+class TestScanProjectsDepthCap:
+    """PMSERV-089 (WF-026 FINDING-H): surface depth-cap exclusions.
+
+    ``scan_projects`` returns a ``DiscoveryResult`` whose ``depth_capped``
+    field lists directories skipped *purely* because of the depth cap, so
+    ``pm_discover`` can warn instead of silently finding nothing.
+    """
+
+    def _make_project(self, path):
+        pm = path / ".pm"
+        pm.mkdir(parents=True)
+        (pm / "project.yaml").write_text("name: " + path.name)
+
+    def test_no_capped_dirs_for_shallow_tree(self, tmp_path):
+        # A project well within the cap leaves depth_capped empty.
+        self._make_project(tmp_path / "a" / "b" / "shallow")
+        result = scan_projects(tmp_path)
+        assert {p["name"] for p in result.projects} == {"shallow"}
+        assert result.depth_capped == []
+        assert result.max_depth == 5
+
+    def test_records_boundary_dir_for_deep_project(self, tmp_path):
+        # deep's parent sits at depth 6: the walk refuses to descend into the
+        # depth-6 dir "f" from "e" (depth 5), so "f" is recorded and the
+        # project itself is never found.
+        self._make_project(tmp_path / "a" / "b" / "c" / "d" / "e" / "f" / "deep")
+        result = scan_projects(tmp_path)
+        assert result.projects == []
+        capped_names = {Path(c).name for c in result.depth_capped}
+        assert "f" in capped_names
+
+    def test_excluded_dirs_not_counted_as_capped(self, tmp_path):
+        # At depth 5 (dir "e"), a normal child is depth-capped but an
+        # excluded-name child (node_modules) must be filtered *before* the
+        # depth check and therefore never appear in depth_capped.
+        base = tmp_path / "a" / "b" / "c" / "d" / "e"
+        (base / "normal").mkdir(parents=True)
+        (base / "node_modules").mkdir(parents=True)
+        result = scan_projects(tmp_path)
+        capped_names = {Path(c).name for c in result.depth_capped}
+        assert "normal" in capped_names
+        assert "node_modules" not in capped_names
+
+    def test_custom_max_depth_clears_capped(self, tmp_path):
+        # A larger cap that reaches the project leaves nothing capped and
+        # echoes the cap that was applied.
+        self._make_project(tmp_path / "a" / "b" / "c" / "d" / "e" / "f" / "g" / "p")
+        result = scan_projects(tmp_path, max_depth=10)
+        assert any(p["name"] == "p" for p in result.projects)
+        assert result.depth_capped == []
+        assert result.max_depth == 10
+
+    def test_wrapper_matches_scan_projects(self, tmp_path):
+        # discover_projects must stay a thin wrapper over scan_projects.
+        self._make_project(tmp_path / "a" / "proj")
+        assert discover_projects(tmp_path) == scan_projects(tmp_path).projects
