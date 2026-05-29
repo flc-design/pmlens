@@ -401,6 +401,35 @@ class TestInjectPmRules:
         assert summary.results[0].backup_path is None
         assert list(tmp_path.glob("CLAUDE.md.bak.*")) == []
 
+    def test_claude_code_target_noop_when_already_current(self, tmp_path):
+        # PMSERV-062: re-injecting into a file that already holds the current
+        # template is a no-op — reported "skipped" (not "updated"), with no
+        # backup, no rewrite, and not counted in `updated`.
+        inject_pm_rules(tmp_path, target="claude-code")  # first create
+        before = (tmp_path / "CLAUDE.md").read_text()
+
+        summary = inject_pm_rules(tmp_path, target="claude-code")  # re-apply
+
+        assert summary.results[0].status == "skipped"
+        assert "already up to date" in summary.results[0].message
+        assert "updated" not in summary.results[0].message
+        assert summary.results[0].backup_path is None
+        assert list(tmp_path.glob("CLAUDE.md.bak.*")) == []
+        assert (tmp_path / "CLAUDE.md").read_text() == before  # unchanged
+        assert summary.overall_status == "skipped"
+        assert summary.updated == []
+
+    def test_claude_code_target_dry_run_noop_reports_skipped(self, tmp_path):
+        # PMSERV-062: dry-run on an up-to-date file distinguishes the no-op
+        # instead of misreporting it as "updated".
+        inject_pm_rules(tmp_path, target="claude-code")  # first create
+
+        summary = inject_pm_rules(tmp_path, target="claude-code", dry_run=True)
+
+        assert summary.results[0].status == "skipped"
+        assert summary.results[0].is_dry_run is True
+        assert "already up to date" in summary.results[0].message
+
     # --- target="codex" (AGENTS.md path + backup symmetry) ------------
 
     def test_codex_target_creates_agents_md_no_backup_for_new_file(self, tmp_path):

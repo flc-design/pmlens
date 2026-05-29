@@ -516,8 +516,22 @@ def _inject_into_file(
         after = content[end_idx + len(END_MARKER) :]
         new_content = before + template + after
         old_version = int(begin_match.group(1))
-        status = "updated"
-        message = f"updated PM Server rules in {target_file} (v{old_version} → v{TEMPLATE_VERSION})"
+        if new_content == content:
+            # No-op: the on-disk section already matches the current template
+            # byte-for-byte (e.g. v=N → v=N). Report "skipped" so dry-run (and
+            # real runs) can tell "nothing to do" apart from an actual rewrite,
+            # and skip the backup + write below — otherwise PMSERV-058 would
+            # create a spurious CLAUDE.md backup for a no change (PMSERV-062).
+            status = "skipped"
+            message = (
+                f"PM Server rules in {target_file} already up to date "
+                f"(v{TEMPLATE_VERSION}); no changes"
+            )
+        else:
+            status = "updated"
+            message = (
+                f"updated PM Server rules in {target_file} (v{old_version} → v{TEMPLATE_VERSION})"
+            )
     elif begin_match and end_idx == -1:
         # Corrupted: begin without end — treat as replace-from-corruption
         before = content[: begin_match.start()]
@@ -531,11 +545,15 @@ def _inject_into_file(
         status = "appended"
         message = f"appended PM Server rules to {target_file}"
 
-    # Backup before write — for every existing rule file (PMSERV-058 /
-    # ADR-008 amendment A5: symmetrise CLAUDE.md with AGENTS.md). New files
-    # take the create path above and need no backup.
+    # Backup + write only when the content actually changes. A no-op (status
+    # "skipped" above) must not create a spurious backup or rewrite the file
+    # (PMSERV-062 / PMSERV-058 synergy). New files take the create path above
+    # and need no backup. Backup applies to every existing rule file
+    # (PMSERV-058 / ADR-008 amendment A5: symmetrise CLAUDE.md with AGENTS.md).
+    changed = status != "skipped"
+
     backup_path: Path | None = None
-    if not dry_run:
+    if not dry_run and changed:
         try:
             backup_path = _timestamped_backup(resolved)
         except OSError as e:  # pragma: no cover — defensive FS guard (PMSERV-059)
@@ -548,7 +566,7 @@ def _inject_into_file(
             )
 
     # Write
-    if not dry_run:
+    if not dry_run and changed:
         try:
             _atomic_write_text(resolved, new_content)
         except OSError as e:
