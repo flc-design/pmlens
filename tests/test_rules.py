@@ -43,9 +43,11 @@ class TestRulesModule:
         assert isinstance(TEMPLATE_VERSION, int)
         assert TEMPLATE_VERSION >= 1
 
-    def test_template_version_unchanged_at_v7(self):
-        # ADR-008 4th-tier guard: PMSERV-043 keeps v7
-        assert TEMPLATE_VERSION == 7
+    def test_template_version_pinned_at_v8(self):
+        # ADR-008 4th-tier guard: a bump must be intentional. v8 adds the
+        # memory-layer routing rule (pm_remember=SSoT vs Claude Code auto
+        # memory; no dual-write) — PMSERV-111 / ADR-023.
+        assert TEMPLATE_VERSION == 8
 
     def test_markers_are_strings(self):
         assert "pm-server:begin" in BEGIN_MARKER

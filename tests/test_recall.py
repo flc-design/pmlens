@@ -260,7 +260,7 @@ class TestClaudeMdV3:
     def test_template_version(self):
         from pm_server.claudemd import TEMPLATE_VERSION
 
-        assert TEMPLATE_VERSION == 7
+        assert TEMPLATE_VERSION == 8
 
     def test_template_has_pm_recall(self):
         from pm_server.claudemd import CLAUDEMD_TEMPLATE
@@ -310,6 +310,16 @@ class TestClaudeMdV3:
         from pm_server.claudemd import CLAUDEMD_TEMPLATE
 
         assert "other_rule_sections" in CLAUDEMD_TEMPLATE
+
+    def test_template_has_memory_routing_section(self):
+        # PMSERV-111 / ADR-023 (v8): pm_remember=SSoT vs Claude Code auto
+        # memory role split, with an explicit no-dual-write rule.
+        from pm_server.claudemd import CLAUDEMD_TEMPLATE
+
+        assert "記憶の二重化を避ける" in CLAUDEMD_TEMPLATE
+        assert "auto memory" in CLAUDEMD_TEMPLATE
+        assert "二重書き込み" in CLAUDEMD_TEMPLATE
+        assert "SSoT" in CLAUDEMD_TEMPLATE
 
 
 # ─── PMSERV-049: ContextBuilder session-self-id marker ─────────────
