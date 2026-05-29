@@ -278,7 +278,7 @@ def _scan_rule_file(path: Path) -> dict:
         return result
     try:
         content = path.read_text(encoding="utf-8")
-    except OSError:
+    except OSError:  # pragma: no cover — defensive FS guard (PMSERV-059)
         return result
     match = BEGIN_PATTERN.search(content)
     if match:
@@ -317,7 +317,7 @@ def _has_pm_marker(path: Path) -> bool:
         return False
     try:
         content = path.read_text(encoding="utf-8")
-    except OSError:
+    except OSError:  # pragma: no cover — defensive FS guard (PMSERV-059)
         return False
     return bool(BEGIN_PATTERN.search(content))
 
@@ -462,7 +462,7 @@ def _inject_into_file(
         if not dry_run:
             try:
                 _atomic_write_text(resolved, template + "\n")
-            except OSError as e:
+            except OSError as e:  # pragma: no cover — defensive FS guard (PMSERV-059)
                 return InjectResult(
                     target_file=target_file,
                     host=host,
@@ -481,7 +481,7 @@ def _inject_into_file(
     # --- File exists: read current content ---
     try:
         content = resolved.read_text(encoding="utf-8")
-    except OSError as e:
+    except OSError as e:  # pragma: no cover — defensive FS guard (PMSERV-059)
         return InjectResult(
             target_file=target_file,
             host=host,
@@ -521,7 +521,7 @@ def _inject_into_file(
     if not dry_run:
         try:
             backup_path = _timestamped_backup(resolved)
-        except OSError as e:
+        except OSError as e:  # pragma: no cover — defensive FS guard (PMSERV-059)
             return InjectResult(
                 target_file=target_file,
                 host=host,
