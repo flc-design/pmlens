@@ -19,6 +19,9 @@ Public surface:
       Codex CLI.
     - ``install_mcp() / uninstall_mcp()``: backward-compat wrappers
       preserved from v0.4.x; return the Claude Code message string.
+      **Deprecated** (PMSERV-055): emit ``DeprecationWarning`` and are
+      scheduled for removal in v1.0.0 — use ``install``/``uninstall`` or
+      the per-host functions instead.
     - ``migrate_from_pm_agent()``: unchanged migration helper.
 """
 
@@ -28,6 +31,7 @@ import os
 import shutil
 import subprocess
 import sys
+import warnings
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -683,13 +687,31 @@ def uninstall(target: str = "claude-code", *, dry_run: bool = False) -> InstallS
 # --- Backward-compat wrappers (v0.4.x public API) -------------------------
 
 
+# Removal target for the v0.4.x compat wrappers (PMSERV-055). Kept as a
+# named constant so the message and any future gating stay in one place.
+_LEGACY_WRAPPER_REMOVAL_VERSION = "1.0.0"
+
+
 def install_mcp() -> str:
     """Backward-compat wrapper kept from v0.4.x.
 
     Returns the human-readable message from :func:`install_claude_code`.
     The structured form is ``install(target="claude-code")`` which yields
     an :class:`InstallSummary`.
+
+    .. deprecated::
+        Scheduled for removal in pm-server v1.0.0 (PMSERV-055). Use
+        ``install(target="claude-code")`` for the structured
+        :class:`InstallSummary`, or :func:`install_claude_code` for the
+        single :class:`InstallResult` whose ``.message`` this returns.
     """
+    warnings.warn(
+        "install_mcp() is deprecated and will be removed in pm-server "
+        f'v{_LEGACY_WRAPPER_REMOVAL_VERSION}; use install(target="claude-code") '
+        "or install_claude_code() instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     return install_claude_code().message
 
 
@@ -697,7 +719,19 @@ def uninstall_mcp() -> str:
     """Backward-compat wrapper kept from v0.4.x.
 
     Returns the message from :func:`uninstall_claude_code`.
+
+    .. deprecated::
+        Scheduled for removal in pm-server v1.0.0 (PMSERV-055). Use
+        ``uninstall(target="claude-code")`` or
+        :func:`uninstall_claude_code` instead.
     """
+    warnings.warn(
+        "uninstall_mcp() is deprecated and will be removed in pm-server "
+        f'v{_LEGACY_WRAPPER_REMOVAL_VERSION}; use uninstall(target="claude-code") '
+        "or uninstall_claude_code() instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     return uninstall_claude_code().message
 
 
@@ -724,8 +758,9 @@ def migrate_from_pm_agent():
     except subprocess.CalledProcessError:
         print("  pm-agent was not registered (skipping)")
 
-    # 2. 新 pm-server を登録
-    install_mcp()
+    # 2. 新 pm-server を登録（非推奨ラッパーではなく per-host 関数を直接呼ぶ:
+    #    PMSERV-055 で install_mcp() に DeprecationWarning を付けたため）
+    install_claude_code()
 
     # 3. registry チェック
     registry_path = Path.home() / ".pm" / "registry.yaml"

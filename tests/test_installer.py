@@ -109,6 +109,24 @@ class TestInstallMcp:
             msg = install_mcp()
             assert "failed to register" in msg.lower()
 
+    def test_install_mcp_emits_deprecation_warning(self):
+        """PMSERV-055: install_mcp is a v0.4.x compat wrapper scheduled for
+        removal in v1.0.0; calling it must emit a DeprecationWarning naming
+        the replacement."""
+
+        def which(name):
+            return f"/usr/bin/{name}"
+
+        def mock_run(cmd, **kwargs):
+            return _make_result(1) if "get" in cmd else _make_result(0)
+
+        with (
+            patch("pm_server.installer.shutil.which", side_effect=which),
+            patch("pm_server.installer.subprocess.run", side_effect=mock_run),
+            pytest.warns(DeprecationWarning, match=r"install_mcp.*1\.0\.0"),
+        ):
+            install_mcp()
+
 
 class TestUninstallMcp:
     def test_claude_not_found(self):
@@ -138,9 +156,18 @@ class TestUninstallMcp:
             msg = uninstall_mcp()
             assert "not registered" in msg.lower() or "removal failed" in msg.lower()
 
+    def test_uninstall_mcp_emits_deprecation_warning(self):
+        """PMSERV-055: uninstall_mcp deprecation mirrors install_mcp."""
+        with (
+            patch("pm_server.installer.shutil.which", return_value="/usr/bin/claude"),
+            patch("pm_server.installer.subprocess.run", return_value=_make_result(0)),
+            pytest.warns(DeprecationWarning, match=r"uninstall_mcp.*1\.0\.0"),
+        ):
+            uninstall_mcp()
+
 
 class TestMigrateFromPmAgent:
-    def test_migrate_from_pm_agent(self, tmp_path, monkeypatch):
+    def test_migrate_from_pm_agent(self, tmp_path, monkeypatch, recwarn):
         """migrate コマンドが旧 pm-agent を解除して pm-server を登録する。"""
         calls = []
 
@@ -169,6 +196,10 @@ class TestMigrateFromPmAgent:
         assert any("pm-agent" in str(c) for c in calls)
         # add pm-server が呼ばれたこと
         assert any("pm-server" in str(c) for c in calls)
+        # PMSERV-055: migrate must call the non-deprecated per-host function
+        # (install_claude_code), not the install_mcp() wrapper — so no
+        # DeprecationWarning should escape from the migration path.
+        assert not any("deprecated" in str(w.message).lower() for w in recwarn)
 
 
 class TestInstallClaudeCode:
