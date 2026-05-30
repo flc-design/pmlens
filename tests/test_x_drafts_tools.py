@@ -236,3 +236,24 @@ def test_pm_x_drafts_pending_never_leaks_raw_content(tmp_path: Path) -> None:
     assert "/Users/flc001" not in json.dumps(page)
     # redacted field IS present and scrubbed.
     assert "<REDACTED:secret>" in item["redacted_hook"]
+
+
+def test_pm_redact_draft_handles_non_list_body_json(tmp_path: Path) -> None:
+    """Guard: a legacy/malformed non-list body_json must not be iterated
+    character-by-character (it would produce hundreds of 1-char segments)."""
+    proj = _make_project(tmp_path)
+    # Inject a draft whose body_json is a bare JSON string, not a list.
+    store = srv._get_x_draft_store(str(proj))
+    rid = store.append(
+        signal_type="lesson",
+        source_refs="m:1",
+        raw_content="r",
+        hook="h",
+        body_json='"a bare string not a list"',
+    )
+    res = srv.pm_redact_draft(draft_id=rid, project_path=str(proj))
+    assert res["status"] == "redacted"
+    page = srv.pm_x_drafts_pending(filter_status="redacted", project_path=str(proj))
+    segs = json.loads(page["items"][0]["redacted_body_json"])
+    assert isinstance(segs, list)
+    assert len(segs) == 1  # wrapped, not exploded into characters

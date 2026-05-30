@@ -31,6 +31,10 @@ from pm_server.redaction import load_redaction_config, redact
         "eyJhbGciOiJIUzI1NiIsInR5cCI.eyJzdWIiOiIxMjM0NTY.SflKxwRJSMeKKF2QT4f",
         "postgres://user:pass@db.example.com:5432/prod",
         "api_key=SUPERSECRETVALUE123",
+        "AIza01234567890123456789012345678901234",
+        "sk-proj-abcdefghijklmnopqrstuvwxyz1234567890",
+        "npm_abcdefghijklmnopqrstuvwxyz0123456789",
+        "pypi-AgEIcHlwaS5vcmc0123456789abcdef",
     ],
 )
 def test_secret_is_scrubbed_from_hook(secret: str) -> None:
@@ -52,6 +56,13 @@ def test_private_key_header_scrubbed() -> None:
 def test_abs_path_scrubbed() -> None:
     res = redact("see /Users/flc001/secret/notes.md for details", [])
     assert "/Users/flc001" not in res.redacted_hook
+    assert "<PATH>" in res.redacted_hook
+    assert res.report["by_category"].get("path", 0) == 1
+
+
+def test_windows_abs_path_scrubbed() -> None:
+    res = redact(r"see C:\Users\alice\secret.txt for details", [])
+    assert r"C:\Users\alice" not in res.redacted_hook
     assert "<PATH>" in res.redacted_hook
     assert res.report["by_category"].get("path", 0) == 1
 
