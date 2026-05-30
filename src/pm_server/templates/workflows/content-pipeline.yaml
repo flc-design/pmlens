@@ -1,0 +1,69 @@
+# PM Server — Content Pipeline Workflow Template (PMSERV-113, ADR-024)
+# Extract → Draft → Redact → Review (manual post)
+# Turns a .pm by-product (lesson / insight / ADR / defect) into a redacted,
+# human-reviewed build-in-public X draft.
+#
+# Safety model: pm-server holds NO X credentials and performs NO network/post
+# action — "never auto-post" is structural, not a gate. Redaction is the only
+# safety layer; the human reviews the redacted draft and posts MANUALLY on X,
+# outside the system. (The workflow engine does not enforce gates anyway, so
+# no step claims an enforced approval gate — see ADR-024 / memory:190.)
+
+name: Content Pipeline
+description: >
+  Turn a .pm by-product (lesson / insight / ADR / defect) into a redacted,
+  human-reviewed build-in-public X draft. Safety is redaction-only; there is
+  no auto-post (pm-server holds no X credentials). The human reviews the
+  redacted draft and posts manually on X.
+
+steps:
+  - id: extract
+    name: Extract Source
+    description: >
+      Pull the source .pm by-product by id (memory:NN / ADR-NNN / PMSERV-NNN)
+      that this draft will be built from. Confirm it is post-worthy and
+      self-contained — skip items coupled to unreleased plans or internal-only
+      context that would not translate for a public reader.
+    tool_hint: pm_recall
+    produces:
+      - source_refs
+
+  - id: draft
+    name: Draft (reader-voice)
+    description: >
+      Rewrite the by-product into a reader-facing hook + thread (the
+      build-in-public voice). Call pm_draft_x FIRST so the draft row is
+      persisted immediately (compaction-safe); record the returned draft id as
+      an artifact. raw_content is kept for provenance but is never shown in the
+      review queue.
+    tool_hint: pm_draft_x
+    consumes:
+      - source_refs
+    produces:
+      - x_draft
+
+  - id: redact
+    name: Redact
+    description: >
+      Run pm_redact_draft — the Layer-1 deterministic scrub of the hook and
+      each body segment (status draft → redacted). Then run /secret-scan and
+      /privacy-check on the REDACTED fields as a Layer-2 semantic pass and
+      resolve anything flagged. Redaction is the only safety layer.
+    tool_hint: pm_redact_draft
+    skill_hint: Run /secret-scan and /privacy-check on the redacted fields for a Layer-2 pass.
+    consumes:
+      - x_draft
+    produces:
+      - redacted_draft
+
+  - id: review
+    name: Human Review (manual post)
+    description: >
+      Show the redacted draft from pm_x_drafts_pending to the human. The human
+      reviews it and, if happy, posts it MANUALLY on X — pm-server never posts
+      and holds no X credentials. This is NOT an engine-enforced approval gate;
+      the decision happens outside the system. Do not advance until the human
+      has reviewed the redacted draft.
+    tool_hint: pm_x_drafts_pending
+    consumes:
+      - redacted_draft

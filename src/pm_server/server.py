@@ -434,6 +434,25 @@ def pm_status(project_path: str | None = None) -> dict:
                 "call pm_outbox_pending to review and pm_outbox_merge to promote",
             ]
 
+        # PMSERV-113 / PMSERV-118 — per-project X-draft pending count. Same
+        # Claude-Code-only gating as outbox_pending. Probe ONLY if the store
+        # file already exists, so pm_status never creates x_drafts.db in a
+        # project that has not used the pipeline (Lens must-fix #3 corollary).
+        x_draft_db = default_x_draft_db_path(pm_path)
+        x_drafts_pending = 0
+        if x_draft_db.exists():
+            try:
+                x_drafts_pending = get_x_draft_store(x_draft_db).get_pending_count()
+            except Exception:
+                x_drafts_pending = 0
+        diagnostics["x_drafts_pending"] = x_drafts_pending
+        if x_drafts_pending > 0:
+            next_actions = [
+                *next_actions,
+                f"{x_drafts_pending} X draft(s) pending review — "
+                "call pm_x_drafts_pending to review the redacted draft and post manually",
+            ]
+
     return {
         "project": {
             "name": project.name,
