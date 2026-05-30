@@ -45,6 +45,13 @@ def isolated_registry(tmp_path, monkeypatch):
     from pm_server.outbox import clear_outbox_store
 
     clear_outbox_store()
+    # PMSERV-113 / PMSERV-114: same rationale for the per-project x_drafts
+    # factory — clear the db_path-keyed cache so a store bound to a now-deleted
+    # tmp_path does not leak into the next test (e.g. via pm_status probing
+    # x_drafts_pending). The factory re-binds on next use.
+    from pm_server.x_draft_store import clear_x_draft_store
+
+    clear_x_draft_store()
 
 
 @pytest.fixture
