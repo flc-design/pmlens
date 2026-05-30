@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as _dt
+import json
 import os
 import uuid
 from pathlib import Path
@@ -39,6 +40,7 @@ from .models import (
     WorkflowStatus,
 )
 from .outbox import default_outbox_db_path, get_outbox_store
+from .redaction import load_redaction_config, redact
 from .storage import (
     GLOBAL_PM_DIR,
     _next_task_number_from_list,
@@ -76,6 +78,11 @@ from .utils import (
 )
 from .velocity import calculate_velocity, detect_risks
 from .workflow import abandon_workflow, advance_step, start_workflow, workflow_status
+from .x_draft_store import (
+    default_x_draft_db_path,
+    get_x_draft_store,
+    normalize_source_refs,
+)
 
 mcp = FastMCP("pm-server")
 
@@ -1464,6 +1471,224 @@ def pm_outbox_reject(
         "skipped": skipped,
         "warnings": warnings,
     }
+
+
+# ─── X content pipeline (PMSERV-113, ADR-024) ──────────────────────────────
+# Per-project staging for build-in-public X drafts derived from .pm by-products.
+# Safety model: pm-server holds NO X credentials and performs NO network/post
+# action — "never auto-post" is structural, not a gate. The human reviews
+# redacted drafts (pm_x_drafts_pending) and posts manually on X, outside the
+# system. All these tools are mutators on the per-project store and are
+# deliberately NOT in any allowlist, so they are hidden under PM_LENS=1
+# (mirroring the pm_outbox_* review tools). The review queue exposes ONLY
+# redacted fields — enforced structurally in XDraftStore.pending.
+
+_VALID_X_SIGNAL_TYPES = {"lesson", "insight", "adr", "mistake"}
+_VALID_X_KINDS = {"single", "thread"}
+_VALID_X_DRAFT_STATUSES = {"draft", "redacted", "rejected", "posted", "all"}
+
+
+def _get_x_draft_store(project_path: str | None):
+    """Resolve the per-project XDraftStore via the db_path-keyed factory."""
+    pm_path = _get_pm_path(project_path)
+    return get_x_draft_store(default_x_draft_db_path(pm_path))
+
+
+@_tool()
+def pm_draft_x(
+    signal_type: str,
+    source_refs: list[str],
+    raw_content: str,
+    hook: str,
+    body: list[str] | None = None,
+    kind: str = "thread",
+    hashtags: list[str] | None = None,
+    workflow_id: str | None = None,
+    project_path: str | None = None,
+) -> dict:
+    """Stage a build-in-public X draft derived from a .pm signal (PMSERV-113).
+
+    Persists the draft as the FIRST action (compaction-safe). Dedupes on the
+    normalized source_refs set: if a non-rejected draft already exists for the
+    same sources, this skips-with-warning rather than creating a duplicate
+    (e.g. after a compaction-induced re-record of the same lesson).
+
+    signal_type: lesson | insight | adr | mistake
+    source_refs: provenance ids (memory:NN / ADR-NNN / PMSERV-NNN) — frozen
+    body: ordered thread segments (each ideally <=280 chars)
+    NOTE: raw_content is the unscrubbed concentrate and is NEVER surfaced by
+    the review queue (pm_x_drafts_pending). Call pm_redact_draft next.
+    """
+    if signal_type not in _VALID_X_SIGNAL_TYPES:
+        return {
+            "status": "error",
+            "code": "invalid_signal_type",
+            "message": (
+                f"signal_type must be one of {sorted(_VALID_X_SIGNAL_TYPES)}, got {signal_type!r}"
+            ),
+        }
+    if kind not in _VALID_X_KINDS:
+        return {
+            "status": "error",
+            "code": "invalid_kind",
+            "message": f"kind must be one of {sorted(_VALID_X_KINDS)}, got {kind!r}",
+        }
+    if not source_refs:
+        return {
+            "status": "error",
+            "code": "source_refs_required",
+            "message": "source_refs must be a non-empty list (dogfooding provenance)",
+        }
+
+    normalized = normalize_source_refs(source_refs)
+    store = _get_x_draft_store(project_path)
+
+    existing = store.find_live_by_source_refs(normalized)
+    if existing:
+        return {
+            "status": "skipped",
+            "source_refs": normalized,
+            "warnings": [
+                {
+                    "reason": "duplicate_source_refs",
+                    "existing_ids": [row["id"] for row in existing],
+                    "remediation": (
+                        "A non-rejected draft already exists for these sources; "
+                        "edit/redact that one or pm_reject_draft it before re-drafting."
+                    ),
+                }
+            ],
+        }
+
+    draft_id = store.append(
+        signal_type=signal_type,  # type: ignore[arg-type]
+        source_refs=normalized,
+        raw_content=raw_content,
+        hook=hook,
+        body_json=json.dumps(body or [], ensure_ascii=False),
+        kind=kind,  # type: ignore[arg-type]
+        hashtags=",".join(hashtags) if hashtags else None,
+        workflow_id=workflow_id,
+    )
+    return {
+        "status": "saved",
+        "draft_id": draft_id,
+        "source_refs": normalized,
+        "next": "Call pm_redact_draft to scrub the draft before review.",
+    }
+
+
+@_tool()
+def pm_redact_draft(draft_id: int, project_path: str | None = None) -> dict:
+    """Run the Layer-1 deterministic redaction prefilter on a staged draft.
+
+    Scrubs the hook and EACH body segment (PMSERV-115), writes the redacted
+    fields plus a count-only report, and transitions draft -> redacted. Returns
+    the count-only report (never cleartext). After this, run the Layer-2
+    semantic pass (/secret-scan + /privacy-check) on the redacted fields, then
+    have the human review via pm_x_drafts_pending and post manually on X.
+    """
+    store = _get_x_draft_store(project_path)
+    row = store.get(draft_id)
+    if row is None:
+        return {"status": "error", "code": "not_found", "message": f"draft {draft_id} not found"}
+    if row["status"] != "draft":
+        return {
+            "status": "skipped",
+            "warnings": [
+                {"id": draft_id, "status": row["status"], "reason": "not_in_draft_status"}
+            ],
+        }
+
+    try:
+        body_segments = json.loads(row["body_json"]) if row["body_json"] else []
+    except (json.JSONDecodeError, TypeError):
+        body_segments = []
+
+    config = load_redaction_config(_get_pm_path(project_path))
+    result = redact(row["hook"] or "", body_segments, allow=config["allow"], deny=config["deny"])
+
+    ok = store.set_redacted(
+        draft_id,
+        redacted_hook=result.redacted_hook,
+        redacted_body_json=json.dumps(result.redacted_segments, ensure_ascii=False),
+        redaction_report=json.dumps(result.report, ensure_ascii=False),
+        flagged=result.flagged,
+    )
+    if not ok:
+        return {
+            "status": "skipped",
+            "warnings": [{"id": draft_id, "reason": "race_condition_skipped"}],
+        }
+
+    return {
+        "status": "redacted",
+        "draft_id": draft_id,
+        "report": result.report,
+        "flagged": result.flagged,
+        "skill_hint": (
+            "Run /secret-scan and /privacy-check on the redacted fields "
+            "(visible via pm_x_drafts_pending) for a semantic second pass before posting."
+        ),
+    }
+
+
+@_tool()
+def pm_reject_draft(draft_id: int, reason: str, project_path: str | None = None) -> dict:
+    """Discard a staged X draft with a mandatory, auditable reason."""
+    if not reason or not reason.strip():
+        return {
+            "status": "error",
+            "code": "reason_required",
+            "message": "reason is required and must be non-empty",
+        }
+    store = _get_x_draft_store(project_path)
+    row = store.get(draft_id)
+    if row is None:
+        return {"status": "error", "code": "not_found", "message": f"draft {draft_id} not found"}
+    if store.mark_rejected(draft_id, reason):
+        return {"status": "rejected", "draft_id": draft_id}
+    return {
+        "status": "skipped",
+        "warnings": [{"id": draft_id, "status": row["status"], "reason": "already_terminal"}],
+    }
+
+
+@_tool()
+def pm_x_drafts_pending(
+    filter_status: str = "redacted",
+    limit: int = 50,
+    offset: int = 0,
+    project_path: str | None = None,
+) -> dict:
+    """Review queue for staged X drafts — exposes ONLY redacted/safe fields.
+
+    raw_content and the un-redacted hook/body are NEVER returned (must-fix #1):
+    the human copy-pastes from here, so the queue must never carry the
+    unscrubbed concentrate. Default lists status='redacted' (ready for human
+    review); use 'all' to also see draft/rejected/posted rows. Posting happens
+    manually on X, outside the system — pm-server never posts.
+
+    filter_status: draft | redacted | rejected | posted | all
+    """
+    if filter_status not in _VALID_X_DRAFT_STATUSES:
+        return {
+            "status": "error",
+            "code": "invalid_filter_status",
+            "message": (
+                f"filter_status must be one of {sorted(_VALID_X_DRAFT_STATUSES)}, "
+                f"got {filter_status!r}"
+            ),
+        }
+    if limit < 0 or offset < 0:
+        return {
+            "status": "error",
+            "code": "invalid_pagination",
+            "message": "limit and offset must be non-negative",
+        }
+    store = _get_x_draft_store(project_path)
+    page = store.pending(filter_status=filter_status, limit=limit, offset=offset)
+    return {"status": "ok", **page}
 
 
 @_tool()

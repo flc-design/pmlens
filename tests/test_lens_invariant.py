@@ -223,3 +223,57 @@ def test_outbox_log_does_not_mutate_main_memory_dbs(tmp_path: Path) -> None:
     assert daily_files == [], (
         f"daily YAML created under Lens — outbox should defer to merge: {daily_files}"
     )
+
+
+# ─── X content pipeline Lens gating (PMSERV-113 / PMSERV-116) ──────────────
+# The x_drafts tools are Claude-Code-only: NOT in RO_ALLOWLIST and NOT in
+# OUTBOX_WRITE_ALLOWLIST, so PM_LENS=1 hides them entirely (mirroring the
+# pm_outbox_* review tools). This is how must-fix #3 is satisfied — no
+# x_drafts mutator is even reachable on a Lens host, so x_drafts.db can never
+# be created/written there.
+
+_X_DRAFT_TOOLS = ("pm_draft_x", "pm_redact_draft", "pm_reject_draft", "pm_x_drafts_pending")
+
+
+def test_x_draft_tools_registered_in_claude_code_mode() -> None:
+    """Sanity (PM_LENS=0, the normal test process): all four x_drafts tools
+    ARE registered, so the Lens=1 hidden assertion below is meaningful."""
+    import pm_server.server as srv
+
+    assert srv.PM_LENS_ENABLED is False
+    for name in _X_DRAFT_TOOLS:
+        assert name in srv.REGISTERED_TOOLS, f"{name} should be registered in Claude Code mode"
+
+
+def test_x_draft_tools_hidden_under_lens(tmp_path: Path) -> None:
+    """Under PM_LENS=1 none of the x_drafts tools may register with MCP — they
+    are mutators not in any allowlist, so the @_tool() gate returns the bare
+    function and never adds them to REGISTERED_TOOLS."""
+    script = textwrap.dedent("""
+        import pm_server.server as srv
+
+        assert srv.PM_LENS_ENABLED is True, "PM_LENS not picked up in subprocess"
+        hidden = [t for t in (
+            "pm_draft_x", "pm_redact_draft", "pm_reject_draft", "pm_x_drafts_pending",
+        ) if t in srv.REGISTERED_TOOLS]
+        assert hidden == [], f"x_drafts tools leaked into Lens registration: {hidden}"
+        # The bare functions still exist as module attributes (just not MCP-registered).
+        assert callable(srv.pm_draft_x)
+        print("ok")
+    """)
+
+    env = {**os.environ, "HOME": str(tmp_path / "fake_home"), "PM_LENS": "1"}
+    env.pop("VIRTUAL_ENV", None)
+    env.pop("PM_DESKTOP_WRITE", None)
+    (tmp_path / "fake_home").mkdir()
+
+    proc = subprocess.run(
+        [sys.executable, "-c", script],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=15,
+        cwd=str(tmp_path),
+    )
+    assert proc.returncode == 0, f"stderr={proc.stderr!r}, stdout={proc.stdout!r}"
+    assert proc.stdout.strip().splitlines()[-1] == "ok"
