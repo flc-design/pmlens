@@ -1623,6 +1623,10 @@ def pm_redact_draft(draft_id: int, project_path: str | None = None) -> dict:
         body_segments = json.loads(row["body_json"]) if row["body_json"] else []
     except (json.JSONDecodeError, TypeError):
         body_segments = []
+    # Guard against a non-list body_json (legacy/malformed): redact() expects
+    # list[str]; a bare string would otherwise be iterated character-by-character.
+    if not isinstance(body_segments, list):
+        body_segments = [str(body_segments)]
 
     config = load_redaction_config(_get_pm_path(project_path))
     result = redact(row["hook"] or "", body_segments, allow=config["allow"], deny=config["deny"])

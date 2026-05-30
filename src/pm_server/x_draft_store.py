@@ -444,7 +444,10 @@ def get_x_draft_store(db_path: Path) -> XDraftStore:
     Keyed by the resolved db_path so projectA's drafts never surface under
     projectB within one process.
     """
-    key = str(Path(db_path))
+    # Resolve so two spellings of the same file (symlinks, '..' segments) map
+    # to ONE store — mirrors server._memory_stores' resolved keying. Without
+    # this the per-project isolation guarantee can be silently violated.
+    key = str(Path(db_path).resolve())
     if key not in _x_draft_stores:
         _x_draft_stores[key] = XDraftStore(Path(db_path))
     return _x_draft_stores[key]

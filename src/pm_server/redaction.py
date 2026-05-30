@@ -91,6 +91,10 @@ _PATTERNS: tuple[_Pattern, ...] = (
         r"(?:mongodb|postgres(?:ql)?|mysql|redis|amqp)(?:\+srv)?://[^\s]+",
         "<REDACTED:conn>",
     ),
+    _p("google_api_key", "secret", "high", r"AIza[0-9A-Za-z_\-]{35}", "<REDACTED:secret>"),
+    _p("openai_key", "secret", "high", r"sk-(?:proj-)?[A-Za-z0-9_\-]{20,}", "<REDACTED:secret>"),
+    _p("npm_token", "secret", "high", r"npm_[A-Za-z0-9]{36}", "<REDACTED:secret>"),
+    _p("pypi_token", "secret", "high", r"pypi-[A-Za-z0-9_\-]{16,}", "<REDACTED:secret>"),
     _p(
         "assigned_secret",
         "secret",
@@ -100,7 +104,13 @@ _PATTERNS: tuple[_Pattern, ...] = (
         "<REDACTED:secret>",
     ),
     # --- Medium severity: identifying but not secret ------------------------
-    _p("abs_path", "path", "medium", r"(?:/Users/|/home/)[^\s'\"]*", "<PATH>"),
+    _p(
+        "abs_path",
+        "path",
+        "medium",
+        r"(?:/Users/|/home/|[A-Za-z]:[\\/]Users[\\/])[^\s'\"]*",
+        "<PATH>",
+    ),
     _p(
         "email",
         "email",
@@ -233,6 +243,10 @@ def load_redaction_config(pm_path: Path) -> dict:
     is absent or malformed. Never raises — a broken config must not block the
     pipeline, and (fail-safe) a missing config simply means "in-package catalog
     only". Both keys are coerced to lists of strings.
+
+    Tip: add identifiers the in-package catalog cannot infer — e.g. your GitHub
+    username / handle (which can hide inside URLs like github.com/<user>) — to
+    ``deny`` so they are scrubbed from drafts.
     """
     config_path = Path(pm_path) / "redaction.yaml"
     if not config_path.exists():
