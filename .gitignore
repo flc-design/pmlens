@@ -50,5 +50,13 @@ AGENTS.md.bak.*
 # who choose to commit .pm/ to git; PMSERV-048)
 .pm/.locks/
 
+# PM Server X-content drafts — x_drafts.db carries raw_content (the unscrubbed
+# concentrate, a secret at rest; ADR-024). Defensive explicit exclusion for
+# users who choose to commit .pm/ to git (PMSERV-113 / PMSERV-120). Covers the
+# WAL/SHM sidecars too.
+.pm/x_drafts.db
+.pm/x_drafts.db-wal
+.pm/x_drafts.db-shm
+
 # Synaptic Ledger (local knowledge data)
 .synaptic/
