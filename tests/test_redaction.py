@@ -17,26 +17,29 @@ import pytest
 
 from pm_server.redaction import load_redaction_config, redact
 
+# Secret-shaped fixtures are ASSEMBLED at runtime so the literal forms never
+# appear in source text — otherwise GitHub secret scanning flags them on push
+# (they are FAKE; no real credentials). The redaction regexes still match the
+# assembled values. (A Google-key-shaped literal tripped the scanner on 631b9c7.)
+_FAKE = {
+    "aws": "AKIA" + "A" * 16,
+    "ghp": "ghp_" + "a" * 36,
+    "gh_pat": "github_pat_" + "b" * 30,
+    "stripe": "sk_live_" + "c" * 20,
+    "slack": "xoxb-" + "d" * 16,
+    "jwt": "eyJ" + "a" * 16 + "." + "eyJ" + "b" * 16 + "." + "c" * 16,
+    "conn": "postgres" + "://user:pass@db.example.com:5432/prod",
+    "assigned": "api" + "_key=SUPERSECRETVALUE123",
+    "gcp": "AIza" + "0" * 35,
+    "openai": "sk-proj-" + "e" * 36,
+    "npm": "npm_" + "f" * 36,
+    "pypi": "pypi-" + "G" * 20,
+}
+
 # ─── secret scrubbing (high severity) ────────────────
 
 
-@pytest.mark.parametrize(
-    "secret",
-    [
-        "AKIA1234567890ABCDEF",
-        "ghp_abcdefghijklmnopqrstuvwxyz0123456789",
-        "github_pat_abcdefghij_klmnopqrstuvwxyz0123456789",
-        "sk_live_abcdefghijklmnop1234",
-        "xoxb-1234567890-abcdefghijkl",
-        "eyJhbGciOiJIUzI1NiIsInR5cCI.eyJzdWIiOiIxMjM0NTY.SflKxwRJSMeKKF2QT4f",
-        "postgres://user:pass@db.example.com:5432/prod",
-        "api_key=SUPERSECRETVALUE123",
-        "AIza01234567890123456789012345678901234",
-        "sk-proj-abcdefghijklmnopqrstuvwxyz1234567890",
-        "npm_abcdefghijklmnopqrstuvwxyz0123456789",
-        "pypi-AgEIcHlwaS5vcmc0123456789abcdef",
-    ],
-)
+@pytest.mark.parametrize("secret", list(_FAKE.values()))
 def test_secret_is_scrubbed_from_hook(secret: str) -> None:
     res = redact(f"shipping it: {secret} today", [])
     assert secret not in res.redacted_hook
@@ -86,10 +89,10 @@ def test_internal_ids_scrubbed() -> None:
 def test_each_segment_scrubbed_individually() -> None:
     res = redact(
         "clean hook",
-        ["first segment ok", "leaked nakashin09@gmail.com here", "AKIA1234567890ABCDEF tail"],
+        ["first segment ok", "leaked nakashin09@gmail.com here", f"{_FAKE['aws']} tail"],
     )
     assert "nakashin09@gmail.com" not in res.redacted_segments[1]
-    assert "AKIA1234567890ABCDEF" not in res.redacted_segments[2]
+    assert _FAKE["aws"] not in res.redacted_segments[2]
     assert res.redacted_segments[0] == "first segment ok"
     # by_field tallies the per-segment hits.
     assert res.report["by_field"].get("segment_1", 0) == 1
@@ -100,7 +103,7 @@ def test_each_segment_scrubbed_individually() -> None:
 
 
 def test_report_contains_no_cleartext_secret() -> None:
-    secret = "AKIA1234567890ABCDEF"
+    secret = _FAKE["aws"]
     email = "nakashin09@gmail.com"
     res = redact(f"{secret}", [f"contact {email}", "/Users/flc001/x"])
     blob = json.dumps(res.report)
@@ -180,13 +183,13 @@ def test_redaction_target_is_post_source() -> None:
     """The redacted fields are what the human will post — assert nothing from
     the dirty input survives into them (redaction-target == post-source)."""
     dirty_hook = "leak /Users/flc001/x and nakashin09@gmail.com"
-    dirty_segs = ["token ghp_abcdefghijklmnopqrstuvwxyz0123456789", "ref memory:190"]
+    dirty_segs = [f"token {_FAKE['ghp']}", "ref memory:190"]
     res = redact(dirty_hook, dirty_segs)
     posted = json.dumps([res.redacted_hook, *res.redacted_segments])
     for leak in (
         "/Users/flc001",
         "nakashin09@gmail.com",
-        "ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+        _FAKE["ghp"],
         "memory:190",
     ):
         assert leak not in posted
