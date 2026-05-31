@@ -16,7 +16,7 @@ from pm_server.hooks import (
     uninstall_hooks,
 )
 from pm_server.models import Phase, PhaseStatus, Priority, Project, ProjectStatus, Task, TaskStatus
-from pm_server.storage import save_project, save_tasks
+from pm_server.storage import _save_project, _save_tasks
 
 # ─── Fixtures ─────────────────────────────────────
 
@@ -42,7 +42,7 @@ def pm_project(tmp_path: Path) -> Path:
         status=ProjectStatus.DEVELOPMENT,
         phases=[Phase(id="phase-1", name="Core", status=PhaseStatus.ACTIVE)],
     )
-    save_project(pm_path, project)
+    _save_project(pm_path, project)
 
     tasks = [
         Task(
@@ -60,7 +60,7 @@ def pm_project(tmp_path: Path) -> Path:
             priority=Priority.P1,
         ),
     ]
-    save_tasks(pm_path, tasks)
+    _save_tasks(pm_path, tasks)
     return tmp_path / "project"
 
 
@@ -213,8 +213,8 @@ class TestBuildCommitReminder:
             status=ProjectStatus.DEVELOPMENT,
             phases=[],
         )
-        save_project(pm_path, project)
-        save_tasks(pm_path, [])
+        _save_project(pm_path, project)
+        _save_tasks(pm_path, [])
 
         reminder = _build_commit_reminder(pm_path)
         assert "pm_update_task" in reminder

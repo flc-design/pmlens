@@ -136,9 +136,9 @@ def discover(scan_path: str):
     from .models import RegistryEntry
     from .storage import (
         GLOBAL_PM_DIR,
+        _save_registry,
         _yaml_transaction,
         load_registry,
-        save_registry,
     )
 
     scan = scan_projects(Path(scan_path))
@@ -168,7 +168,7 @@ def discover(scan_path: str):
             registered_paths.add(resolved)
             newly_registered.append(proj)
         if newly_registered:
-            save_registry(registry)
+            _save_registry(registry)
 
     for proj in newly_registered:
         click.echo(f"  ✓ {proj['name']} ({proj['path']})")

@@ -27,9 +27,9 @@ from pm_server.server import (
     pm_workflow_templates,
 )
 from pm_server.storage import (
+    _save_project,
+    _save_tasks,
     init_pm_directory,
-    save_project,
-    save_tasks,
 )
 
 
@@ -37,8 +37,8 @@ from pm_server.storage import (
 def initialized_project(tmp_path, sample_project, sample_tasks):
     """Create a fully initialized project with data."""
     pm_path = init_pm_directory(tmp_path)
-    save_project(pm_path, sample_project)
-    save_tasks(pm_path, sample_tasks)
+    _save_project(pm_path, sample_project)
+    _save_tasks(pm_path, sample_tasks)
     return tmp_path
 
 
@@ -252,7 +252,7 @@ class TestPmDiscover:
 
     def test_discover_batches_save_into_one_call(self, tmp_path, monkeypatch):
         """PMSERV-066: ``pm_discover`` must commit N new entries with a
-        single ``save_registry`` call, not N per-entry saves.
+        single ``_save_registry`` call, not N per-entry saves.
 
         Before the fix the implementation called ``register_project`` in a
         loop, each acquiring its own ``_yaml_transaction(GLOBAL_PM_DIR,
@@ -268,18 +268,20 @@ class TestPmDiscover:
             (pm / "project.yaml").write_text(f"name: {name}\n")
 
         call_count = {"n": 0}
-        real_save = _server_mod.save_registry
+        real_save = _server_mod._save_registry
 
         def counting(*args, **kwargs):
             call_count["n"] += 1
             return real_save(*args, **kwargs)
 
-        monkeypatch.setattr(_server_mod, "save_registry", counting)
+        monkeypatch.setattr(_server_mod, "_save_registry", counting)
 
         result = pm_discover(scan_path=str(tmp_path))
         assert result["found"] == 3
         assert result["newly_registered"] == 3
-        assert call_count["n"] == 1, f"Expected 1 batched save_registry call, got {call_count['n']}"
+        assert call_count["n"] == 1, (
+            f"Expected 1 batched _save_registry call, got {call_count['n']}"
+        )
 
     def test_discover_loads_registry_inside_lock(self, tmp_path, monkeypatch):
         """PMSERV-066: ``load_registry`` must occur inside the registry
@@ -330,7 +332,7 @@ class TestPmDiscover:
         registered must not write ``registry.yaml`` at all.
 
         With the batched implementation, the lock is still acquired (so the
-        load is consistent), but ``save_registry`` is only called when
+        load is consistent), but ``_save_registry`` is only called when
         ``newly_registered`` is non-empty. This guards against churning the
         atomic-write path on idempotent re-discoveries.
         """
@@ -343,21 +345,21 @@ class TestPmDiscover:
         first = pm_discover(scan_path=str(tmp_path))
         assert first["newly_registered"] == 1
 
-        # Second pass: same scan, count save_registry calls — must be 0
+        # Second pass: same scan, count _save_registry calls — must be 0
         call_count = {"n": 0}
-        real_save = _server_mod.save_registry
+        real_save = _server_mod._save_registry
 
         def counting(*args, **kwargs):
             call_count["n"] += 1
             return real_save(*args, **kwargs)
 
-        monkeypatch.setattr(_server_mod, "save_registry", counting)
+        monkeypatch.setattr(_server_mod, "_save_registry", counting)
 
         second = pm_discover(scan_path=str(tmp_path))
         assert second["found"] == 1
         assert second["newly_registered"] == 0
         assert call_count["n"] == 0, (
-            f"Idempotent re-discover should not save_registry, got {call_count['n']} call(s)"
+            f"Idempotent re-discover should not _save_registry, got {call_count['n']} call(s)"
         )
 
 
@@ -367,7 +369,7 @@ class TestPmCleanup:
 
         with (
             patch("pm_server.server.load_registry") as mock_reg,
-            patch("pm_server.server.save_registry"),
+            patch("pm_server.server._save_registry"),
         ):
             mock_reg.return_value = Registry(
                 projects=[
@@ -391,7 +393,7 @@ class TestPmCleanup:
 
         with (
             patch("pm_server.server.load_registry") as mock_reg,
-            patch("pm_server.server.save_registry"),
+            patch("pm_server.server._save_registry"),
         ):
             mock_reg.return_value = Registry(
                 projects=[
@@ -408,7 +410,7 @@ class TestPmCleanup:
 
         with (
             patch("pm_server.server.load_registry") as mock_reg,
-            patch("pm_server.server.save_registry"),
+            patch("pm_server.server._save_registry"),
         ):
             mock_reg.return_value = Registry(
                 projects=[
@@ -744,7 +746,7 @@ class TestPmAddIssue:
 
     def test_add_issue_defect_writes_tasks_atomically(self, initialized_project, monkeypatch):
         """PMSERV-065 / ADR-012: defect issue creation on a done parent must
-        perform exactly one ``save_tasks`` write under a single
+        perform exactly one ``_save_tasks`` write under a single
         ``_yaml_transaction``. Pre-fix the compound op used ``add_task`` +
         ``update_task`` which wrote twice, leaving a TOCTOU window between
         them. A regression to that shape would surface here as 2 writes.
@@ -752,13 +754,13 @@ class TestPmAddIssue:
         from pm_server import server as _server_mod
 
         call_count = {"n": 0}
-        real_save = _server_mod.save_tasks
+        real_save = _server_mod._save_tasks
 
         def counting_save(pm_path, tasks):
             call_count["n"] += 1
             real_save(pm_path, tasks)
 
-        monkeypatch.setattr(_server_mod, "save_tasks", counting_save)
+        monkeypatch.setattr(_server_mod, "_save_tasks", counting_save)
 
         result = pm_add_issue(
             parent_id="TEST-001",  # status: done — triggers compound parent revert
@@ -1068,7 +1070,7 @@ class TestPmRecall:
     @pytest.fixture(autouse=True)
     def _setup_project(self, tmp_project, monkeypatch):
         from pm_server.models import Project
-        from pm_server.storage import save_project as _save
+        from pm_server.storage import _save_project as _save
 
         pm_path = tmp_project / ".pm"
         _save(pm_path, Project(name="testproj", display_name="Test"))

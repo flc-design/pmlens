@@ -6,7 +6,7 @@ from pathlib import Path
 
 from pm_server.memory import MemoryStore
 from pm_server.models import Memory, Project, SessionSummary
-from pm_server.storage import save_project
+from pm_server.storage import _save_project
 
 # ─── Global sync ───────────────────────────────────────
 
@@ -109,7 +109,7 @@ class TestPmMemorySearch:
         pm_path.mkdir(exist_ok=True)
         (pm_path / "daily").mkdir(exist_ok=True)
         project = Project(name="searchproj", display_name="Search Test")
-        save_project(pm_path, project)
+        _save_project(pm_path, project)
         monkeypatch.chdir(tmp_path)
 
         import pm_server.server
@@ -166,7 +166,7 @@ class TestInjectContext:
         pm_path.mkdir()
         (pm_path / "daily").mkdir()
         project = Project(name="emptyproj")
-        save_project(pm_path, project)
+        _save_project(pm_path, project)
 
         # No memory.db yet — should silently do nothing
         inject_context(project_path=tmp_path)
@@ -180,7 +180,7 @@ class TestInjectContext:
         pm_path.mkdir()
         (pm_path / "daily").mkdir()
         project = Project(name="ctxproj")
-        save_project(pm_path, project)
+        _save_project(pm_path, project)
 
         # Create memories
         store = MemoryStore(pm_path / "memory.db", global_db_path=None)

@@ -27,12 +27,12 @@ from pm_server.models import (
     WorkflowTemplate,
 )
 from pm_server.storage import (
+    _save_workflows,
     add_workflow,
     list_workflow_templates,
     load_workflow_template,
     load_workflows,
     next_workflow_number,
-    save_workflows,
     update_workflow,
 )
 from pm_server.workflow import (
@@ -132,7 +132,7 @@ class TestWorkflowStorage:
             template="development",
             steps=[WorkflowStep(id="s1", name="Step 1")],
         )
-        save_workflows(tmp_pm_path, [wf])
+        _save_workflows(tmp_pm_path, [wf])
 
         loaded = load_workflows(tmp_pm_path)
         assert len(loaded) == 1
@@ -216,7 +216,7 @@ class TestWorkflowStorage:
             steps=[step],
             chain_to="next-wf",
         )
-        save_workflows(tmp_pm_path, [wf])
+        _save_workflows(tmp_pm_path, [wf])
         loaded = load_workflows(tmp_pm_path)[0]
 
         assert loaded.chain_to == "next-wf"
@@ -694,7 +694,7 @@ class TestWorkflowAbandon:
         # Pre-populate notes on the current step
         wf = get_workflow(tmp_pm_path, "WF-001")
         wf.steps[0].notes = "Initial note"
-        save_workflows(tmp_pm_path, [wf])
+        _save_workflows(tmp_pm_path, [wf])
 
         abandon_workflow(tmp_pm_path, notes="Abandon reason")
 
@@ -765,7 +765,7 @@ class TestWorkflowAbandon:
         # Manually pause the workflow (PAUSED setter not yet exposed via API)
         wf = get_workflow(tmp_pm_path, "WF-001")
         wf.status = WorkflowStatus.PAUSED
-        save_workflows(tmp_pm_path, [wf])
+        _save_workflows(tmp_pm_path, [wf])
 
         result = abandon_workflow(tmp_pm_path, workflow_id="WF-001")
         assert result["status"] == "abandoned"

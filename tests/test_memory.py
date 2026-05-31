@@ -560,11 +560,11 @@ class TestServerToolIntegration:
     def _setup_project(self, tmp_project: Path, monkeypatch):
         """Set up a project with project.yaml for server tool calls."""
         from pm_server.models import Project
-        from pm_server.storage import save_project
+        from pm_server.storage import _save_project
 
         pm_path = tmp_project / ".pm"
         project = Project(name="testproj", display_name="Test")
-        save_project(pm_path, project)
+        _save_project(pm_path, project)
         monkeypatch.chdir(tmp_project)
 
         # Clear cached memory stores between tests

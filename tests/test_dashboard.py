@@ -19,11 +19,11 @@ from pm_server.models import (
     WorkflowStepStatus,
 )
 from pm_server.storage import (
+    _save_knowledge,
+    _save_project,
+    _save_tasks,
+    _save_workflows,
     init_pm_directory,
-    save_knowledge,
-    save_project,
-    save_tasks,
-    save_workflows,
 )
 
 
@@ -31,8 +31,8 @@ from pm_server.storage import (
 def dashboard_project(tmp_path, sample_project, sample_tasks):
     """Create a project with enough data for dashboard rendering."""
     pm_path = init_pm_directory(tmp_path)
-    save_project(pm_path, sample_project)
-    save_tasks(pm_path, sample_tasks)
+    _save_project(pm_path, sample_project)
+    _save_tasks(pm_path, sample_tasks)
     return pm_path
 
 
@@ -63,8 +63,8 @@ class TestProjectDashboardWorkflow:
     @pytest.fixture
     def dashboard_with_workflow(self, tmp_path, sample_project, sample_tasks):
         pm_path = init_pm_directory(tmp_path)
-        save_project(pm_path, sample_project)
-        save_tasks(pm_path, sample_tasks)
+        _save_project(pm_path, sample_project)
+        _save_tasks(pm_path, sample_tasks)
         wf = Workflow(
             id="WF-001",
             name="Development",
@@ -95,14 +95,14 @@ class TestProjectDashboardWorkflow:
             current_step_index=2,
             status=WorkflowStatus.ACTIVE,
         )
-        save_workflows(pm_path, [wf])
+        _save_workflows(pm_path, [wf])
         return pm_path
 
     @pytest.fixture
     def dashboard_with_knowledge(self, tmp_path, sample_project, sample_tasks):
         pm_path = init_pm_directory(tmp_path)
-        save_project(pm_path, sample_project)
-        save_tasks(pm_path, sample_tasks)
+        _save_project(pm_path, sample_project)
+        _save_tasks(pm_path, sample_tasks)
         records = [
             KnowledgeRecord(
                 id="KR-001",
@@ -120,7 +120,7 @@ class TestProjectDashboardWorkflow:
                 title="OAuth providers",
             ),
         ]
-        save_knowledge(pm_path, records)
+        _save_knowledge(pm_path, records)
         return pm_path
 
     def test_html_shows_workflow(self, dashboard_with_workflow):
@@ -178,8 +178,8 @@ class TestPortfolioDashboard:
 
     def test_text_with_projects(self, tmp_path, sample_project, sample_tasks):
         pm_path = init_pm_directory(tmp_path)
-        save_project(pm_path, sample_project)
-        save_tasks(pm_path, sample_tasks)
+        _save_project(pm_path, sample_project)
+        _save_tasks(pm_path, sample_tasks)
 
         with patch("pm_server.dashboard.load_registry") as mock_reg:
             mock_reg.return_value = Registry(
@@ -191,8 +191,8 @@ class TestPortfolioDashboard:
     def test_text_shows_wf_kr_columns(self, tmp_path, sample_project, sample_tasks):
         """Portfolio text output includes WF and KR columns."""
         pm_path = init_pm_directory(tmp_path)
-        save_project(pm_path, sample_project)
-        save_tasks(pm_path, sample_tasks)
+        _save_project(pm_path, sample_project)
+        _save_tasks(pm_path, sample_tasks)
         wf = Workflow(
             id="WF-001",
             name="Dev",
@@ -204,12 +204,12 @@ class TestPortfolioDashboard:
             current_step_index=0,
             status=WorkflowStatus.ACTIVE,
         )
-        save_workflows(pm_path, [wf])
+        _save_workflows(pm_path, [wf])
         records = [
             KnowledgeRecord(id="KR-001", category=KnowledgeCategory.RESEARCH, title="R1"),
             KnowledgeRecord(id="KR-002", category=KnowledgeCategory.SPEC, title="S1"),
         ]
-        save_knowledge(pm_path, records)
+        _save_knowledge(pm_path, records)
 
         with patch("pm_server.dashboard.load_registry") as mock_reg:
             mock_reg.return_value = Registry(
@@ -222,8 +222,8 @@ class TestPortfolioDashboard:
     def test_html_shows_wf_kr_columns(self, tmp_path, sample_project, sample_tasks):
         """Portfolio HTML output includes Workflows and Knowledge columns."""
         pm_path = init_pm_directory(tmp_path)
-        save_project(pm_path, sample_project)
-        save_tasks(pm_path, sample_tasks)
+        _save_project(pm_path, sample_project)
+        _save_tasks(pm_path, sample_tasks)
         wf = Workflow(
             id="WF-001",
             name="Dev",
@@ -235,7 +235,7 @@ class TestPortfolioDashboard:
             current_step_index=0,
             status=WorkflowStatus.ACTIVE,
         )
-        save_workflows(pm_path, [wf])
+        _save_workflows(pm_path, [wf])
 
         with patch("pm_server.dashboard.load_registry") as mock_reg:
             mock_reg.return_value = Registry(

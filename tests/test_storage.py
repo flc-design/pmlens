@@ -18,6 +18,11 @@ from pm_server.models import (
     TaskStatus,
 )
 from pm_server.storage import (
+    _save_milestones,
+    _save_project,
+    _save_registry,
+    _save_risks,
+    _save_tasks,
     _yaml_transaction,
     add_daily_log,
     add_decision,
@@ -36,11 +41,6 @@ from pm_server.storage import (
     next_risk_number,
     next_task_number,
     register_project,
-    save_milestones,
-    save_project,
-    save_registry,
-    save_risks,
-    save_tasks,
     unregister_project,
     update_task,
 )
@@ -48,7 +48,7 @@ from pm_server.storage import (
 
 class TestProjectStorage:
     def test_save_and_load(self, tmp_pm_path, sample_project):
-        save_project(tmp_pm_path, sample_project)
+        _save_project(tmp_pm_path, sample_project)
         loaded = load_project(tmp_pm_path)
         assert loaded.name == "testproj"
         assert loaded.version == "1.0.0"
@@ -60,7 +60,7 @@ class TestProjectStorage:
         assert project.status == ProjectStatus.DEVELOPMENT
 
     def test_yaml_has_header(self, tmp_pm_path, sample_project):
-        save_project(tmp_pm_path, sample_project)
+        _save_project(tmp_pm_path, sample_project)
         content = (tmp_pm_path / "project.yaml").read_text()
         assert content.startswith("# PM Server - project.yaml")
 
@@ -78,7 +78,7 @@ class TestProjectStorage:
         assert loaded.pm_schema == 1
 
     def test_pm_schema_round_trip(self, tmp_pm_path, sample_project):
-        save_project(tmp_pm_path, sample_project)
+        _save_project(tmp_pm_path, sample_project)
         content = (tmp_pm_path / "project.yaml").read_text()
         assert "pm_schema: 1" in content
         assert load_project(tmp_pm_path).pm_schema == 1
@@ -86,7 +86,7 @@ class TestProjectStorage:
 
 class TestTaskStorage:
     def test_save_and_load(self, tmp_pm_path, sample_tasks):
-        save_tasks(tmp_pm_path, sample_tasks)
+        _save_tasks(tmp_pm_path, sample_tasks)
         loaded = load_tasks(tmp_pm_path)
         assert len(loaded) == 4
         assert loaded[0].id == "TEST-001"
@@ -102,7 +102,7 @@ class TestTaskStorage:
         assert loaded[0].title == "New task"
 
     def test_update_task(self, tmp_pm_path, sample_tasks):
-        save_tasks(tmp_pm_path, sample_tasks)
+        _save_tasks(tmp_pm_path, sample_tasks)
         updated = update_task(tmp_pm_path, "TEST-002", status=TaskStatus.IN_PROGRESS)
         assert updated.status == TaskStatus.IN_PROGRESS
 
@@ -112,12 +112,12 @@ class TestTaskStorage:
         assert t.status == TaskStatus.IN_PROGRESS
 
     def test_update_nonexistent_raises(self, tmp_pm_path, sample_tasks):
-        save_tasks(tmp_pm_path, sample_tasks)
+        _save_tasks(tmp_pm_path, sample_tasks)
         with pytest.raises(TaskNotFoundError):
             update_task(tmp_pm_path, "NOPE-999", status=TaskStatus.DONE)
 
     def test_next_task_number(self, tmp_pm_path, sample_tasks):
-        save_tasks(tmp_pm_path, sample_tasks)
+        _save_tasks(tmp_pm_path, sample_tasks)
         assert next_task_number(tmp_pm_path) == 5  # TEST-004 + 1
 
     def test_next_task_number_empty(self, tmp_pm_path):
@@ -160,7 +160,7 @@ class TestDailyLog:
 class TestRegistry:
     def test_save_and_load(self, tmp_registry_dir):
         registry = Registry(projects=[RegistryEntry(path="/a/b", name="proj1")])
-        save_registry(registry, tmp_registry_dir)
+        _save_registry(registry, tmp_registry_dir)
         loaded = load_registry(tmp_registry_dir)
         assert len(loaded.projects) == 1
 
@@ -202,14 +202,14 @@ class TestInitPmDirectory:
 class TestRisksAndMilestones:
     def test_risks_roundtrip(self, tmp_pm_path):
         risks = [Risk(id="RISK-001", title="Deadline risk")]
-        save_risks(tmp_pm_path, risks)
+        _save_risks(tmp_pm_path, risks)
         loaded = load_risks(tmp_pm_path)
         assert len(loaded) == 1
         assert loaded[0].title == "Deadline risk"
 
     def test_milestones_roundtrip(self, tmp_pm_path):
         milestones = [Milestone(id="MS-001", name="MVP")]
-        save_milestones(tmp_pm_path, milestones)
+        _save_milestones(tmp_pm_path, milestones)
         loaded = load_milestones(tmp_pm_path)
         assert len(loaded) == 1
         assert loaded[0].name == "MVP"

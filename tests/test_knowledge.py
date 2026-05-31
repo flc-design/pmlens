@@ -22,10 +22,10 @@ from pm_server.models import (
     KnowledgeStatus,
 )
 from pm_server.storage import (
+    _save_knowledge,
     add_knowledge,
     load_knowledge,
     next_knowledge_number,
-    save_knowledge,
     update_knowledge,
 )
 from pm_server.workflow import start_workflow, workflow_status
@@ -105,7 +105,7 @@ class TestKnowledgeStorage:
 
     def test_save_and_load(self, tmp_pm_path):
         kr = KnowledgeRecord(id="KR-001", category="research", title="Test Research")
-        save_knowledge(tmp_pm_path, [kr])
+        _save_knowledge(tmp_pm_path, [kr])
         loaded = load_knowledge(tmp_pm_path)
         assert len(loaded) == 1
         assert loaded[0].id == "KR-001"
@@ -178,7 +178,7 @@ class TestKnowledgeStorage:
             task_id="PROJ-005",
             workflow_id="WF-001",
         )
-        save_knowledge(tmp_pm_path, [kr])
+        _save_knowledge(tmp_pm_path, [kr])
         loaded = load_knowledge(tmp_pm_path)[0]
 
         assert loaded.category == KnowledgeCategory.TRADEOFF

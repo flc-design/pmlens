@@ -42,6 +42,9 @@ from .outbox import default_outbox_db_path, get_outbox_store
 from .storage import (
     GLOBAL_PM_DIR,
     _next_task_number_from_list,
+    _save_project,
+    _save_registry,
+    _save_tasks,
     _yaml_transaction,
     add_daily_log,
     add_decision,
@@ -60,9 +63,6 @@ from .storage import (
     next_knowledge_number,
     next_task_number,
     register_project,
-    save_project,
-    save_registry,
-    save_tasks,
     update_knowledge,
     update_task,
 )
@@ -344,7 +344,7 @@ def pm_init(project_path: str | None = None, project_name: str | None = None) ->
             description=info.get("description", ""),
         )
         with _yaml_transaction(pm_path, "project.yaml"):
-            save_project(pm_path, project)
+            _save_project(pm_path, project)
 
     # Register in global registry
     register_project(root, project.name)
@@ -674,7 +674,7 @@ def pm_add_issue(
     # PMSERV-065 / ADR-012: compound op (child append + conditional parent
     # revert) を単一 _yaml_transaction("tasks.yaml") に統合し TOCTOU を解消。
     # storage.py docstring の規約に従い、内部で add_task / update_task を
-    # 再呼び出しせず raw load_tasks / save_tasks を使う (filelock の
+    # 再呼び出しせず raw load_tasks / _save_tasks を使う (filelock の
     # self-deadlock を回避)。next_task_number も lock 内 fresh list から
     # 計算するため id 衝突 race も同時に閉じる。
     parent_reverted = False
@@ -704,7 +704,7 @@ def pm_add_issue(
             parent.updated = _dt.date.today()
             parent_reverted = True
 
-        save_tasks(pm_path, tasks)
+        _save_tasks(pm_path, tasks)
 
     warnings: list[dict] = []
     if parent_reverted:
@@ -1585,7 +1585,7 @@ def pm_discover(scan_path: str = ".") -> dict:
        pre-existing TOCTOU window where a lock-free snapshot was used to
        decide whether to append new entries.
     2. New entries are accumulated in memory and committed via a single
-       ``save_registry`` call, replacing the per-project lock acquire/
+       ``_save_registry`` call, replacing the per-project lock acquire/
        release loop that previously took N filelocks for N projects.
 
     This is the same "lift the lock one level up and call raw load/save
@@ -1645,7 +1645,7 @@ def pm_discover(scan_path: str = ".") -> dict:
             registered_paths.add(resolved)
             newly_registered.append(proj)
         if newly_registered:
-            save_registry(registry)
+            _save_registry(registry)
 
     return {
         "scanned": scan_path,
@@ -1677,7 +1677,7 @@ def pm_cleanup() -> dict:
     if invalid:
         with _yaml_transaction(GLOBAL_PM_DIR, "registry"):
             registry.projects = valid
-            save_registry(registry)
+            _save_registry(registry)
 
     # Detect orphan project files in global ~/.pm/
     orphan_files: list[str] = []
