@@ -420,6 +420,50 @@ class TestPmCleanup:
             result = pm_cleanup()
             assert result["orphan_files_in_global"] == []
 
+    def test_cleanup_loads_registry_inside_lock(self, monkeypatch, initialized_project):
+        """PMSERV-069: pm_cleanup must load the registry INSIDE the registry
+        ``_yaml_transaction`` so a concurrently-registered project is not lost
+        by overwriting with a stale valid-snapshot (the TOCTOU class PMSERV-066
+        closed for pm_discover)."""
+        from contextlib import contextmanager
+
+        from pm_server import server as _server_mod
+        from pm_server.models import Registry, RegistryEntry
+
+        events: list[str] = []
+        real_tx = _server_mod._yaml_transaction
+
+        def tracking_load(*args, **kwargs):
+            events.append("load")
+            return Registry(
+                projects=[
+                    RegistryEntry(path=str(initialized_project), name="valid"),
+                    RegistryEntry(path="/nonexistent/path", name="invalid"),
+                ]
+            )
+
+        @contextmanager
+        def tracking_tx(*args, **kwargs):
+            events.append("lock_enter")
+            with real_tx(*args, **kwargs):
+                yield
+            events.append("lock_exit")
+
+        monkeypatch.setattr(_server_mod, "load_registry", tracking_load)
+        monkeypatch.setattr(_server_mod, "_yaml_transaction", tracking_tx)
+        monkeypatch.setattr(_server_mod, "_save_registry", lambda *a, **k: None)
+
+        result = pm_cleanup()
+
+        assert result["removed"] == 1
+        assert events.count("load") == 1, events
+        assert "lock_enter" in events, events
+        # load (and the save it gates) must sit inside the registry lock.
+        assert events.index("lock_enter") < events.index("load"), (
+            f"load_registry must happen inside the lock; got {events}"
+        )
+        assert events.index("lock_exit") > events.index("load"), events
+
 
 class TestPmRisks:
     def test_risks_returns_list(self, initialized_project):

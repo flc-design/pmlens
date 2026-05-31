@@ -16,8 +16,9 @@ Concurrency (PMSERV-048 / ADR-011) and the private-save API (PMSERV-067):
   (a) the mutators in this module, and (b) a small set of in-layer composite
   read-modify-write sites that already hold their own ``_yaml_transaction`` and
   must avoid re-entrant locking — ``server.pm_add_issue`` (load_tasks + multi-
-  edit + ``_save_tasks``), ``server.pm_discover`` (batched ``_save_registry``),
-  and ``workflow.advance_step`` (``_save_workflows``). Those call ``_save_*``
+  edit + ``_save_tasks``), ``server.pm_discover`` / ``server.pm_cleanup``
+  (``_save_registry`` under a held registry lock), and
+  ``workflow.advance_step`` (``_save_workflows``). Those call ``_save_*``
   deliberately; the leading underscore marks the intentional lock bypass.
 """
 

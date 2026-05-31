@@ -1663,19 +1663,23 @@ def pm_cleanup() -> dict:
     Also detects orphan project files in the global ~/.pm/ directory
     that may have been created by the cwd-resolution bug.
     """
-    registry = load_registry()
     valid = []
     invalid = []
 
-    for entry in registry.projects:
-        pm_path = Path(entry.path) / ".pm"
-        if pm_path.is_dir() and (pm_path / "project.yaml").exists():
-            valid.append(entry)
-        else:
-            invalid.append({"path": entry.path, "name": entry.name})
-
-    if invalid:
-        with _yaml_transaction(GLOBAL_PM_DIR, "registry"):
+    # PMSERV-069: load + validate + save under ONE registry lock so a project
+    # registered concurrently (between the load and the save) is not lost by
+    # overwriting with a stale ``valid`` snapshot — the same TOCTOU class
+    # PMSERV-066 closed for pm_discover. The orphan-file scan below is a
+    # read-only fs check unrelated to the registry, so it stays outside.
+    with _yaml_transaction(GLOBAL_PM_DIR, "registry"):
+        registry = load_registry()
+        for entry in registry.projects:
+            pm_path = Path(entry.path) / ".pm"
+            if pm_path.is_dir() and (pm_path / "project.yaml").exists():
+                valid.append(entry)
+            else:
+                invalid.append({"path": entry.path, "name": entry.name})
+        if invalid:
             registry.projects = valid
             _save_registry(registry)
 
