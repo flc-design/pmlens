@@ -3,14 +3,22 @@
 All YAML operations use safe_load / safe_dump only (security).
 Output is human-readable with comment headers.
 
-Concurrency (PMSERV-048 / ADR-011):
+Concurrency (PMSERV-048 / ADR-011) and the private-save API (PMSERV-067):
 - ``_save_yaml`` writes via ``utils._atomic_write_text`` (mkstemp + os.replace),
   preventing partial-write corruption on SIGKILL / OS crash.
-- Public mutators (``add_*`` / ``update_*``) wrap the read-modify-write cycle in
-  ``_yaml_transaction`` to prevent lost updates between concurrent processes.
-- ``save_*`` helpers are internal raw I/O with no locking; callers that bypass
-  mutators (e.g. ``workflow.advance_step``) must wrap themselves in
-  ``_yaml_transaction``.
+- Public **mutators** (``add_*`` / ``update_*``) are the supported write API:
+  each wraps the read-modify-write cycle in ``_yaml_transaction`` to prevent
+  lost updates between concurrent processes. External callers MUST go through
+  these — not through raw saves.
+- ``_save_*`` helpers (``_save_tasks`` / ``_save_project`` / …) are PRIVATE raw
+  I/O with no locking, renamed from the former public ``save_*`` (PMSERV-067)
+  precisely to enforce the rule above. The only sanctioned callers are:
+  (a) the mutators in this module, and (b) a small set of in-layer composite
+  read-modify-write sites that already hold their own ``_yaml_transaction`` and
+  must avoid re-entrant locking — ``server.pm_add_issue`` (load_tasks + multi-
+  edit + ``_save_tasks``), ``server.pm_discover`` (batched ``_save_registry``),
+  and ``workflow.advance_step`` (``_save_workflows``). Those call ``_save_*``
+  deliberately; the leading underscore marks the intentional lock bypass.
 """
 
 from __future__ import annotations
@@ -146,7 +154,7 @@ def load_project(pm_path: Path) -> Project:
     return Project(**data)
 
 
-def save_project(pm_path: Path, project: Project) -> None:
+def _save_project(pm_path: Path, project: Project) -> None:
     """Save project to project.yaml."""
     _save_yaml(pm_path / "project.yaml", _model_dump(project), "project.yaml")
 
@@ -162,7 +170,7 @@ def load_tasks(pm_path: Path) -> list[Task]:
     return [Task(**t) for t in data["tasks"]]
 
 
-def save_tasks(pm_path: Path, tasks: list[Task]) -> None:
+def _save_tasks(pm_path: Path, tasks: list[Task]) -> None:
     """Save all tasks to tasks.yaml."""
     _save_yaml(
         pm_path / "tasks.yaml",
@@ -176,7 +184,7 @@ def add_task(pm_path: Path, task: Task) -> Task:
     with _yaml_transaction(pm_path, "tasks.yaml"):
         tasks = load_tasks(pm_path)
         tasks.append(task)
-        save_tasks(pm_path, tasks)
+        _save_tasks(pm_path, tasks)
     return task
 
 
@@ -190,7 +198,7 @@ def update_task(pm_path: Path, task_id: str, **updates) -> Task:
                     if value is not None and hasattr(task, key):
                         setattr(task, key, value)
                 task.updated = _dt.date.today()
-                save_tasks(pm_path, tasks)
+                _save_tasks(pm_path, tasks)
                 return task
     raise TaskNotFoundError(f"Task {task_id} not found")
 
@@ -229,7 +237,7 @@ def load_decisions(pm_path: Path) -> list[Decision]:
     return [Decision(**d) for d in data["decisions"]]
 
 
-def save_decisions(pm_path: Path, decisions: list[Decision]) -> None:
+def _save_decisions(pm_path: Path, decisions: list[Decision]) -> None:
     """Save all decisions to decisions.yaml."""
     _save_yaml(
         pm_path / "decisions.yaml",
@@ -243,7 +251,7 @@ def add_decision(pm_path: Path, decision: Decision) -> Decision:
     with _yaml_transaction(pm_path, "decisions.yaml"):
         decisions = load_decisions(pm_path)
         decisions.append(decision)
-        save_decisions(pm_path, decisions)
+        _save_decisions(pm_path, decisions)
     return decision
 
 
@@ -271,7 +279,7 @@ def load_milestones(pm_path: Path) -> list[Milestone]:
     return [Milestone(**m) for m in data["milestones"]]
 
 
-def save_milestones(pm_path: Path, milestones: list[Milestone]) -> None:
+def _save_milestones(pm_path: Path, milestones: list[Milestone]) -> None:
     """Save milestones to milestones.yaml."""
     _save_yaml(
         pm_path / "milestones.yaml",
@@ -285,7 +293,7 @@ def add_milestone(pm_path: Path, milestone: Milestone) -> Milestone:
     with _yaml_transaction(pm_path, "milestones.yaml"):
         milestones = load_milestones(pm_path)
         milestones.append(milestone)
-        save_milestones(pm_path, milestones)
+        _save_milestones(pm_path, milestones)
     return milestone
 
 
@@ -300,7 +308,7 @@ def load_risks(pm_path: Path) -> list[Risk]:
     return [Risk(**r) for r in data["risks"]]
 
 
-def save_risks(pm_path: Path, risks: list[Risk]) -> None:
+def _save_risks(pm_path: Path, risks: list[Risk]) -> None:
     """Save risks to risks.yaml."""
     _save_yaml(
         pm_path / "risks.yaml",
@@ -314,7 +322,7 @@ def add_risk(pm_path: Path, risk: Risk) -> Risk:
     with _yaml_transaction(pm_path, "risks.yaml"):
         risks = load_risks(pm_path)
         risks.append(risk)
-        save_risks(pm_path, risks)
+        _save_risks(pm_path, risks)
     return risk
 
 
@@ -342,7 +350,7 @@ def load_knowledge(pm_path: Path) -> list[KnowledgeRecord]:
     return [KnowledgeRecord(**k) for k in data["knowledge"]]
 
 
-def save_knowledge(pm_path: Path, records: list[KnowledgeRecord]) -> None:
+def _save_knowledge(pm_path: Path, records: list[KnowledgeRecord]) -> None:
     """Save all knowledge records to knowledge.yaml."""
     _save_yaml(
         pm_path / "knowledge.yaml",
@@ -356,7 +364,7 @@ def add_knowledge(pm_path: Path, record: KnowledgeRecord) -> KnowledgeRecord:
     with _yaml_transaction(pm_path, "knowledge.yaml"):
         records = load_knowledge(pm_path)
         records.append(record)
-        save_knowledge(pm_path, records)
+        _save_knowledge(pm_path, records)
     return record
 
 
@@ -370,7 +378,7 @@ def update_knowledge(pm_path: Path, record_id: str, **updates) -> KnowledgeRecor
                     if value is not None and hasattr(rec, key):
                         setattr(rec, key, value)
                 rec.updated = _dt.date.today()
-                save_knowledge(pm_path, records)
+                _save_knowledge(pm_path, records)
                 return rec
     raise KnowledgeNotFoundError(f"Knowledge record {record_id} not found")
 
@@ -429,7 +437,7 @@ def load_registry(registry_dir: Path | None = None) -> Registry:
     return Registry(**data)
 
 
-def save_registry(registry: Registry, registry_dir: Path | None = None) -> None:
+def _save_registry(registry: Registry, registry_dir: Path | None = None) -> None:
     """Save the global registry."""
     registry_dir = registry_dir or GLOBAL_PM_DIR
     registry_dir.mkdir(parents=True, exist_ok=True)
@@ -446,7 +454,7 @@ def register_project(project_path: Path, name: str, registry_dir: Path | None = 
         if any(p.path == resolved for p in registry.projects):
             return registry
         registry.projects.append(RegistryEntry(path=resolved, name=name))
-        save_registry(registry, registry_dir)
+        _save_registry(registry, registry_dir)
     return registry
 
 
@@ -458,7 +466,7 @@ def unregister_project(project_path: Path, registry_dir: Path | None = None) -> 
         registry = load_registry(registry_dir)
         resolved = str(project_path.resolve())
         registry.projects = [p for p in registry.projects if p.path != resolved]
-        save_registry(registry, registry_dir)
+        _save_registry(registry, registry_dir)
     return registry
 
 
@@ -514,7 +522,7 @@ def load_workflows(pm_path: Path) -> list[Workflow]:
     return [Workflow(**w) for w in data["workflows"]]
 
 
-def save_workflows(pm_path: Path, workflows: list[Workflow]) -> None:
+def _save_workflows(pm_path: Path, workflows: list[Workflow]) -> None:
     """Save all workflows to workflows.yaml."""
     _save_yaml(
         pm_path / "workflows.yaml",
@@ -528,7 +536,7 @@ def add_workflow(pm_path: Path, workflow: Workflow) -> Workflow:
     with _yaml_transaction(pm_path, "workflows.yaml"):
         workflows = load_workflows(pm_path)
         workflows.append(workflow)
-        save_workflows(pm_path, workflows)
+        _save_workflows(pm_path, workflows)
     return workflow
 
 
@@ -542,7 +550,7 @@ def update_workflow(pm_path: Path, workflow_id: str, **updates) -> Workflow:
                     if value is not None and hasattr(wf, key):
                         setattr(wf, key, value)
                 wf.updated = _dt.date.today()
-                save_workflows(pm_path, workflows)
+                _save_workflows(pm_path, workflows)
                 return wf
     raise WorkflowNotFoundError(f"Workflow {workflow_id} not found")
 

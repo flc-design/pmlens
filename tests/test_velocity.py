@@ -3,7 +3,7 @@
 import datetime as _dt
 
 from pm_server.models import Phase, PhaseStatus, Project, Task, TaskStatus
-from pm_server.storage import save_project, save_tasks
+from pm_server.storage import _save_project, _save_tasks
 from pm_server.velocity import calculate_velocity, detect_risks
 
 
@@ -39,7 +39,7 @@ class TestCalculateVelocity:
                 status=TaskStatus.TODO,
             ),
         ]
-        save_tasks(tmp_pm_path, tasks)
+        _save_tasks(tmp_pm_path, tasks)
         result = calculate_velocity(tmp_pm_path)
         assert result["total_done"] == 2
         assert result["average"] > 0
@@ -61,7 +61,7 @@ class TestCalculateVelocity:
             )
             for i in range(1, 6)
         ]
-        save_tasks(tmp_pm_path, tasks)
+        _save_tasks(tmp_pm_path, tasks)
         result = calculate_velocity(tmp_pm_path, weeks=4)
         # All completions in the most recent week → trend should be improving or stable
         assert result["trend"] in ("improving", "stable")
@@ -79,7 +79,7 @@ class TestCalculateVelocity:
             )
             for i in range(1, 6)
         ]
-        save_tasks(tmp_pm_path, tasks)
+        _save_tasks(tmp_pm_path, tasks)
         result = calculate_velocity(tmp_pm_path, weeks=4)
         assert result["trend"] in ("declining", "stable")
 
@@ -94,7 +94,7 @@ class TestDetectRisks:
         tasks = [
             Task(id="T-001", title="Normal", phase="p1", status=TaskStatus.TODO),
         ]
-        save_tasks(tmp_pm_path, tasks)
+        _save_tasks(tmp_pm_path, tasks)
         risks = detect_risks(tmp_pm_path)
         assert risks == []
 
@@ -109,7 +109,7 @@ class TestDetectRisks:
                 updated=_dt.date.today() - _dt.timedelta(days=3),
             ),
         ]
-        save_tasks(tmp_pm_path, tasks)
+        _save_tasks(tmp_pm_path, tasks)
         risks = detect_risks(tmp_pm_path)
         assert len(risks) == 1
         assert risks[0]["type"] == "blocked_task"
@@ -126,7 +126,7 @@ class TestDetectRisks:
                 updated=_dt.date.today() - _dt.timedelta(days=10),
             ),
         ]
-        save_tasks(tmp_pm_path, tasks)
+        _save_tasks(tmp_pm_path, tasks)
         risks = detect_risks(tmp_pm_path)
         assert risks[0]["severity"] == "high"
 
@@ -140,7 +140,7 @@ class TestDetectRisks:
                 updated=_dt.date.today() - _dt.timedelta(days=10),
             ),
         ]
-        save_tasks(tmp_pm_path, tasks)
+        _save_tasks(tmp_pm_path, tasks)
         risks = detect_risks(tmp_pm_path)
         assert len(risks) == 1
         assert risks[0]["type"] == "stale_task"
@@ -155,7 +155,7 @@ class TestDetectRisks:
                 updated=_dt.date.today(),
             ),
         ]
-        save_tasks(tmp_pm_path, tasks)
+        _save_tasks(tmp_pm_path, tasks)
         risks = detect_risks(tmp_pm_path)
         assert risks == []
 
@@ -171,7 +171,7 @@ class TestDetectRisks:
                 updated=_dt.date.today(),
             ),
         ]
-        save_tasks(tmp_pm_path, tasks)
+        _save_tasks(tmp_pm_path, tasks)
         risks = detect_risks(tmp_pm_path)
         overrun = [r for r in risks if r["type"] == "overrun"]
         assert len(overrun) == 1
@@ -187,7 +187,7 @@ class TestDetectRisks:
                 actual_hours=8.0,
             ),
         ]
-        save_tasks(tmp_pm_path, tasks)
+        _save_tasks(tmp_pm_path, tasks)
         risks = detect_risks(tmp_pm_path)
         overrun = [r for r in risks if r["type"] == "overrun"]
         assert overrun == []
@@ -208,7 +208,7 @@ class TestDetectRisks:
                 ),
             ],
         )
-        save_project(tmp_pm_path, project)
+        _save_project(tmp_pm_path, project)
         risks = detect_risks(tmp_pm_path)
         overdue = [r for r in risks if r["type"] == "phase_overdue"]
         assert len(overdue) == 1
@@ -226,7 +226,7 @@ class TestDetectRisks:
                 ),
             ],
         )
-        save_project(tmp_pm_path, project)
+        _save_project(tmp_pm_path, project)
         risks = detect_risks(tmp_pm_path)
         overdue = [r for r in risks if r["type"] == "phase_overdue"]
         assert overdue[0]["severity"] == "high"
@@ -243,7 +243,7 @@ class TestDetectRisks:
                 ),
             ],
         )
-        save_project(tmp_pm_path, project)
+        _save_project(tmp_pm_path, project)
         risks = detect_risks(tmp_pm_path)
         overdue = [r for r in risks if r["type"] == "phase_overdue"]
         assert overdue == []

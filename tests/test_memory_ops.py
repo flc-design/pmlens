@@ -136,13 +136,13 @@ class TestMemoryCleanup:
 class TestServerToolMemoryStats:
     def _setup_project(self, tmp_path, monkeypatch):
         from pm_server.models import Project
-        from pm_server.storage import save_project
+        from pm_server.storage import _save_project
 
         pm_path = tmp_path / ".pm"
         pm_path.mkdir(exist_ok=True)
         (pm_path / "daily").mkdir(exist_ok=True)
         project = Project(name="statsproj", display_name="Stats Test")
-        save_project(pm_path, project)
+        _save_project(pm_path, project)
         monkeypatch.chdir(tmp_path)
 
         import pm_server.server
@@ -176,13 +176,13 @@ class TestServerToolMemoryStats:
 class TestServerToolMemoryCleanup:
     def _setup_project(self, tmp_path, monkeypatch):
         from pm_server.models import Project
-        from pm_server.storage import save_project
+        from pm_server.storage import _save_project
 
         pm_path = tmp_path / ".pm"
         pm_path.mkdir(exist_ok=True)
         (pm_path / "daily").mkdir(exist_ok=True)
         project = Project(name="cleanupproj", display_name="Cleanup Test")
-        save_project(pm_path, project)
+        _save_project(pm_path, project)
         monkeypatch.chdir(tmp_path)
 
         import pm_server.server

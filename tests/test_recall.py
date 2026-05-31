@@ -20,7 +20,7 @@ from pm_server.models import (
     TaskStatus,
 )
 from pm_server.recall import ContextBuilder, _estimate_tokens, _truncate_to_tokens
-from pm_server.storage import save_project, save_tasks
+from pm_server.storage import _save_project, _save_tasks
 
 # ─── Token estimation helpers ──────────────────────────
 
@@ -64,7 +64,7 @@ def context_project(tmp_path: Path) -> Path:
         status=ProjectStatus.DEVELOPMENT,
         phases=[Phase(id="phase-1", name="Core", status=PhaseStatus.ACTIVE)],
     )
-    save_project(pm_path, project)
+    _save_project(pm_path, project)
 
     tasks = [
         Task(
@@ -82,7 +82,7 @@ def context_project(tmp_path: Path) -> Path:
             priority=Priority.P1,
         ),
     ]
-    save_tasks(pm_path, tasks)
+    _save_tasks(pm_path, tasks)
     return tmp_path
 
 

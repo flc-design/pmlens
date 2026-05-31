@@ -24,13 +24,13 @@ from .models import (
     WorkflowStepStatus,
 )
 from .storage import (
+    _save_workflows,
     _yaml_transaction,
     add_workflow,
     load_knowledge,
     load_workflow_template,
     load_workflows,
     next_workflow_number,
-    save_workflows,
 )
 
 # ─── Helpers ────────────────────────────────────────
@@ -294,7 +294,7 @@ def advance_step(
         # Save
         wf.updated = _dt.date.today()
         workflows[wf_index] = wf
-        save_workflows(pm_path, workflows)
+        _save_workflows(pm_path, workflows)
 
     return result
 
@@ -349,7 +349,7 @@ def abandon_workflow(
         wf.status = WorkflowStatus.ABANDONED
         wf.updated = _dt.date.today()
         workflows[wf_index] = wf
-        save_workflows(pm_path, workflows)
+        _save_workflows(pm_path, workflows)
 
         result: dict = {
             "status": "abandoned",
