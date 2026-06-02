@@ -320,6 +320,33 @@ def test_get_pending_count_counts_draft_and_redacted_only(store: XDraftStore) ->
     assert store.get_pending_count() == 1  # only 'a' (redacted, not posted)
 
 
+def test_recent_live_drafts_window_and_liveness(store: XDraftStore) -> None:
+    """PMSERV-121 debounce source: recent + live only (old / rejected excluded)."""
+    fresh1 = _append_draft(store, source_refs="memory:1")
+    fresh2 = _append_draft(store, source_refs="memory:2")
+    # A back-dated draft (inserted directly) is outside the window → excluded.
+    conn = sqlite3.connect(str(store.db_path))
+    try:
+        conn.execute(
+            "INSERT INTO x_drafts (signal_type, source_refs, raw_content, status, created_at) "
+            "VALUES ('lesson', 'memory:old', 'r', 'draft', '2020-01-01 00:00:00')"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    assert {r["id"] for r in store.recent_live_drafts(3600)} == {fresh1, fresh2}
+    # A rejected fresh draft drops out (not live).
+    store.mark_rejected(fresh1, "noise")
+    assert {r["id"] for r in store.recent_live_drafts(3600)} == {fresh2}
+    # Safe columns only — never the raw concentrate.
+    assert all("raw_content" not in r for r in store.recent_live_drafts(3600))
+
+
+def test_recent_live_drafts_negative_raises(store: XDraftStore) -> None:
+    with pytest.raises(ValueError, match="within_seconds"):
+        store.recent_live_drafts(-1)
+
+
 # ─── append-only trigger ─────────────────────────────
 
 
