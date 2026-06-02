@@ -112,6 +112,50 @@ def test_pm_draft_x_dedupes_same_source_refs(tmp_path: Path) -> None:
     assert first["draft_id"] in second["warnings"][0]["existing_ids"]
 
 
+def test_pm_draft_x_debounces_recent_distinct_draft(tmp_path: Path) -> None:
+    """PMSERV-121: a second distinct draft staged in the same session (within
+    the debounce window) is suppressed to avoid one-draft-per-lesson spam."""
+    proj = _make_project(tmp_path)
+    first = srv.pm_draft_x(
+        signal_type="lesson",
+        source_refs=["memory:1"],
+        raw_content="r1",
+        hook="h1",
+        project_path=str(proj),
+    )
+    second = srv.pm_draft_x(
+        signal_type="lesson",
+        source_refs=["memory:2"],  # DIFFERENT sources — not a dedupe case
+        raw_content="r2",
+        hook="h2",
+        project_path=str(proj),
+    )
+    assert first["status"] == "saved"
+    assert second["status"] == "debounced"
+    assert second["warnings"][0]["reason"] == "recent_draft_debounced"
+    assert first["draft_id"] in second["warnings"][0]["recent_ids"]
+
+
+def test_pm_draft_x_force_overrides_debounce(tmp_path: Path) -> None:
+    proj = _make_project(tmp_path)
+    srv.pm_draft_x(
+        signal_type="lesson",
+        source_refs=["memory:1"],
+        raw_content="r1",
+        hook="h1",
+        project_path=str(proj),
+    )
+    forced = srv.pm_draft_x(
+        signal_type="lesson",
+        source_refs=["memory:2"],
+        raw_content="r2",
+        hook="h2",
+        force=True,
+        project_path=str(proj),
+    )
+    assert forced["status"] == "saved"
+
+
 # ─── pm_redact_draft ─────────────────────────────────
 
 

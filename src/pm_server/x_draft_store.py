@@ -433,6 +433,32 @@ class XDraftStore:
             conn.close()
         return [dict(r) for r in rows]
 
+    def recent_live_drafts(self, within_seconds: int) -> list[dict]:
+        """Return live (non-rejected) drafts created within the last N seconds.
+
+        Used by ``pm_draft_x``'s debounce (PMSERV-121): if the session just
+        produced a draft, a second *distinct* draft is suppressed (nudging the
+        author to batch this session's lessons into one) unless forced. Safe
+        columns only. ``created_at`` is a UTC ``'YYYY-MM-DD HH:MM:SS'`` string,
+        so a lexical ``>=`` against ``datetime('now', '-N seconds')`` is a valid
+        recency test.
+        """
+        if within_seconds < 0:
+            raise ValueError("within_seconds must be non-negative")
+        placeholders = ", ".join("?" for _ in _LIVE_STATUSES)
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                f"SELECT {_SAFE_SELECT} FROM x_drafts "
+                f"WHERE status IN ({placeholders}) "
+                "AND created_at >= datetime('now', ?) "
+                "ORDER BY id DESC",
+                [*_LIVE_STATUSES, f"-{within_seconds} seconds"],
+            ).fetchall()
+        finally:
+            conn.close()
+        return [dict(r) for r in rows]
+
     def get_pending_count(self) -> int:
         """Count drafts still awaiting review (status in draft/redacted).
 

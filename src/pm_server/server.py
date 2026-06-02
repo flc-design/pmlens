@@ -1506,6 +1506,11 @@ _VALID_X_SIGNAL_TYPES = {"lesson", "insight", "adr", "mistake"}
 _VALID_X_KINDS = {"single", "thread"}
 _VALID_X_DRAFT_STATUSES = {"draft", "redacted", "rejected", "posted", "all"}
 
+# Debounce window (PMSERV-121): if a live draft was staged within this many
+# seconds, a second *distinct* pm_draft_x is suppressed so one session's many
+# lessons don't each spawn a draft. Pass force=true to override.
+_DRAFT_DEBOUNCE_SECONDS = 600
+
 
 def _get_x_draft_store(project_path: str | None):
     """Resolve the per-project XDraftStore via the db_path-keyed factory."""
@@ -1523,18 +1528,26 @@ def pm_draft_x(
     kind: str = "thread",
     hashtags: list[str] | None = None,
     workflow_id: str | None = None,
+    force: bool = False,
     project_path: str | None = None,
 ) -> dict:
     """Stage a build-in-public X draft derived from a .pm signal (PMSERV-113).
 
-    Persists the draft as the FIRST action (compaction-safe). Dedupes on the
-    normalized source_refs set: if a non-rejected draft already exists for the
-    same sources, this skips-with-warning rather than creating a duplicate
-    (e.g. after a compaction-induced re-record of the same lesson).
+    Persists the draft as the FIRST action (compaction-safe). Two guards run
+    before the insert:
+
+    * **Dedupe** on the normalized source_refs set: if a non-rejected draft
+      already exists for the same sources, this skips-with-warning (e.g. after
+      a compaction-induced re-record of the same lesson).
+    * **Debounce** (PMSERV-121): if a live draft was staged within the last
+      ~10 min, a second *distinct* draft is suppressed so one session's many
+      lessons don't each spawn a draft. Pass ``force=True`` to override and
+      stage a separate draft anyway.
 
     signal_type: lesson | insight | adr | mistake
     source_refs: provenance ids (memory:NN / ADR-NNN / PMSERV-NNN) — frozen
     body: ordered thread segments (each ideally <=280 chars)
+    force: bypass the debounce window (NOT the source_refs dedupe)
     NOTE: raw_content is the unscrubbed concentrate and is NEVER surfaced by
     the review queue (pm_x_drafts_pending). Call pm_redact_draft next.
     """
@@ -1578,6 +1591,26 @@ def pm_draft_x(
                 }
             ],
         }
+
+    if not force:
+        recent = store.recent_live_drafts(_DRAFT_DEBOUNCE_SECONDS)
+        if recent:
+            return {
+                "status": "debounced",
+                "source_refs": normalized,
+                "warnings": [
+                    {
+                        "reason": "recent_draft_debounced",
+                        "recent_ids": [row["id"] for row in recent],
+                        "window_seconds": _DRAFT_DEBOUNCE_SECONDS,
+                        "remediation": (
+                            f"A draft was staged within the last "
+                            f"{_DRAFT_DEBOUNCE_SECONDS // 60} min. Batch this lesson into an "
+                            "existing draft (edit it), or pass force=true to stage a separate one."
+                        ),
+                    }
+                ],
+            }
 
     draft_id = store.append(
         signal_type=signal_type,  # type: ignore[arg-type]
