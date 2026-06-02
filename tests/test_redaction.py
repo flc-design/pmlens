@@ -34,6 +34,11 @@ _FAKE = {
     "openai": "sk-proj-" + "e" * 36,
     "npm": "npm_" + "f" * 36,
     "pypi": "pypi-" + "G" * 20,
+    # PMSERV-121 catalog v2 additions (still runtime-assembled per memory:195).
+    "azure": "AccountKey=" + "A" * 86 + "==",
+    "gcp_sa_email": "svc-bot@my-project.iam.gserviceaccount.com",
+    "gcp_key_id": '"private_key_id": "' + "a" * 40 + '"',
+    "bearer": "Bearer " + "z" * 30,
 }
 
 # ─── secret scrubbing (high severity) ────────────────
@@ -76,8 +81,23 @@ def test_email_scrubbed() -> None:
     assert "<REDACTED:email>" in res.redacted_hook
 
 
-def test_internal_ids_scrubbed() -> None:
-    res = redact("done PMSERV-114 and ADR-024 see memory:190 in WF-031", [])
+def test_internal_ids_kept_visible_by_default() -> None:
+    """PMSERV-121: internal refs are non-secret and build-in-public posts want
+    them visible, so they are NOT scrubbed unless a project opts in."""
+    text = "done PMSERV-114 and ADR-024 see memory:190 in WF-031"
+    res = redact(text, [])
+    for token in ("PMSERV-114", "ADR-024", "memory:190", "WF-031"):
+        assert token in res.redacted_hook
+    assert res.report["by_category"].get("internal_id", 0) == 0
+    assert res.flagged is False
+
+
+def test_internal_ids_scrubbed_when_opted_in() -> None:
+    res = redact(
+        "done PMSERV-114 and ADR-024 see memory:190 in WF-031",
+        [],
+        scrub_internal_ids=True,
+    )
     for token in ("PMSERV-114", "ADR-024", "memory:190", "WF-031"):
         assert token not in res.redacted_hook
     assert res.report["by_category"].get("internal_id", 0) == 4
@@ -151,7 +171,7 @@ def test_deny_list_scrubs_custom_literal() -> None:
 
 def test_load_redaction_config_missing_returns_empty(tmp_path: Path) -> None:
     cfg = load_redaction_config(tmp_path)
-    assert cfg == {"allow": [], "deny": []}
+    assert cfg == {"allow": [], "deny": [], "scrub_internal_ids": False}
 
 
 def test_load_redaction_config_reads_lists(tmp_path: Path) -> None:
@@ -167,29 +187,114 @@ def test_load_redaction_config_reads_lists(tmp_path: Path) -> None:
 def test_load_redaction_config_malformed_returns_empty(tmp_path: Path) -> None:
     (tmp_path / "redaction.yaml").write_text("::: not valid yaml :::\n  - [", encoding="utf-8")
     cfg = load_redaction_config(tmp_path)
-    assert cfg == {"allow": [], "deny": []}
+    assert cfg == {"allow": [], "deny": [], "scrub_internal_ids": False}
 
 
 def test_load_redaction_config_non_dict_returns_empty(tmp_path: Path) -> None:
     (tmp_path / "redaction.yaml").write_text("- just\n- a\n- list\n", encoding="utf-8")
     cfg = load_redaction_config(tmp_path)
-    assert cfg == {"allow": [], "deny": []}
+    assert cfg == {"allow": [], "deny": [], "scrub_internal_ids": False}
+
+
+# ─── catalog v2 additions (PMSERV-121) ──────────────
+
+
+def test_azure_storage_key_scrubbed() -> None:
+    res = redact(f"conn DefaultEndpointsProtocol=https;{_FAKE['azure']};EndpointSuffix=x", [])
+    assert _FAKE["azure"] not in res.redacted_hook
+    assert "<REDACTED:secret>" in res.redacted_hook
+    assert res.report["high_severity_total"] >= 1
+
+
+def test_gcp_service_account_email_scrubbed() -> None:
+    res = redact(f"runs as {_FAKE['gcp_sa_email']} in prod", [])
+    assert _FAKE["gcp_sa_email"] not in res.redacted_hook
+    # Categorized as a secret (high), NOT downgraded to <REDACTED:email>.
+    assert "<REDACTED:secret>" in res.redacted_hook
+    assert res.report["by_category"].get("secret", 0) >= 1
+    assert res.report["by_category"].get("email", 0) == 0
+
+
+def test_gcp_private_key_id_scrubbed() -> None:
+    res = redact(f"leaked {_FAKE['gcp_key_id']} from the json", [])
+    assert _FAKE["gcp_key_id"] not in res.redacted_hook
+    assert res.report["high_severity_total"] >= 1
+
+
+def test_bearer_token_scrubbed() -> None:
+    res = redact(f"Authorization: {_FAKE['bearer']}", [])
+    assert _FAKE["bearer"] not in res.redacted_hook
+    assert "<REDACTED:secret>" in res.redacted_hook
+
+
+def test_ipv4_scrubbed() -> None:
+    res = redact("server at 192.0.2.42 is up", [])
+    assert "192.0.2.42" not in res.redacted_hook
+    assert "<IP>" in res.redacted_hook
+    assert res.report["by_category"].get("ip", 0) == 1
+
+
+@pytest.mark.parametrize(
+    "addr",
+    ["2001:db8:85a3:0:0:8a2e:370:7334", "2001:db8::1", "fe80::1ff:fe23:4567:890a", "::1"],
+)
+def test_ipv6_scrubbed(addr: str) -> None:
+    res = redact(f"bound to {addr} now", [])
+    assert addr not in res.redacted_hook
+    assert "<IP>" in res.redacted_hook
+    assert res.report["by_category"].get("ip", 0) >= 1
+
+
+@pytest.mark.parametrize("phone", ["+1 (415) 555-2671", "03-1234-5678", "090-1234-5678"])
+def test_phone_scrubbed(phone: str) -> None:
+    res = redact(f"call {phone} today", [])
+    assert phone not in res.redacted_hook
+    assert "<REDACTED:phone>" in res.redacted_hook
+
+
+def test_three_part_version_not_matched_as_ip() -> None:
+    """A 3-segment semver is safe; only a 4-segment dotted quad looks like an
+    IP (documented false-positive trade-off for the ipv4 pattern)."""
+    res = redact("upgraded pm-server to 0.9.0 today", [])
+    assert "0.9.0" in res.redacted_hook
+    assert res.report["by_category"].get("ip", 0) == 0
+
+
+# ─── scrub_internal_ids config knob (PMSERV-121) ─────
+
+
+def test_load_redaction_config_scrub_internal_ids_true(tmp_path: Path) -> None:
+    (tmp_path / "redaction.yaml").write_text(
+        "allow: []\ndeny: []\nscrub_internal_ids: true\n", encoding="utf-8"
+    )
+    cfg = load_redaction_config(tmp_path)
+    assert cfg["scrub_internal_ids"] is True
+
+
+def test_redaction_config_template_is_loadable_yaml() -> None:
+    import yaml
+
+    from pm_server.redaction import redaction_config_template
+
+    parsed = yaml.safe_load(redaction_config_template())
+    assert parsed == {"allow": [], "deny": [], "scrub_internal_ids": False}
 
 
 # ─── end-to-end: redacted output is the post source ──
 
 
 def test_redaction_target_is_post_source() -> None:
-    """The redacted fields are what the human will post — assert nothing from
-    the dirty input survives into them (redaction-target == post-source)."""
+    """The redacted fields are what the human will post — assert no secret /
+    path / email from the dirty input survives into them (redaction-target ==
+    post-source). Internal IDs are intentionally NOT in this list: by default
+    they are kept visible (PMSERV-121)."""
     dirty_hook = "leak /Users/flc001/x and nakashin09@gmail.com"
-    dirty_segs = [f"token {_FAKE['ghp']}", "ref memory:190"]
+    dirty_segs = [f"token {_FAKE['ghp']}", "clean tail"]
     res = redact(dirty_hook, dirty_segs)
     posted = json.dumps([res.redacted_hook, *res.redacted_segments])
     for leak in (
         "/Users/flc001",
         "nakashin09@gmail.com",
         _FAKE["ghp"],
-        "memory:190",
     ):
         assert leak not in posted

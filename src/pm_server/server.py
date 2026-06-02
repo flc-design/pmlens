@@ -1629,7 +1629,13 @@ def pm_redact_draft(draft_id: int, project_path: str | None = None) -> dict:
         body_segments = [str(body_segments)]
 
     config = load_redaction_config(_get_pm_path(project_path))
-    result = redact(row["hook"] or "", body_segments, allow=config["allow"], deny=config["deny"])
+    result = redact(
+        row["hook"] or "",
+        body_segments,
+        allow=config["allow"],
+        deny=config["deny"],
+        scrub_internal_ids=config["scrub_internal_ids"],
+    )
 
     ok = store.set_redacted(
         draft_id,
@@ -1644,7 +1650,7 @@ def pm_redact_draft(draft_id: int, project_path: str | None = None) -> dict:
             "warnings": [{"id": draft_id, "reason": "race_condition_skipped"}],
         }
 
-    return {
+    out = {
         "status": "redacted",
         "draft_id": draft_id,
         "report": result.report,
@@ -1654,6 +1660,15 @@ def pm_redact_draft(draft_id: int, project_path: str | None = None) -> dict:
             "(visible via pm_x_drafts_pending) for a semantic second pass before posting."
         ),
     }
+    if result.flagged:
+        # Surface the deny-list escape hatch the moment a scrub fires, so the
+        # user learns they can whitelist a false positive (allow) or scrub an
+        # identifier the catalog can't infer — e.g. a GitHub handle hidden in a
+        # URL — by adding it to .pm/redaction.yaml (PMSERV-121 deny-list UX).
+        out["config_hint"] = (
+            "Tune scrubbing per-project in .pm/redaction.yaml (allow / deny / scrub_internal_ids)."
+        )
+    return out
 
 
 @_tool()
