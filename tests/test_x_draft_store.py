@@ -81,6 +81,7 @@ def test_schema_creates_table_indexes_and_trigger(tmp_path: Path) -> None:
             r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='trigger'")
         }
         assert "trg_x_drafts_append_only" in triggers
+        assert "trg_x_drafts_freeze_posted" in triggers
     finally:
         conn.close()
 
@@ -106,7 +107,7 @@ def test_ensure_schema_is_idempotent(tmp_path: Path) -> None:
         triggers = {
             r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='trigger'")
         }
-        assert triggers == {"trg_x_drafts_append_only"}
+        assert triggers == {"trg_x_drafts_append_only", "trg_x_drafts_freeze_posted"}
     finally:
         conn.close()
 
@@ -277,6 +278,18 @@ def test_pending_invalid_pagination_raises(store: XDraftStore) -> None:
         store.pending(offset=-1)
 
 
+def test_pending_limit_zero_does_not_claim_has_more(store: XDraftStore) -> None:
+    """PMSERV-121: limit=0 is a valid count-only probe, but a 0-row page must
+    NOT report has_more — otherwise a next_offset-driven loop never advances."""
+    for i in range(3):
+        _append_draft(store, source_refs=f"memory:{i}")
+    page = store.pending(filter_status="all", limit=0)
+    assert page["total"] == 3  # count still reported
+    assert page["items"] == []
+    assert page["has_more"] is False  # no infinite-pagination trap
+    assert page["next_offset"] == 0  # did not advance
+
+
 def test_pending_invalid_status_raises(store: XDraftStore) -> None:
     with pytest.raises(ValueError, match="invalid filter_status"):
         store.pending(filter_status="bogus")
@@ -327,6 +340,35 @@ def test_trigger_allows_redact_and_state_transitions(store: XDraftStore) -> None
     # set_redacted touches redacted_*/status/redaction_status — must succeed.
     assert store.set_redacted(rid, "h", "[]", "{}", flagged=True) is True
     assert store.mark_posted(rid) is True
+
+
+@pytest.mark.parametrize("col", ["redacted_hook", "redacted_body_json", "redaction_report"])
+def test_freeze_posted_blocks_redacted_rewrite(store: XDraftStore, col: str) -> None:
+    """PMSERV-121: once posted, the published redacted content is immutable —
+    a raw UPDATE to redacted_* must abort."""
+    rid = _append_draft(store)
+    store.set_redacted(rid, "clean hook", json.dumps(["clean"]), json.dumps({}), flagged=False)
+    store.mark_posted(rid)
+    conn = sqlite3.connect(str(store.db_path))
+    try:
+        with pytest.raises(sqlite3.IntegrityError, match="frozen once posted"):
+            conn.execute(f"UPDATE x_drafts SET {col} = 'rewrite' WHERE id = ?", (rid,))
+    finally:
+        conn.close()
+
+
+def test_freeze_posted_allows_redacted_edit_before_post(store: XDraftStore) -> None:
+    """The freeze fires ONLY on posted rows — a pre-post 'redacted' row can
+    still be corrected (the trigger is scoped by OLD.status = 'posted')."""
+    rid = _append_draft(store)
+    store.set_redacted(rid, "h", "[]", "{}", flagged=False)  # status='redacted'
+    conn = sqlite3.connect(str(store.db_path))
+    try:
+        conn.execute("UPDATE x_drafts SET redacted_hook = 'fixed' WHERE id = ?", (rid,))
+        conn.commit()
+    finally:
+        conn.close()
+    assert store.get(rid)["redacted_hook"] == "fixed"
 
 
 # ─── normalize_source_refs ───────────────────────────

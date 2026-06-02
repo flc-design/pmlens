@@ -125,6 +125,16 @@ CREATE INDEX IF NOT EXISTS idx_x_drafts_source_refs
 # draft-edit and state transitions succeed. Mirrors trg_outbox_append_only but
 # scoped to provenance only (cross-check: freeze source, allow in-place review
 # edits before the human posts).
+#
+# Post-freeze trigger (PMSERV-121): once a draft is 'posted', its scrubbed,
+# already-published content (redacted_hook / redacted_body_json /
+# redaction_report) is frozen too — you cannot silently rewrite what was made
+# public. This is defense-in-depth: the API never re-redacts a posted row
+# (set_redacted requires status='draft'), and mark_posted touches only
+# status/posted_at (so it does NOT trip this trigger), but a raw UPDATE could —
+# this closes that gap. CREATE TRIGGER IF NOT EXISTS is additive, so existing
+# x_drafts.db files gain the trigger on next open (no migration; user_version
+# stays 1).
 _TRIGGER_SQL = """\
 CREATE TRIGGER IF NOT EXISTS trg_x_drafts_append_only
 BEFORE UPDATE OF
@@ -132,6 +142,14 @@ BEFORE UPDATE OF
 ON x_drafts
 BEGIN
     SELECT RAISE(ABORT, 'x_drafts provenance is append-only');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_x_drafts_freeze_posted
+BEFORE UPDATE OF redacted_hook, redacted_body_json, redaction_report
+ON x_drafts
+WHEN OLD.status = 'posted'
+BEGIN
+    SELECT RAISE(ABORT, 'x_drafts redacted_* is frozen once posted');
 END;
 """
 
@@ -381,10 +399,16 @@ class XDraftStore:
 
         items = [dict(r) for r in rows]
         next_offset = offset + len(items)
+        # ``has_more`` must imply the page advanced, or a caller paginating on
+        # next_offset spins forever. With limit=0 the query returns zero rows so
+        # next_offset == offset (no progress) while rows remain — guard against
+        # that by requiring a non-empty page (PMSERV-121). We keep limit=0 a
+        # VALID input (count-only probe) for parity with the outbox, rather than
+        # rejecting it at the boundary; we just never claim "more" on a 0-row page.
         return {
             "items": items,
             "total": total,
-            "has_more": next_offset < total,
+            "has_more": bool(items) and next_offset < total,
             "next_offset": next_offset,
         }
 
