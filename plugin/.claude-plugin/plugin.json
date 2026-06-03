@@ -1,0 +1,19 @@
+{
+  "name": "pm-server",
+  "version": "0.9.0",
+  "description": "PM Server — Claude Code project management: task tracking, progress, blockers, ADRs, and a cross-project dashboard. Bundles the pm-server MCP (via uvx) and re-homes its session rituals into a SessionStart hook + skill, since plugins cannot ship a CLAUDE.md.",
+  "author": {
+    "name": "flc-design"
+  },
+  "homepage": "https://github.com/flc-design/pm-server",
+  "repository": "https://github.com/flc-design/pm-server",
+  "license": "MIT",
+  "keywords": [
+    "project-management",
+    "mcp",
+    "tasks",
+    "adr",
+    "workflow",
+    "pm"
+  ]
+}
