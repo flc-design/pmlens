@@ -29,8 +29,13 @@ def _make_project(tmp_path: Path, name: str = "tplproj") -> Path:
     return proj
 
 
-def test_content_pipeline_template_listed() -> None:
-    res = srv.pm_workflow_templates()
+def test_content_pipeline_template_listed(tmp_path: Path) -> None:
+    # Inject a tmp project: pm_workflow_templates resolves a project root to
+    # discover custom templates, so calling it with no project_path leans on
+    # ambient cwd walk-up — which only "passes" inside this dogfooded repo and
+    # raises ProjectNotFoundError under a clean CI checkout.
+    proj = _make_project(tmp_path)
+    res = srv.pm_workflow_templates(project_path=str(proj))
     names = {t["name"] for t in res["templates"]}
     assert "content-pipeline" in names
 
