@@ -161,6 +161,19 @@ def test_pending_pagination_overshoot_returns_empty(outbox_store: DesktopOutboxS
     assert res["total"] == 1
 
 
+def test_pending_limit_zero_does_not_claim_has_more(outbox_store: DesktopOutboxStore) -> None:
+    """PMSERV-122: limit=0 is a valid count-only probe, but a 0-row page must
+    NOT report has_more — otherwise a next_offset-driven loop never advances
+    (same infinite-pagination trap fixed in x_draft_store under PMSERV-121)."""
+    for i in range(3):
+        outbox_store.append("h", "s", "memory", f"n={i}")
+    page = outbox_store.pending(limit=0)
+    assert page["total"] == 3  # count still reported
+    assert page["items"] == []
+    assert page["has_more"] is False  # no infinite-pagination trap
+    assert page["next_offset"] == 0  # did not advance
+
+
 def test_pending_filters_project_type_and_status(outbox_store: DesktopOutboxStore) -> None:
     a = outbox_store.append("h", "s", "memory", "in proj-a", source_project="proj-a")
     outbox_store.append("h", "s", "log", "in proj-b", source_project="proj-b")
