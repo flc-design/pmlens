@@ -262,10 +262,16 @@ class DesktopOutboxStore:
 
         items = [dict(r) for r in rows]
         next_offset = offset + len(items)
+        # ``has_more`` must imply the page advanced, or a caller paginating on
+        # next_offset spins forever. With limit=0 the query returns zero rows so
+        # next_offset == offset (no progress) while rows remain — guard against
+        # that by requiring a non-empty page (PMSERV-122, mirroring the
+        # x_draft_store fix). limit=0 stays a VALID count-only probe rather than
+        # a boundary rejection; we just never claim "more" on a 0-row page.
         return {
             "items": items,
             "total": total,
-            "has_more": next_offset < total,
+            "has_more": bool(items) and next_offset < total,
             "next_offset": next_offset,
         }
 
