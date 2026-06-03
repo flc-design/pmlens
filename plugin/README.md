@@ -11,7 +11,7 @@ this plugin adds a Claude-Code-native install + integration layer on top
 |-----------|------|---------|
 | Manifest | `.claude-plugin/plugin.json` | Plugin metadata |
 | Bundled MCP | `.mcp.json` | Runs `uvx pm-server@x.y` — no prior `pip install` needed |
-| SessionStart hook | `hooks/hooks.json` + `hooks/session-start.sh` | Re-homes the `CLAUDE.md` session ritual: injects project context, warns on duplicate registration |
+| SessionStart hook | `hooks/hooks.json` + `hooks/session-start.sh` | Re-homes the `CLAUDE.md` session ritual: injects a directive to run pm_status/pm_next/pm_recall, warns on duplicate registration, per-session double-fire guard |
 | Skill | `skills/pm/SKILL.md` | Model-invoked restatement of pm-server's behavioural rules |
 
 ### Why a hook + skill instead of CLAUDE.md
@@ -20,11 +20,15 @@ Plugins **cannot** ship a `CLAUDE.md` (no system-prompt-level persistent
 instructions). pm-server's auto-behaviour (run `pm_status` at session start,
 flip tasks to `in_progress`, surface `warnings[]`, …) is therefore re-homed to:
 
-1. **`SessionStart` hook** — deterministically injects `pm-server context-inject`
-   output so the session opens already aware of project state. This is *data
-   injection*, not a guarantee the model acts — but it removes the "forgot to
+1. **`SessionStart` hook** — deterministically injects a *directive* to run the
+   ritual (`pm_status` / `pm_next` / `pm_recall`) through the bundled MCP. It does
+   NOT compute status itself: pm-server may not be on the hook's PATH, and even
+   when it is it can resolve a different `~/.pm` than the bundled MCP (HOME
+   override) — so the hook defers to the correctly-scoped MCP tools. This is
+   *data injection*, not a guarantee the model acts, but it removes the "forgot to
    call `pm_status`" failure. (Only `PreToolUse` can hard-block; everything else
-   is advisory.)
+   is advisory.) Verified: the injected directive reaches the model (present in
+   the session transcript).
 2. **Skill** — restates the full rule set so the model can follow it mid-session.
 
 `claudemd.py` stays for Codex / non-CC hosts.

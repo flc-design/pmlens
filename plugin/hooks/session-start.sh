@@ -37,16 +37,18 @@ if command -v claude >/dev/null 2>&1 && claude mcp get pm-server >/dev/null 2>&1
   dup_warning="WARNING: pm-server is also registered manually (claude mcp). This plugin bundles its own pm-server MCP; tool names are NOT namespaced by server, so you now have duplicate pm_* tools. Run 'claude mcp remove pm-server' to drop the manual registration and rely on the plugin."
 fi
 
-# --- 3. context injection -----------------------------------------------------
-context="$(pm-server context-inject 2>/dev/null || true)"
-if [ -z "$context" ]; then
-  context="pm-server plugin active. Call pm_status to load project state, pm_next for the top recommended tasks, and pm_recall to restore prior-session context."
-fi
+# --- 3. session-start directive ----------------------------------------------
+# We deliberately do NOT compute project context in the hook itself. pm-server
+# is not reliably on PATH here, and even when it is it may resolve a different
+# data store (HOME) than the bundled MCP — so a hook-computed status could be
+# from the wrong project. Instead we instruct the model to run the ritual
+# through the (correctly-scoped) MCP tools — the same contract CLAUDE.md uses.
+directive="pm-server plugin active. Begin this session with the pm-server ritual BEFORE your first reply: call pm_status (project state + warnings), pm_next (top 3 tasks), and pm_recall (restore prior-session context). Surface any blockers, overdue items, or tool warnings[] to the user verbatim."
 
 if [ -n "$dup_warning" ]; then
-  payload="$(printf '%s\n\n%s' "$dup_warning" "$context")"
+  payload="$(printf '%s\n\n%s' "$dup_warning" "$directive")"
 else
-  payload="$context"
+  payload="$directive"
 fi
 
 if command -v jq >/dev/null 2>&1; then
