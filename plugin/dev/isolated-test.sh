@@ -35,8 +35,9 @@ YAML
   printf '[]\n' > "$SANDBOX/testproj/.pm/tasks.yaml"
 fi
 
-# Dev MCP config: LOCAL source (pm-server is not on PyPI yet) + HOME -> sandbox.
-# The committed plugin/.mcp.json uses `uvx pm-server@x.y` for release instead.
+# Dev MCP config: LOCAL source (so this exercises your UNCOMMITTED changes) +
+# HOME -> sandbox. The committed plugin/.mcp.json uses `uvx pm-server@x.y`, which
+# pulls the released build from PyPI instead.
 cat > "$SANDBOX/dev.mcp.json" <<JSON
 {
   "mcpServers": {

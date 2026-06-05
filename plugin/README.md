@@ -40,8 +40,9 @@ flip tasks to `in_progress`, surface `warnings[]`, …) is therefore re-homed to
 /plugin install pm-server@flc-server-marketplace
 ```
 
-> **Prerequisite:** `uvx` (from [uv](https://docs.astral.sh/uv/)) on PATH, plus
-> `pm-server` published to PyPI. Until published, use the dev override below.
+> **Prerequisite:** `uvx` (from [uv](https://docs.astral.sh/uv/)) on PATH. The
+> bundled MCP pulls `pm-server` from PyPI automatically (published — latest
+> 0.9.0), so no prior `pip install` is needed.
 
 ### ⚠️ Existing manual-registration users — migrate first
 
