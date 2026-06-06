@@ -19,6 +19,7 @@
 | 0.3.0 | 2026-04-08 | パッケージ名 `pm-agent` → `pm-server` に変更。installer.py を `claude mcp add` 方式に修正。pm_discover デフォルトパス修正。migrate コマンド追加。実装完了状況を反映 |
 | 0.4.0 | 2026-04-15 | Memory Layer (Phase 1-4) 完了。SQLite + FTS5 セッションメモリ、横断検索、運用ツール実装。子イシュー機能追加。PyPI v0.3.3 公開 |
 | 0.5.0 | 2026-04-16 | Workflow Engine (Phase 5)、Knowledge Records (Phase 6)、Super Research & Skill エコシステム (Phase 7) 実装。ダッシュボードにワークフロー進捗・知識マップ追加。30 MCP ツール、406テスト |
+| 0.9.x | 2026-06-06 | branch-aware セッション継続性 (§3.4 / ADR-028)。`pm_recall(track=)` + `SessionSummary.branch`、`.git/HEAD` テキスト解析によるブランチ検出（git に shell out しない）、worktree 主トポロジ。SynapticLedger ADR-034 対応 |
 
 ---
 
@@ -282,6 +283,59 @@ decisions:
 ```
 
 ---
+
+### 3.4 branch-aware セッション継続性 (ADR-028)
+
+複数の作業ライン（例: 本流／論文／教材）を 1 リポジトリで並行させる時、
+`pm_recall` がライン単位で「そのラインの最新セッション要約」を返せるようにする。
+SynapticLedger ADR-034 / SYNAPT-079 への pm-server 側の対応。
+
+#### 設計の肝: 検出は write、利用は read（CQRS 分割）
+
+`pm_recall` は `RO_ALLOWLIST`（§4 / PM_LENS）に属する読み取り専用ツールで、
+PM_LENS=1 では mutator/subprocess 経路が構造的に除外される（ADR-015/017/018）。
+したがって **`pm_recall` は git を一切触らない**。ブランチの「検出」は mutator 側
+（`pm_session_summary(action="save")`）でのみ行い、`pm_recall` は呼び出し元が渡す
+`track` 引数でブランチを「利用」する。
+
+```
+保存時 (mutator):  read_git_branch(.git/HEAD) → SessionSummary.branch に記録
+想起時 (RO tool):  pm_recall(track="<branch>") → branch 列で絞り込み
+```
+
+#### git に shell out しない（CVE-2026-45033 対策）
+
+ブランチ検出は `git rev-parse` を呼ばず、`.git/HEAD`（`ref: refs/heads/<branch>`）を
+**テキストとして読む**。`discovery.py:_read_git_remote_origin_url`（`.git/config` の
+テキスト解析）と同じ方針で、悪意ある `.git/config`（`core.fsmonitor` /
+`core.sshCommand` / `core.pager` / `core.hookspath`）が `git` 実行時に任意コードを
+走らせる git config-exec クラスを構造的に回避する。共通実装
+`discovery.read_git_branch()` を save 経路（Python）と SessionStart hook（shell）の
+双方が使い、保存文字列と recall 文字列の一致を保証する。
+
+#### 主トポロジ = git worktree（コード 0）
+
+データ層は §3.2 のとおり `.pm/` を含む**ディレクトリ単位**で解決される
+（`resolve_project_path` + `_get_memory_store`）。`.pm/memory.db` は gitignore 対象で
+worktree ごとに独立するため、**1 ライン = 1 worktree** にすれば追加実装なしで
+`pm_recall` がライン単位の最新を返す。これを主トポロジとして推奨し、上記の
+`track` モードは「1 ディレクトリ + ブランチ切替」派向けの副モードとして提供する。
+
+#### データモデル / 後方互換
+
+- `session_summaries` に nullable `branch TEXT` 列を追加。マイグレーションは
+  `_migrate_session_summaries_branch()`（`updated_at` 移行と同型：冪等・追加のみ・
+  backfill なし）。複合 index `(branch, updated_at DESC)`。
+- 既存行は `branch IS NULL`。`get_latest_summary_by_branch(branch)` は無マッチ時に
+  overall-latest へ graceful fallback し `(summary, track_matched=False)` を返すため、
+  既存 DB でも初日から壊れない。
+- ブランチ別「最新」は `ORDER BY updated_at DESC, id DESC`（UPSERT で id が据え置かれる
+  ため「最後に触ったライン」を id 順では表せない）。
+- UPSERT の branch 更新は `COALESCE(NULLIF(excluded.branch, ''), ...)` で非破壊化
+  （検出失敗時の '' で既知ブランチを潰さない／実際の checkout 先には更新する）。
+- `track` は `pm_recall` レスポンスのトップレベルキー（`track` / `track_matched`）として
+  追加し、`last_session` の形（6 キー）は不変に保つ。`track` 未指定時の応答は従来と
+  バイト一致。
 
 ## 4. MCP Server 設計
 

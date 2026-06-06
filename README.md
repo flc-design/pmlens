@@ -285,6 +285,38 @@ dataclasses, atomic-write helpers).
 
 ---
 
+## Parallel Work Lines (Branch-Aware Continuity)
+
+Running several streams of work in one repo — e.g. a mainline, a paper, and teaching material? pm-server gives each line its own session-continuity context. Two topologies are supported (ADR-028).
+
+### Recommended: one git worktree per line (zero config)
+
+pm-server scopes **everything** — tasks, memories, and session summaries — to the directory that contains `.pm/`. Because `.pm/memory.db` is git-ignored, every `git worktree` gets its own independent store automatically:
+
+```bash
+git worktree add ../myproj-paper  paper   # 論文 line
+git worktree add ../myproj-edu    edu     # 教材 line
+# the original checkout stays the mainline (本流)
+```
+
+Now `cd ../myproj-paper` and `pm_recall` returns the paper line's last session — no flags, no schema, no branch detection. Three lines = three editor windows, no stash dance, no merge conflict on switch.
+
+### Alternative: one directory, branch-aware `track`
+
+Prefer a single directory and `git checkout` between lines? Pass the branch as a `track`:
+
+```
+pm_recall(track="paper")     # last session recorded while on the `paper` branch
+```
+
+- The branch is recorded automatically when `pm_session_summary(action="save")` runs. It is read from `.git/HEAD` **as text** — pm-server never shells out to `git`, so a hostile `.git/config` can't execute code (CVE-2026-45033 / git config-exec class).
+- Under the bundled plugin, the SessionStart hook surfaces the current branch so the model can pass `track=` on its first recall; re-pass it after any `git checkout`.
+- If a line has no recorded summary yet (e.g. an existing DB from before this feature), `pm_recall(track=...)` gracefully falls back to the overall-latest and sets `track_matched: false` — so it never breaks on day one.
+
+> `track` currently matches the raw git branch. A logical track→branch mapping (one line spanning several branches) is a planned increment. See **ADR-028** for the full design rationale.
+
+---
+
 ## Data Structure
 
 pm-server stores task data as plain YAML and memories in SQLite:
