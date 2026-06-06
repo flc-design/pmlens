@@ -278,6 +278,23 @@ class MemoryStore:
             self._conn.row_factory = sqlite3.Row
             _apply_pragmas(self._conn)
             self._ensure_schema()
+        # Branch-aware recall needs the session_summaries.branch column. Under
+        # PM_LENS=1 the store opens read-only and _ensure_schema (hence the
+        # branch migration) never runs, so an older DB may lack the column.
+        # Probe ONCE here so the branch-scoped queries can short-circuit to the
+        # overall-latest fallback instead of raising OperationalError from an
+        # allowlisted read-only tool (PMSERV-124/125).
+        self._has_branch_col = self._column_exists("session_summaries", "branch")
+
+    def _column_exists(self, table: str, column: str) -> bool:
+        """Return True iff ``table`` has ``column`` (via PRAGMA table_info)."""
+        try:
+            cols = [
+                row["name"] for row in self._conn.execute(f"PRAGMA table_info({table})").fetchall()
+            ]
+        except sqlite3.Error:
+            return False
+        return column in cols
 
     def _ensure_schema(self) -> None:
         """Create tables, FTS index, and triggers if they don't exist."""
@@ -493,6 +510,11 @@ class MemoryStore:
         id — important because :meth:`save_session_summary` is an UPSERT that
         preserves the original id on re-save.
         """
+        if not self._has_branch_col:
+            # Old DB opened read-only under PM_LENS (migration could not run):
+            # no branch column to filter on — degrade to the overall-latest
+            # instead of raising OperationalError from a read-only tool.
+            return self.get_latest_summary(), False
         row = self._conn.execute(
             "SELECT * FROM session_summaries WHERE branch = ?"
             " ORDER BY updated_at DESC, id DESC LIMIT 1",
@@ -506,8 +528,11 @@ class MemoryStore:
         """Distinct non-empty branches recorded across session summaries.
 
         Used to resolve a logical track's branch globs (PMSERV-125): the small
-        candidate set is glob-matched in Python (fnmatch) by the caller.
+        candidate set is glob-matched in Python (fnmatch) by the caller. Returns
+        ``[]`` when the branch column is absent (old DB under read-only Lens).
         """
+        if not self._has_branch_col:
+            return []
         rows = self._conn.execute(
             "SELECT DISTINCT branch FROM session_summaries"
             " WHERE branch IS NOT NULL AND branch != ''"
@@ -527,7 +552,7 @@ class MemoryStore:
         (PMSERV-125 / ADR-028 / SynapticLedger ADR-035). Orders by
         ``updated_at DESC, id DESC`` (most-recently-worked across the line).
         """
-        if branches:
+        if branches and self._has_branch_col:
             placeholders = ",".join("?" for _ in branches)
             row = self._conn.execute(
                 f"SELECT * FROM session_summaries WHERE branch IN ({placeholders})"
@@ -550,6 +575,7 @@ class MemoryStore:
         self,
         window_minutes: int = 30,
         limit: int = 10,
+        branches: list[str] | None = None,
     ) -> list[SessionSummary]:
         """Return session summaries updated within the last N minutes (UTC).
 
@@ -559,7 +585,25 @@ class MemoryStore:
         summary was created long ago. Boundary is inclusive: a summary updated
         exactly N minutes ago is included. Used by pm_recall ambiguity
         detection (PMSERV-049).
+
+        ``branches`` (PMSERV-125): when given, restrict to summaries recorded on
+        those branches — used to scope ambiguity detection to a single work line
+        under ``pm_recall(track=...)``. An empty list matches nothing (returns
+        ``[]``); ``None`` (default) is unscoped. Ignored if the branch column is
+        absent (old DB under read-only Lens).
         """
+        if branches is not None:
+            if not branches or not self._has_branch_col:
+                return []
+            placeholders = ",".join("?" for _ in branches)
+            rows = self._conn.execute(
+                f"""SELECT * FROM session_summaries
+                    WHERE updated_at >= datetime('now', ?)
+                      AND branch IN ({placeholders})
+                    ORDER BY updated_at DESC LIMIT ?""",
+                (f"-{window_minutes} minutes", *branches, limit),
+            ).fetchall()
+            return [self._row_to_summary(r) for r in rows]
         rows = self._conn.execute(
             """SELECT * FROM session_summaries
                WHERE updated_at >= datetime('now', ?)

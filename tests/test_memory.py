@@ -686,6 +686,55 @@ class TestBranchAwareSummaries:
         assert matched is False
         assert summary.session_id == "s1"
 
+    def test_branch_queries_tolerate_missing_column_readonly(self, tmp_path):
+        """Old DB (no branch column) opened read-only under PM_LENS must not
+        raise OperationalError from the branch-scoped queries — they degrade to
+        the overall-latest fallback (regression guard for the RO Lens path)."""
+        import sqlite3
+
+        from pm_server.memory import MemoryStore
+
+        db_path = tmp_path / "legacy.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.executescript(
+            """
+            CREATE TABLE memories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL,
+                type TEXT NOT NULL, content TEXT NOT NULL, task_id TEXT,
+                decision_id TEXT, tags TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')), project TEXT NOT NULL
+            );
+            CREATE TABLE session_summaries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL UNIQUE,
+                summary TEXT NOT NULL, goals TEXT, tasks_done TEXT, decisions TEXT,
+                pending TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')), project TEXT NOT NULL
+            );
+            INSERT INTO session_summaries (session_id, summary, goals, tasks_done,
+                decisions, pending, project)
+            VALUES ('sess-legacy', 'old work', '', '[]', '[]', '[]', 'p');
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        # readonly=True => _ensure_schema (and the branch migration) never runs.
+        store = MemoryStore(db_path, readonly=True)
+        try:
+            assert store._has_branch_col is False
+            # None of these may raise; all degrade gracefully.
+            assert store.list_distinct_branches() == []
+            s, matched = store.get_latest_summary_by_branch("main")
+            assert matched is False
+            assert s is not None and s.session_id == "sess-legacy"
+            s2, m2 = store.get_latest_summary_in_branches(["main"])
+            assert m2 is False
+            assert s2.session_id == "sess-legacy"
+            # Branch-scoped ambiguity scan must also be safe on an old DB.
+            assert store.list_summaries_within(branches=["main"]) == []
+        finally:
+            store.close()
+
 
 # ─── Server tool integration ───────────────────────────
 

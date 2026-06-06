@@ -200,14 +200,22 @@ def _detect_session_ambiguity(
     store: MemoryStore,
     current_session_id: str,
     window_minutes: int = 30,
+    branches: list[str] | None = None,
 ) -> tuple[bool, list[SessionSummary]]:
     """Detect when multiple sessions have produced summaries within window.
 
     Returns (ambiguity_detected, candidates). Ambiguity is flagged when at
     least two distinct session_ids appear in summaries updated within the
     window — that's when the caller cannot tell which "last_session" is theirs.
+
+    ``branches`` (PMSERV-125): scope detection to one work line's branches. Under
+    ``pm_recall(track=...)`` we pass the resolved branch set so two concurrent
+    sessions on the SAME line are still flagged, while cross-line activity is
+    ignored. ``None`` (default) is unscoped (the no-track path).
     """
-    summaries = store.list_summaries_within(window_minutes=window_minutes, limit=10)
+    summaries = store.list_summaries_within(
+        window_minutes=window_minutes, limit=10, branches=branches
+    )
     distinct_sessions = {s.session_id for s in summaries}
     return (len(distinct_sessions) >= 2, summaries)
 
@@ -216,7 +224,7 @@ def _resolve_track(
     store: MemoryStore,
     project_path: str | None,
     track: str,
-) -> tuple[SessionSummary | None, bool, dict | None]:
+) -> tuple[SessionSummary | None, bool, dict | None, list[str]]:
     """Resolve ``pm_recall(track=...)`` to a session summary.
 
     Logical labels defined in ``.pm/tracks.yaml`` map to branch globs; a label
@@ -227,9 +235,12 @@ def _resolve_track(
     as a raw branch name (v1 behavior); label resolution takes priority. With no
     mapping file, every track is a raw branch (backward compatible).
 
-    Returns ``(summary, track_matched, warning_or_None)``. The warning (a
-    ``warnings[]`` entry) is set when ``.pm/tracks.yaml`` is present but
-    malformed; resolution then degrades to raw-branch matching.
+    Returns ``(summary, track_matched, warning_or_None, scope_branches)``.
+    ``scope_branches`` is the branch set this track resolved to (the glob-matched
+    branches for a label, or ``[track]`` for a raw branch) — used to scope
+    ambiguity detection to this one line. The warning (a ``warnings[]`` entry) is
+    set when ``.pm/tracks.yaml`` is present but malformed; resolution then
+    degrades to raw-branch matching.
     """
     warning: dict | None = None
     mapping: dict[str, list[str]] = {}
@@ -249,10 +260,10 @@ def _resolve_track(
         recorded = store.list_distinct_branches()
         matched = [b for b in recorded if any(fnmatch.fnmatchcase(b, g) for g in globs)]
         summary, ok = store.get_latest_summary_in_branches(matched)
-        return summary, ok, warning
+        return summary, ok, warning, matched
 
     summary, ok = store.get_latest_summary_by_branch(track)
-    return summary, ok, warning
+    return summary, ok, warning, [track]
 
 
 # ─── Memory store cache (lazy init per project) ─────
@@ -895,6 +906,12 @@ def pm_recall(
         scopes context per directory, so recall is branch-aware for free (see
         ADR-028 / README).
     """
+    # Normalize an empty/whitespace track to None so resolution and response-key
+    # injection use the same predicate — track="" then behaves exactly like the
+    # no-track path (no track keys, no half-populated track_matched=None).
+    track = track.strip() if track else None
+    track = track or None
+
     if cross_project:
         store = _get_memory_store(project_path)
         if not query:
@@ -926,13 +943,20 @@ def pm_recall(
         track_matched: bool | None = None
         tracks_warning: dict | None = None
         if track:
-            # Branch/track scopes recall to one work line, which dissolves
-            # cross-session ambiguity by construction — so we skip the unscoped
-            # ambiguity scan but still emit ambiguity_detected (kept False) to
-            # keep the response shape stable (ADR-028). _resolve_track handles
-            # logical labels (.pm/tracks.yaml) and raw branches (PMSERV-125).
-            summary, track_matched, tracks_warning = _resolve_track(store, project_path, track)
-            ambiguity, candidates = False, []
+            # _resolve_track handles logical labels (.pm/tracks.yaml) and raw
+            # branches (PMSERV-125), returning the resolved branch set. Ambiguity
+            # is SCOPED to that line's branches so two concurrent sessions on the
+            # SAME line are still flagged, while unrelated lines' activity is
+            # ignored (fixes the over-broad suppression of the no-track path).
+            summary, track_matched, tracks_warning, scope = _resolve_track(
+                store, project_path, track
+            )
+            ambiguity, candidates = _detect_session_ambiguity(
+                store,
+                _current_session_id,
+                window_minutes=_get_ambiguity_window(),
+                branches=scope,
+            )
         else:
             summary = store.get_latest_summary()
             ambiguity, candidates = _detect_session_ambiguity(
@@ -966,9 +990,11 @@ def pm_recall(
             # (no-track) response stays byte-identical to pre-ADR-028 callers.
             response["track"] = track
             response["track_matched"] = track_matched
-            if track_matched and summary is not None:
-                # Surface which actual branch the context came from — useful
-                # when a logical label spans several branches.
+            if summary is not None:
+                # Surface which actual branch the context came from — useful when
+                # a logical label spans several branches, and (on fallback,
+                # track_matched=False) so the model can see the recalled context
+                # is from a DIFFERENT line than the one it asked for.
                 response["track_branch"] = summary.branch
             if tracks_warning is not None:
                 response["warnings"] = [tracks_warning]
@@ -1032,9 +1058,10 @@ def pm_session_summary(
             # branch by reading .git/HEAD as TEXT — pm-server never shells out
             # to git (CVE-2026-45033 / git config-exec; see discovery.py).
             # Detection lives ONLY on this mutator path; pm_recall stays git-free
-            # and consumes the branch via its `track` arg. pm_path.parent is the
-            # already-resolved repo root. "" when not a git repo / detached /
-            # worktree (those rely on per-directory .pm isolation instead).
+            # and consumes the branch via its `track` arg. read_git_branch walks
+            # up from the project dir to the nearest .git (same as the plugin
+            # hook), so .pm/ need not sit at the repo root. "" when not a git repo
+            # / detached / worktree (those rely on per-directory .pm isolation).
             branch = read_git_branch(pm_path.parent) or ""
             pending_list = [p.strip() for p in pending.split(",") if p.strip()] if pending else []
             sess = SessionSummary(

@@ -144,6 +144,23 @@ class TestReadGitBranch:
         self._mk_repo(tmp_path, "")
         assert read_git_branch(tmp_path) is None
 
+    def test_walks_up_to_parent_git(self, tmp_path):
+        # .pm/ (and cwd) need not be at the repo root: walk up to the nearest .git.
+        self._mk_repo(tmp_path, "ref: refs/heads/main\n")
+        deep = tmp_path / "app" / "sub"
+        deep.mkdir(parents=True)
+        assert read_git_branch(deep) == "main"
+
+    def test_worktree_file_stops_walk_up(self, tmp_path):
+        # Parent is a real repo; child is a worktree (.git is a FILE). The walk
+        # must STOP at the worktree boundary and return None — never surface the
+        # parent repo's branch (matches the SessionStart hook).
+        self._mk_repo(tmp_path, "ref: refs/heads/main\n")
+        wt = tmp_path / "wt"
+        wt.mkdir()
+        (wt / ".git").write_text("gitdir: /somewhere/.git/worktrees/wt\n")
+        assert read_git_branch(wt) is None
+
     def test_malicious_git_config_not_executed(self, tmp_path):
         # CVE-2026-45033 / git config-exec class: detecting the branch must not
         # execute a gadget planted in .git/config, because we read HEAD as text

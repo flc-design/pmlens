@@ -1400,6 +1400,48 @@ class TestPmRecall:
         assert result["track_matched"] is True
         assert result["last_session"]["session_id"] == "s-new"
 
+    def test_track_empty_string_behaves_like_no_track(self, monkeypatch, tmp_project):
+        from pm_server.server import _get_memory_store, pm_recall
+
+        self._force_session(monkeypatch, "s-main")
+        store = _get_memory_store(None)
+        self._save_on_branch(store, "s-main", "main")
+        for empty in ("", "   "):
+            result = pm_recall(track=empty)
+            # Normalized to no-track: none of the track keys appear.
+            assert "track" not in result
+            assert "track_matched" not in result
+            assert "track_branch" not in result
+
+    def test_track_fallback_surfaces_track_branch(self, monkeypatch, tmp_project):
+        from pm_server.server import _get_memory_store, pm_recall
+
+        self._force_session(monkeypatch, "s-main")
+        store = _get_memory_store(None)
+        self._save_on_branch(store, "s-main", "main")
+        # Unmatched track → fallback, but track_branch tells the model the
+        # recalled context is from a DIFFERENT line ('main'), not 'ghost'.
+        result = pm_recall(track="ghost")
+        assert result["track_matched"] is False
+        assert result["track_branch"] == "main"
+
+    def test_track_ambiguity_scoped_to_same_line(self, monkeypatch, tmp_project):
+        from pm_server.server import _get_memory_store, pm_recall
+
+        self._force_session(monkeypatch, "s-a")
+        store = _get_memory_store(None)
+        # Two concurrent sessions on the SAME branch within the window.
+        self._save_on_branch(store, "s-a", "main")
+        self._save_on_branch(store, "s-b", "main")
+        # A session on a DIFFERENT line must NOT trigger ambiguity for 'main'.
+        self._save_on_branch(store, "s-other", "feat/x")
+
+        result = pm_recall(track="main")
+        assert result["ambiguity_detected"] is True
+        cand_ids = {c["session_id"] for c in result["last_session_candidates"]}
+        assert {"s-a", "s-b"} <= cand_ids
+        assert "s-other" not in cand_ids  # scoped to the 'main' line only
+
     def test_track_malformed_tracks_yaml_warns_and_falls_back(self, monkeypatch, tmp_project):
         from pm_server.server import _get_memory_store, pm_recall
 

@@ -17,6 +17,11 @@ _GIT_CONFIG_MAX_BYTES = 1_048_576
 # SHA). Cap the read defensively — a real HEAD is well under 256 bytes.
 _GIT_HEAD_MAX_BYTES = 4_096
 
+# How many parent levels ``read_git_branch`` walks up looking for ``.git``.
+# Mirrors the plugin SessionStart hook so the write path (branch detection) and
+# the read-side surfacer agree on which repo a directory belongs to.
+_GIT_WALK_UP_MAX = 8
+
 # PMSERV-081 (WF-025 R2, ADR-016): bound the discover_projects walk to
 # avoid traversing dependency caches, large virtualenvs, and the user's
 # global ~/.pm/ when scan_path lands near $HOME.
@@ -104,32 +109,50 @@ def read_git_branch(project_path: Path) -> str | None:
     git config-exec class. Reading the file as text cannot execute code: the
     worst case is returning ``None``.
 
+    Walks up from ``project_path`` (bounded by ``_GIT_WALK_UP_MAX``) to the
+    nearest ``.git`` so a project whose ``.pm/`` is not at the repo root still
+    resolves the branch — and so this write-path detector agrees with the
+    plugin SessionStart hook, which walks up the same way. Resolution stops at
+    the FIRST ``.git`` found.
+
     ``.git/HEAD`` on a normal branch checkout contains ``ref: refs/heads/<name>``.
 
     Returns ``None`` when the branch cannot be determined safely:
 
-    - no repo, or a ``.git`` *file* (worktree / submodule ``gitdir:`` pointer —
+    - no ``.git`` within the walk-up bound,
+    - the first ``.git`` is a *file* (worktree / submodule ``gitdir:`` pointer —
       not followed, to avoid an attacker-influenced redirect; worktree-based
-      continuity relies on per-directory ``.pm`` isolation instead),
+      continuity relies on per-directory ``.pm`` isolation instead). The walk
+      stops there rather than crossing into an enclosing repo, so it never
+      surfaces a parent repo's branch for a worktree.
     - a detached HEAD (``.git/HEAD`` holds a raw SHA, not a ``ref:`` line),
     - an unreadable / oversized HEAD.
     """
-    git_dir = project_path / ".git"
-    if not git_dir.is_dir():
-        return None
-    head_file = git_dir / "HEAD"
-    try:
-        if head_file.stat().st_size > _GIT_HEAD_MAX_BYTES:
-            return None
-        text = head_file.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return None
-
-    first = text.strip().splitlines()[0].strip() if text.strip() else ""
-    prefix = "ref: refs/heads/"
-    if first.startswith(prefix):
-        branch = first[len(prefix) :].strip()
-        return branch or None
+    current = project_path
+    for _ in range(_GIT_WALK_UP_MAX):
+        git_dir = current / ".git"
+        if git_dir.exists():
+            # First .git wins. A .git *file* is a worktree/submodule pointer —
+            # not followed; stop here (do not cross into an enclosing repo).
+            if not git_dir.is_dir():
+                return None
+            head_file = git_dir / "HEAD"
+            try:
+                if head_file.stat().st_size > _GIT_HEAD_MAX_BYTES:
+                    return None
+                text = head_file.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                return None
+            first = text.strip().splitlines()[0].strip() if text.strip() else ""
+            prefix = "ref: refs/heads/"
+            if first.startswith(prefix):
+                branch = first[len(prefix) :].strip()
+                return branch or None
+            return None  # detached HEAD (raw SHA) or unrecognized
+        parent = current.parent
+        if parent == current:  # filesystem root
+            break
+        current = parent
     return None
 
 

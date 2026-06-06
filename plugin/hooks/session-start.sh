@@ -65,8 +65,11 @@ fi
 # code via `git rev-parse` (CVE-2026-45033 / git config-exec class), so we
 # mirror discovery.py's deliberate text-parse policy. This is a single cheap,
 # local, unambiguous fact (unlike project status, which is why the hook still
-# refuses to self-compute status above): worth surfacing, safe to be wrong
-# (degrades to no note). cwd is carried in the SessionStart hook JSON.
+# refuses to self-compute status above). Detection mirrors the save path
+# (read_git_branch): walk up to the FIRST .git, stop there, and emit no branch
+# for a worktree (.git file) — so we never surface a branch the save path won't
+# record. Worst case is no note, never a wrong note. cwd is carried in the
+# SessionStart hook JSON.
 cwd=""
 if command -v jq >/dev/null 2>&1; then
   cwd="$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null || true)"
@@ -79,17 +82,28 @@ fi
 branch=""
 dir="$cwd"
 for _ in 1 2 3 4 5 6 7 8; do
-  if [ -d "$dir/.git" ] && [ -f "$dir/.git/HEAD" ]; then
-    head_line="$(head -n1 "$dir/.git/HEAD" 2>/dev/null || true)"
-    case "$head_line" in
-      "ref: refs/heads/"*) branch="${head_line#ref: refs/heads/}" ;;
-    esac
+  if [ -e "$dir/.git" ]; then
+    # First .git wins, and we STOP here. A worktree/submodule .git is a FILE;
+    # we deliberately do NOT follow it or walk past it into an enclosing repo —
+    # that matches discovery.read_git_branch (the save path), so the surfaced
+    # branch and the recorded branch agree. For a worktree this means no branch
+    # note (per-directory .pm isolation handles continuity).
+    if [ -d "$dir/.git" ] && [ -f "$dir/.git/HEAD" ]; then
+      head_line="$(head -n1 "$dir/.git/HEAD" 2>/dev/null || true)"
+      case "$head_line" in
+        "ref: refs/heads/"*) branch="${head_line#ref: refs/heads/}" ;;
+      esac
+    fi
     break
   fi
   parent="$(dirname "$dir")"
   [ "$parent" = "$dir" ] && break
   dir="$parent"
 done
+# Strip a trailing CR so a CRLF .git/HEAD (core.autocrlf / hand-edited) yields
+# "main" not "main\r" — the Python parser .strip()s, so the saved branch has no
+# CR; without this the track= the model passes would never match the saved row.
+branch="${branch%$'\r'}"
 
 branch_note=""
 if [ -n "$branch" ]; then
