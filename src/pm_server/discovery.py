@@ -13,6 +13,10 @@ from typing import NamedTuple
 # git config.
 _GIT_CONFIG_MAX_BYTES = 1_048_576
 
+# .git/HEAD is a single short line (``ref: refs/heads/<branch>`` or a 40/64-hex
+# SHA). Cap the read defensively — a real HEAD is well under 256 bytes.
+_GIT_HEAD_MAX_BYTES = 4_096
+
 # PMSERV-081 (WF-025 R2, ADR-016): bound the discover_projects walk to
 # avoid traversing dependency caches, large virtualenvs, and the user's
 # global ~/.pm/ when scan_path lands near $HOME.
@@ -86,6 +90,46 @@ def _read_git_remote_origin_url(project_path: Path) -> str | None:
                 if len(url) >= 2 and url[0] == '"' and url[-1] == '"':
                     url = url[1:-1]
                 return url or None
+    return None
+
+
+def read_git_branch(project_path: Path) -> str | None:
+    """Return the current git branch by reading ``.git/HEAD`` as plain text.
+
+    Like :func:`_read_git_remote_origin_url`, this deliberately does **not**
+    shell out to ``git``. Running ``git`` (even ``git rev-parse`` /
+    ``symbolic-ref``) on a possibly-untrusted working tree lets a malicious
+    ``.git/config`` (``core.fsmonitor`` / ``core.sshCommand`` / ``core.pager``
+    / ``core.hookspath``) execute arbitrary commands — the CVE-2026-45033 /
+    git config-exec class. Reading the file as text cannot execute code: the
+    worst case is returning ``None``.
+
+    ``.git/HEAD`` on a normal branch checkout contains ``ref: refs/heads/<name>``.
+
+    Returns ``None`` when the branch cannot be determined safely:
+
+    - no repo, or a ``.git`` *file* (worktree / submodule ``gitdir:`` pointer —
+      not followed, to avoid an attacker-influenced redirect; worktree-based
+      continuity relies on per-directory ``.pm`` isolation instead),
+    - a detached HEAD (``.git/HEAD`` holds a raw SHA, not a ``ref:`` line),
+    - an unreadable / oversized HEAD.
+    """
+    git_dir = project_path / ".git"
+    if not git_dir.is_dir():
+        return None
+    head_file = git_dir / "HEAD"
+    try:
+        if head_file.stat().st_size > _GIT_HEAD_MAX_BYTES:
+            return None
+        text = head_file.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+    first = text.strip().splitlines()[0].strip() if text.strip() else ""
+    prefix = "ref: refs/heads/"
+    if first.startswith(prefix):
+        branch = first[len(prefix) :].strip()
+        return branch or None
     return None
 
 

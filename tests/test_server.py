@@ -1211,6 +1211,105 @@ class TestPmRecall:
             "updated_at",
         }
 
+    # ─── PMSERV-124 / ADR-028: branch-aware recall (track=) ─────────
+
+    def test_recall_no_track_omits_track_keys(self, monkeypatch):
+        """Default (no track) response stays byte-identical to pre-ADR-028."""
+        self._force_session(monkeypatch, "sess-A")
+        from pm_server.server import pm_recall, pm_session_summary
+
+        pm_session_summary(action="save", summary="work")
+        result = pm_recall()
+        assert "track" not in result
+        assert "track_matched" not in result
+
+    def test_recall_with_track_returns_that_lines_latest(self, monkeypatch):
+        from pm_server.models import SessionSummary
+        from pm_server.server import _get_memory_store, pm_recall
+
+        self._force_session(monkeypatch, "sess-paper")
+        store = _get_memory_store(None)
+        store.save_session_summary(
+            SessionSummary(
+                session_id="sess-main", summary="main work", project="testproj", branch="main"
+            )
+        )
+        store.save_session_summary(
+            SessionSummary(
+                session_id="sess-paper", summary="paper work", project="testproj", branch="paper"
+            )
+        )
+
+        result = pm_recall(track="paper")
+        assert result["track"] == "paper"
+        assert result["track_matched"] is True
+        assert result["last_session"]["session_id"] == "sess-paper"
+        # track is a top-level key, never inside last_session (canary stays 6).
+        assert "track" not in result["last_session"]
+        assert set(result["last_session"].keys()) == {
+            "session_id",
+            "summary",
+            "goals",
+            "pending",
+            "created_at",
+            "updated_at",
+        }
+        # Branch/track scopes away cross-session ambiguity but keeps the key.
+        assert result["ambiguity_detected"] is False
+
+    def test_recall_with_unmatched_track_falls_back(self, monkeypatch):
+        from pm_server.models import SessionSummary
+        from pm_server.server import _get_memory_store, pm_recall
+
+        self._force_session(monkeypatch, "sess-main")
+        store = _get_memory_store(None)
+        store.save_session_summary(
+            SessionSummary(
+                session_id="sess-main", summary="main work", project="testproj", branch="main"
+            )
+        )
+
+        result = pm_recall(track="nonexistent")
+        assert result["track"] == "nonexistent"
+        assert result["track_matched"] is False
+        # Graceful fallback to overall-latest so day-one users still get context.
+        assert result["last_session"]["session_id"] == "sess-main"
+
+    def test_recall_with_track_never_invokes_git_detection(self, monkeypatch):
+        """RO invariant (ADR-028): pm_recall must not reach branch detection.
+
+        If pm_recall ever called read_git_branch, this monkeypatched explosion
+        would surface — proving the read path stays git-free.
+        """
+        import pm_server.server
+
+        self._force_session(monkeypatch, "sess-A")
+
+        def _boom(*_a, **_k):
+            raise AssertionError("pm_recall must never detect git branch")
+
+        monkeypatch.setattr(pm_server.server, "read_git_branch", _boom)
+        # Must not raise.
+        result = pm_server.server.pm_recall(track="main")
+        assert result["track"] == "main"
+
+    def test_save_records_git_branch(self, monkeypatch, tmp_project):
+        """pm_session_summary save records the branch from .git/HEAD (text)."""
+        from pm_server.server import _get_memory_store, pm_session_summary
+
+        git_dir = tmp_project / ".git"
+        git_dir.mkdir()
+        (git_dir / "HEAD").write_text("ref: refs/heads/feature/paper\n")
+
+        self._force_session(monkeypatch, "sess-A")
+        result = pm_session_summary(action="save", summary="branch work")
+        assert result["branch"] == "feature/paper"
+
+        store = _get_memory_store(None)
+        summary, matched = store.get_latest_summary_by_branch("feature/paper")
+        assert matched is True
+        assert summary.session_id == "sess-A"
+
     def test_recall_with_query_no_ambiguity_field(self, monkeypatch):
         self._force_session(monkeypatch, "sess-A")
         from pm_server.server import pm_recall, pm_remember
@@ -1239,6 +1338,27 @@ class TestPmRecall:
         result = pm_recall(query="cross test", cross_project=True)
         assert result["current_session_id"] == "sess-cross"
         assert result["cross_project"] is True
+
+
+class TestBranchAwareLensSafety:
+    """ADR-028: branch detection must stay off the read-only / Lens surface."""
+
+    def test_server_does_not_import_subprocess(self):
+        """We detect the branch by reading .git/HEAD as text — server.py must
+        never import subprocess (the git config-exec risk the design avoids)."""
+        import pathlib
+
+        import pm_server.server as srv
+
+        source = pathlib.Path(srv.__file__).read_text(encoding="utf-8")
+        assert "import subprocess" not in source
+
+    def test_pm_recall_is_read_only_allowlisted(self):
+        import pm_server.server as srv
+
+        assert "pm_recall" in srv.RO_ALLOWLIST
+        # The branch-detecting mutator stays OUT of the read-only surface.
+        assert "pm_session_summary" not in srv.RO_ALLOWLIST
 
 
 class TestBuiltinTemplatesDirDiagnostics:

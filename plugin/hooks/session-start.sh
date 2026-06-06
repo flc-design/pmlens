@@ -12,8 +12,10 @@
 #      per-session state file under $CLAUDE_PLUGIN_DATA makes this idempotent.
 #   2. Collision warning — if pm-server is ALSO registered manually, warn that
 #      the plugin bundles its own (duplicate tools otherwise).
-#   3. Context injection — emit `pm-server context-inject` output (the CLI
-#      mirror of the MCP session-start data) as SessionStart additionalContext.
+#   3. Branch surface — read .git/HEAD as text (never `git`) and tell the model
+#      to pass track="<branch>" to pm_recall (branch-aware continuity, ADR-028).
+#   4. Directive — inject the session-start ritual as SessionStart
+#      additionalContext (instruct the model to call the MCP tools itself).
 set -uo pipefail
 
 input="$(cat 2>/dev/null || true)"
@@ -56,13 +58,51 @@ if command -v claude >/dev/null 2>&1 && $mcp_timeout claude mcp get pm-server >/
   dup_warning="WARNING: pm-server is also registered manually (claude mcp). This plugin bundles its own pm-server MCP; tool names are NOT namespaced by server, so you now have duplicate pm_* tools. Run 'claude mcp remove pm-server' to drop the manual registration and rely on the plugin."
 fi
 
-# --- 3. session-start directive ----------------------------------------------
+# --- 3. branch surface (PMSERV-124 / ADR-028) --------------------------------
+# Branch-aware continuity: surface the current git branch so the model can pass
+# track="<branch>" to pm_recall and restore THIS line's context. We read
+# .git/HEAD as TEXT and never run `git` — a hostile .git/config could execute
+# code via `git rev-parse` (CVE-2026-45033 / git config-exec class), so we
+# mirror discovery.py's deliberate text-parse policy. This is a single cheap,
+# local, unambiguous fact (unlike project status, which is why the hook still
+# refuses to self-compute status above): worth surfacing, safe to be wrong
+# (degrades to no note). cwd is carried in the SessionStart hook JSON.
+cwd=""
+if command -v jq >/dev/null 2>&1; then
+  cwd="$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null || true)"
+fi
+if [ -z "$cwd" ]; then
+  cwd="$(printf '%s' "$input" | grep -o '"cwd"[^,}]*' | head -1 | cut -d'"' -f4 || true)"
+fi
+[ -z "$cwd" ] && cwd="$PWD"
+
+branch=""
+dir="$cwd"
+for _ in 1 2 3 4 5 6 7 8; do
+  if [ -d "$dir/.git" ] && [ -f "$dir/.git/HEAD" ]; then
+    head_line="$(head -n1 "$dir/.git/HEAD" 2>/dev/null || true)"
+    case "$head_line" in
+      "ref: refs/heads/"*) branch="${head_line#ref: refs/heads/}" ;;
+    esac
+    break
+  fi
+  parent="$(dirname "$dir")"
+  [ "$parent" = "$dir" ] && break
+  dir="$parent"
+done
+
+branch_note=""
+if [ -n "$branch" ]; then
+  branch_note=" The current git branch is \`$branch\`; pass track=\"$branch\" to pm_recall to restore this work line's context (branch-aware continuity, ADR-028), and re-pass it after any git checkout during the session."
+fi
+
+# --- 4. session-start directive ----------------------------------------------
 # We deliberately do NOT compute project context in the hook itself. pm-server
 # is not reliably on PATH here, and even when it is it may resolve a different
 # data store (HOME) than the bundled MCP — so a hook-computed status could be
 # from the wrong project. Instead we instruct the model to run the ritual
 # through the (correctly-scoped) MCP tools — the same contract CLAUDE.md uses.
-directive="pm-server plugin active. Begin this session with the pm-server ritual BEFORE your first reply: call pm_status (project state + warnings), pm_next (top 3 tasks), and pm_recall (restore prior-session context). Surface any blockers, overdue items, or tool warnings[] to the user verbatim."
+directive="pm-server plugin active. Begin this session with the pm-server ritual BEFORE your first reply: call pm_status (project state + warnings), pm_next (top 3 tasks), and pm_recall (restore prior-session context).${branch_note} Surface any blockers, overdue items, or tool warnings[] to the user verbatim."
 
 if [ -n "$dup_warning" ]; then
   payload="$(printf '%s\n\n%s' "$dup_warning" "$directive")"

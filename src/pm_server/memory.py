@@ -165,7 +165,8 @@ CREATE TABLE IF NOT EXISTS session_summaries (
     pending     TEXT,
     created_at  TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
-    project     TEXT NOT NULL
+    project     TEXT NOT NULL,
+    branch      TEXT
 );
 """
 
@@ -287,6 +288,7 @@ class MemoryStore:
         cur.execute("PRAGMA user_version = 1")
         self._conn.commit()
         self._migrate_session_summaries_updated_at()
+        self._migrate_session_summaries_branch()
 
     def _migrate_session_summaries_updated_at(self) -> None:
         """Add updated_at column for DBs created before PMSERV-049.
@@ -308,6 +310,34 @@ class MemoryStore:
         cur.execute(
             "CREATE INDEX IF NOT EXISTS idx_session_summaries_updated_at"
             " ON session_summaries(updated_at)"
+        )
+        self._conn.commit()
+
+    def _migrate_session_summaries_branch(self) -> None:
+        """Add branch column for branch-aware recall (PMSERV-124 / ADR-028).
+
+        Idempotent: skips ALTER if the column already exists. Unlike the
+        updated_at migration there is NO backfill — pre-feature rows
+        legitimately have no branch (NULL), and
+        ``get_latest_summary_by_branch`` falls back to the overall-latest for
+        them so existing DBs keep working on day one. The composite index
+        ``(branch, updated_at DESC)`` serves the driving query
+        ``WHERE branch = ? ORDER BY updated_at DESC`` as an index-range top-1.
+
+        The column is added as plain nullable ``TEXT`` (no NOT NULL / DEFAULT)
+        because SQLite forbids ``ALTER ... ADD COLUMN NOT NULL`` without a
+        constant default; the fresh-DB DDL declares it nullable too so migrated
+        and freshly-created DBs agree.
+        """
+        cur = self._conn.cursor()
+        cols = [
+            row["name"] for row in cur.execute("PRAGMA table_info(session_summaries)").fetchall()
+        ]
+        if "branch" not in cols:
+            cur.execute("ALTER TABLE session_summaries ADD COLUMN branch TEXT")
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_session_summaries_branch"
+            " ON session_summaries(branch, updated_at DESC)"
         )
         self._conn.commit()
 
@@ -407,15 +437,16 @@ class MemoryStore:
         """
         self._conn.execute(
             """INSERT INTO session_summaries
-               (session_id, summary, goals, tasks_done, decisions, pending, project)
-               VALUES (?, ?, ?, ?, ?, ?, ?)
+               (session_id, summary, goals, tasks_done, decisions, pending, project, branch)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(session_id) DO UPDATE SET
                    summary = excluded.summary,
                    goals = excluded.goals,
                    tasks_done = excluded.tasks_done,
                    decisions = excluded.decisions,
                    pending = excluded.pending,
-                   updated_at = datetime('now')""",
+                   updated_at = datetime('now'),
+                   branch = COALESCE(NULLIF(excluded.branch, ''), session_summaries.branch)""",
             (
                 summary.session_id,
                 summary.summary,
@@ -424,6 +455,7 @@ class MemoryStore:
                 _list_to_json(summary.decisions),
                 _list_to_json(summary.pending),
                 summary.project,
+                summary.branch,
             ),
         )
         self._conn.commit()
@@ -434,13 +466,41 @@ class MemoryStore:
         return row["id"]
 
     def get_latest_summary(self) -> SessionSummary | None:
-        """Get the most recent session summary."""
+        """Get the most recent session summary (across all branches)."""
         row = self._conn.execute(
             "SELECT * FROM session_summaries ORDER BY id DESC LIMIT 1",
         ).fetchone()
         if row is None:
             return None
         return self._row_to_summary(row)
+
+    def get_latest_summary_by_branch(self, branch: str) -> tuple[SessionSummary | None, bool]:
+        """Latest summary for a git branch / track, with graceful fallback.
+
+        Returns ``(summary, track_matched)`` where:
+
+        - ``track_matched=True`` — a summary recorded on ``branch`` exists and
+          is returned.
+        - ``track_matched=False`` — no summary was recorded on ``branch`` yet,
+          so we fall back to the overall-latest summary (or ``None`` if the DB
+          is empty). This keeps branch-aware recall useful on day one: existing
+          DBs predate the branch column, so every legacy row has
+          ``branch IS NULL`` and would otherwise match nothing (PMSERV-124 /
+          ADR-028).
+
+        The branch-scoped query orders by ``updated_at DESC, id DESC`` so
+        "latest on this line" means *most recently worked*, not highest insert
+        id — important because :meth:`save_session_summary` is an UPSERT that
+        preserves the original id on re-save.
+        """
+        row = self._conn.execute(
+            "SELECT * FROM session_summaries WHERE branch = ?"
+            " ORDER BY updated_at DESC, id DESC LIMIT 1",
+            (branch,),
+        ).fetchone()
+        if row is not None:
+            return self._row_to_summary(row), True
+        return self.get_latest_summary(), False
 
     def list_summaries(self, limit: int = 10) -> list[SessionSummary]:
         """List session summaries, newest first."""
@@ -498,6 +558,7 @@ class MemoryStore:
         if a row is somehow inserted before the migration runs).
         """
         updated_at = row["updated_at"] if "updated_at" in row.keys() else None
+        branch = (row["branch"] if "branch" in row.keys() else None) or ""
         return SessionSummary(
             id=row["id"],
             session_id=row["session_id"],
@@ -509,6 +570,7 @@ class MemoryStore:
             created_at=row["created_at"],
             updated_at=updated_at or row["created_at"],
             project=row["project"],
+            branch=branch,
         )
 
     # ─── Global cross-project sync ──────────────────

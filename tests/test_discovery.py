@@ -3,7 +3,12 @@
 import json
 from pathlib import Path
 
-from pm_server.discovery import detect_project_info, discover_projects, scan_projects
+from pm_server.discovery import (
+    detect_project_info,
+    discover_projects,
+    read_git_branch,
+    scan_projects,
+)
 
 
 class TestDetectProjectInfo:
@@ -90,6 +95,71 @@ class TestDetectProjectInfo:
     def test_no_git_dir_no_repository(self, tmp_path):
         info = detect_project_info(tmp_path)
         assert info["repository"] is None
+
+
+class TestReadGitBranch:
+    """PMSERV-124 / ADR-028: branch detection by text-parsing .git/HEAD.
+
+    Mirrors the no-shell-out policy of _read_git_remote_origin_url — never runs
+    ``git``, so a hostile .git/config can never execute code.
+    """
+
+    @staticmethod
+    def _mk_repo(tmp_path: Path, head: str) -> Path:
+        git_dir = tmp_path / ".git"
+        git_dir.mkdir()
+        (git_dir / "HEAD").write_text(head)
+        return tmp_path
+
+    def test_normal_branch(self, tmp_path):
+        self._mk_repo(tmp_path, "ref: refs/heads/main\n")
+        assert read_git_branch(tmp_path) == "main"
+
+    def test_branch_with_slashes(self, tmp_path):
+        self._mk_repo(tmp_path, "ref: refs/heads/feature/paper\n")
+        assert read_git_branch(tmp_path) == "feature/paper"
+
+    def test_detached_head_returns_none(self, tmp_path):
+        # Detached HEAD holds a raw SHA, not a ``ref:`` line.
+        self._mk_repo(tmp_path, "9f1c2b3a4d5e6f7080910a1b2c3d4e5f60718293\n")
+        assert read_git_branch(tmp_path) is None
+
+    def test_no_git_dir_returns_none(self, tmp_path):
+        assert read_git_branch(tmp_path) is None
+
+    def test_git_dir_as_file_returns_none(self, tmp_path):
+        # Worktree / submodule: .git is a FILE (``gitdir: ...``). We do not
+        # follow an attacker-influenced pointer; worktree continuity relies on
+        # per-directory .pm isolation instead.
+        (tmp_path / ".git").write_text("gitdir: /tmp/evil/.git/worktrees/x\n")
+        assert read_git_branch(tmp_path) is None
+
+    def test_oversized_head_returns_none(self, tmp_path):
+        git_dir = tmp_path / ".git"
+        git_dir.mkdir()
+        (git_dir / "HEAD").write_text("ref: refs/heads/" + ("a" * 5000) + "\n")
+        assert read_git_branch(tmp_path) is None
+
+    def test_empty_head_returns_none(self, tmp_path):
+        self._mk_repo(tmp_path, "")
+        assert read_git_branch(tmp_path) is None
+
+    def test_malicious_git_config_not_executed(self, tmp_path):
+        # CVE-2026-45033 / git config-exec class: detecting the branch must not
+        # execute a gadget planted in .git/config, because we read HEAD as text
+        # and never invoke ``git``.
+        sentinel = tmp_path / "PWNED"
+        git_dir = tmp_path / ".git"
+        git_dir.mkdir()
+        (git_dir / "HEAD").write_text("ref: refs/heads/paper\n")
+        (git_dir / "config").write_text(
+            "[core]\n"
+            f"\tfsmonitor = touch {sentinel}\n"
+            f"\tsshCommand = touch {sentinel}\n"
+            f"\tpager = touch {sentinel}\n"
+        )
+        assert read_git_branch(tmp_path) == "paper"
+        assert not sentinel.exists(), "git config gadget must never execute"
 
 
 class TestDiscoverProjects:

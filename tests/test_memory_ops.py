@@ -364,3 +364,74 @@ class TestSchemaMigration:
             assert latest.session_id == "sess-new"
         finally:
             store.close()
+
+    def test_existing_db_without_branch_column_migrates_correctly(self, tmp_path):
+        """PMSERV-124 / ADR-028: legacy DB (no branch column) auto-migrates,
+        and branch-aware recall falls back gracefully for pre-feature rows."""
+        import sqlite3
+
+        from pm_server.memory import MemoryStore
+        from pm_server.models import SessionSummary
+
+        # Build a pre-branch DB by hand (has updated_at but no branch column).
+        db_path = tmp_path / "legacy.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            """CREATE TABLE session_summaries (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id  TEXT NOT NULL UNIQUE,
+                summary     TEXT NOT NULL,
+                goals       TEXT,
+                tasks_done  TEXT,
+                decisions   TEXT,
+                pending     TEXT,
+                created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+                project     TEXT NOT NULL
+            )"""
+        )
+        conn.execute(
+            """INSERT INTO session_summaries
+               (session_id, summary, goals, tasks_done, decisions, pending, project)
+               VALUES ('sess-legacy', 'old work', '', '[]', '[]', '[]', 'p')"""
+        )
+        conn.commit()
+        cols_before = [
+            r[1] for r in conn.execute("PRAGMA table_info(session_summaries)").fetchall()
+        ]
+        assert "branch" not in cols_before
+        conn.close()
+
+        store = MemoryStore(db_path, global_db_path=None)
+        try:
+            cols_after = [
+                row["name"]
+                for row in store._conn.execute("PRAGMA table_info(session_summaries)").fetchall()
+            ]
+            assert "branch" in cols_after
+
+            # Legacy row keeps branch NULL -> "" via _row_to_summary.
+            legacy = store.get_latest_summary()
+            assert legacy is not None
+            assert legacy.branch == ""
+
+            # Day-one back-compat: querying a real branch matches no legacy row,
+            # so it falls back to the overall-latest with track_matched=False.
+            summary, matched = store.get_latest_summary_by_branch("main")
+            assert matched is False
+            assert summary is not None
+            assert summary.session_id == "sess-legacy"
+
+            # A new save WITH a branch is then retrievable by that branch.
+            store.save_session_summary(
+                SessionSummary(
+                    session_id="sess-new", summary="paper work", project="p", branch="paper"
+                )
+            )
+            paper, paper_matched = store.get_latest_summary_by_branch("paper")
+            assert paper_matched is True
+            assert paper is not None
+            assert paper.session_id == "sess-new"
+            assert paper.branch == "paper"
+        finally:
+            store.close()

@@ -361,6 +361,11 @@ class SessionSummary(BaseModel):
     when the same session_id is saved again). Use updated_at for ambiguity
     detection windows so still-active sessions are captured even when their
     initial summary was created long ago.
+
+    `branch` is the git branch the summary was recorded on (detected from
+    `.git/HEAD` as text on the save path; "" when not in a git repo, on a
+    detached HEAD, or in a worktree whose `.git` is a file). It powers
+    branch-aware recall via `pm_recall(track=...)` (PMSERV-124 / ADR-028).
     """
 
     id: int | None = None
@@ -373,6 +378,7 @@ class SessionSummary(BaseModel):
     created_at: str = ""
     updated_at: str = ""
     project: str = ""
+    branch: str = ""
 
 
 # ─── Workflow Models ────────────────────────────────

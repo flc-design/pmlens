@@ -550,6 +550,95 @@ class TestSessionSummaries:
         assert latest.pending == []
 
 
+class TestBranchAwareSummaries:
+    """PMSERV-124 / ADR-028: branch-scoped session continuity."""
+
+    def test_branch_round_trip(self, memory_store: MemoryStore):
+        memory_store.save_session_summary(
+            SessionSummary(
+                session_id="sess-paper", summary="paper work", project="p", branch="paper"
+            )
+        )
+        summary, matched = memory_store.get_latest_summary_by_branch("paper")
+        assert matched is True
+        assert summary is not None
+        assert summary.session_id == "sess-paper"
+        assert summary.branch == "paper"
+
+    def test_branch_scopes_to_its_own_line(self, memory_store: MemoryStore):
+        memory_store.save_session_summary(
+            SessionSummary(session_id="sess-main", summary="main", project="p", branch="main")
+        )
+        memory_store.save_session_summary(
+            SessionSummary(session_id="sess-edu", summary="edu", project="p", branch="edu")
+        )
+        main, _ = memory_store.get_latest_summary_by_branch("main")
+        edu, _ = memory_store.get_latest_summary_by_branch("edu")
+        assert main.session_id == "sess-main"
+        assert edu.session_id == "sess-edu"
+
+    def test_unknown_branch_falls_back_to_overall_latest(self, memory_store: MemoryStore):
+        memory_store.save_session_summary(
+            SessionSummary(session_id="sess-main", summary="main", project="p", branch="main")
+        )
+        summary, matched = memory_store.get_latest_summary_by_branch("does-not-exist")
+        assert matched is False
+        assert summary is not None
+        assert summary.session_id == "sess-main"
+
+    def test_empty_db_branch_query_returns_none_unmatched(self, memory_store: MemoryStore):
+        summary, matched = memory_store.get_latest_summary_by_branch("main")
+        assert summary is None
+        assert matched is False
+
+    def test_latest_on_branch_is_most_recently_worked_not_highest_id(
+        self, memory_store: MemoryStore
+    ):
+        """ORDER BY updated_at DESC: re-touching an older row makes it the
+        branch's latest even though a higher-id row exists (UPSERT keeps id)."""
+        memory_store.save_session_summary(
+            SessionSummary(session_id="sess-old", summary="old", project="p", branch="main")
+        )
+        memory_store.save_session_summary(
+            SessionSummary(session_id="sess-new", summary="new", project="p", branch="main")
+        )
+        # Force sess-old (lower id) to be the most recently *worked* row.
+        memory_store._conn.execute(
+            "UPDATE session_summaries SET updated_at = datetime('now', '+1 hour')"
+            " WHERE session_id = ?",
+            ("sess-old",),
+        )
+        memory_store._conn.commit()
+
+        summary, matched = memory_store.get_latest_summary_by_branch("main")
+        assert matched is True
+        assert summary.session_id == "sess-old"
+        # The plain (id-ordered) latest still returns the highest-id row.
+        assert memory_store.get_latest_summary().session_id == "sess-new"
+
+    def test_nondestructive_branch_on_transient_miss(self, memory_store: MemoryStore):
+        """A re-save with empty branch must NOT clobber a recorded branch
+        (COALESCE/NULLIF guard); a real new branch DOES update it."""
+        memory_store.save_session_summary(
+            SessionSummary(session_id="sess-x", summary="v1", project="p", branch="paper")
+        )
+        # Transient detection miss (branch="") on re-save → branch preserved.
+        memory_store.save_session_summary(
+            SessionSummary(session_id="sess-x", summary="v2", project="p", branch="")
+        )
+        kept, matched = memory_store.get_latest_summary_by_branch("paper")
+        assert matched is True
+        assert kept.session_id == "sess-x"
+        assert kept.summary == "v2"
+        # An actual checkout to a new branch DOES move the session.
+        memory_store.save_session_summary(
+            SessionSummary(session_id="sess-x", summary="v3", project="p", branch="edu")
+        )
+        moved, moved_matched = memory_store.get_latest_summary_by_branch("edu")
+        assert moved_matched is True
+        assert moved.session_id == "sess-x"
+
+
 # ─── Server tool integration ───────────────────────────
 
 

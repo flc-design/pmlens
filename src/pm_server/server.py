@@ -11,7 +11,7 @@ from pathlib import Path
 from fastmcp import FastMCP
 
 from . import storage as _storage
-from .discovery import detect_project_info, scan_projects
+from .discovery import detect_project_info, read_git_branch, scan_projects
 from .memory import MemoryStore, _has_pm_server_schema
 from .models import (
     ConfidenceLevel,
@@ -824,6 +824,7 @@ def pm_recall(
     limit: int = 5,
     cross_project: bool = False,
     project_path: str | None = None,
+    track: str | None = None,
 ) -> dict:
     """Recall memories relevant to the current context.
 
@@ -832,6 +833,17 @@ def pm_recall(
     With task_id: memories linked to that task.
     type filter: observation | insight | lesson
     cross_project: search across all projects (Phase 3).
+    track: branch-aware continuity (PMSERV-124 / ADR-028). Pass the current git
+        branch to get the last session recorded on THAT line. The branch is
+        recorded on the save path (pm_session_summary); pm_recall itself never
+        touches git — pass the branch as data (the bundled SessionStart hook
+        surfaces it; re-pass after any ``git checkout``). v1: ``track`` is
+        matched against the recorded git branch (a logical track→branch mapping
+        is a future increment). If no summary was recorded on ``track`` yet, the
+        response falls back to the overall-latest with ``track_matched: false``.
+        For fully isolated parallel lines, prefer one git worktree per line —
+        pm-server scopes context per directory, so recall is branch-aware for
+        free (see ADR-028 / README).
     """
     if cross_project:
         store = _get_memory_store(project_path)
@@ -861,14 +873,22 @@ def pm_recall(
 
     # Default: last session summary + recent memories
     if query is None and task_id is None:
-        summary = store.get_latest_summary()
+        track_matched: bool | None = None
+        if track:
+            # Branch/track scopes recall to one work line, which dissolves
+            # cross-session ambiguity by construction — so we skip the unscoped
+            # ambiguity scan but still emit ambiguity_detected (kept False) to
+            # keep the response shape stable (ADR-028).
+            summary, track_matched = store.get_latest_summary_by_branch(track)
+            ambiguity, candidates = False, []
+        else:
+            summary = store.get_latest_summary()
+            ambiguity, candidates = _detect_session_ambiguity(
+                store, _current_session_id, window_minutes=_get_ambiguity_window()
+            )
         recent = store.get_recent(limit=limit)
         if type:
             recent = [m for m in recent if m.type.value == type]
-
-        ambiguity, candidates = _detect_session_ambiguity(
-            store, _current_session_id, window_minutes=_get_ambiguity_window()
-        )
 
         last_session_dict = (
             {
@@ -889,6 +909,11 @@ def pm_recall(
             "recent_memories": [_memory_dict(m) for m in recent],
             "ambiguity_detected": ambiguity,
         }
+        if track is not None:
+            # New keys only appear when track is requested, so the default
+            # (no-track) response stays byte-identical to pre-ADR-028 callers.
+            response["track"] = track
+            response["track_matched"] = track_matched
         if ambiguity:
             response["last_session_candidates"] = [
                 {
@@ -945,6 +970,14 @@ def pm_session_summary(
                 return {"status": "error", "message": "summary is required for save action"}
             pm_path = _get_pm_path(project_path)
             project = load_project(pm_path)
+            # Branch-aware continuity (PMSERV-124 / ADR-028): record the git
+            # branch by reading .git/HEAD as TEXT — pm-server never shells out
+            # to git (CVE-2026-45033 / git config-exec; see discovery.py).
+            # Detection lives ONLY on this mutator path; pm_recall stays git-free
+            # and consumes the branch via its `track` arg. pm_path.parent is the
+            # already-resolved repo root. "" when not a git repo / detached /
+            # worktree (those rely on per-directory .pm isolation instead).
+            branch = read_git_branch(pm_path.parent) or ""
             pending_list = [p.strip() for p in pending.split(",") if p.strip()] if pending else []
             sess = SessionSummary(
                 session_id=_current_session_id,
@@ -952,12 +985,14 @@ def pm_session_summary(
                 goals=goals or "",
                 pending=pending_list,
                 project=project.name,
+                branch=branch,
             )
             summary_id = store.save_session_summary(sess)
             return {
                 "status": "saved",
                 "summary_id": summary_id,
                 "session_id": _current_session_id,
+                "branch": sess.branch,
             }
 
         case "get":
