@@ -502,6 +502,42 @@ class MemoryStore:
             return self._row_to_summary(row), True
         return self.get_latest_summary(), False
 
+    def list_distinct_branches(self) -> list[str]:
+        """Distinct non-empty branches recorded across session summaries.
+
+        Used to resolve a logical track's branch globs (PMSERV-125): the small
+        candidate set is glob-matched in Python (fnmatch) by the caller.
+        """
+        rows = self._conn.execute(
+            "SELECT DISTINCT branch FROM session_summaries"
+            " WHERE branch IS NOT NULL AND branch != ''"
+        ).fetchall()
+        return [row["branch"] for row in rows]
+
+    def get_latest_summary_in_branches(
+        self, branches: list[str]
+    ) -> tuple[SessionSummary | None, bool]:
+        """Latest summary across a set of branches (logical track resolution).
+
+        Returns ``(summary, track_matched)``. ``track_matched=True`` when at
+        least one summary exists on the given branches. Falls back to the
+        overall-latest with ``track_matched=False`` when ``branches`` is empty
+        or none match — mirroring :meth:`get_latest_summary_by_branch` so a
+        logical track with no recorded work yet still yields useful context
+        (PMSERV-125 / ADR-028 / SynapticLedger ADR-035). Orders by
+        ``updated_at DESC, id DESC`` (most-recently-worked across the line).
+        """
+        if branches:
+            placeholders = ",".join("?" for _ in branches)
+            row = self._conn.execute(
+                f"SELECT * FROM session_summaries WHERE branch IN ({placeholders})"
+                " ORDER BY updated_at DESC, id DESC LIMIT 1",
+                tuple(branches),
+            ).fetchone()
+            if row is not None:
+                return self._row_to_summary(row), True
+        return self.get_latest_summary(), False
+
     def list_summaries(self, limit: int = 10) -> list[SessionSummary]:
         """List session summaries, newest first."""
         rows = self._conn.execute(

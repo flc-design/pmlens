@@ -37,6 +37,7 @@ from pm_server.storage import (
     load_registry,
     load_risks,
     load_tasks,
+    load_tracks,
     next_decision_number,
     next_risk_number,
     next_task_number,
@@ -249,6 +250,51 @@ class TestBrokenYaml:
         broken.write_text("tasks:\n  - id: [bad", encoding="utf-8")
         with pytest.raises(PmServerError, match="Failed to parse"):
             load_tasks(tmp_pm_path)
+
+
+class TestLoadTracks:
+    """PMSERV-125 / ADR-035: .pm/tracks.yaml logical track → branch glob map."""
+
+    def test_absent_file_returns_empty(self, tmp_pm_path):
+        assert load_tracks(tmp_pm_path) == {}
+
+    def test_valid_mapping(self, tmp_pm_path):
+        (tmp_pm_path / "tracks.yaml").write_text(
+            "tracks:\n"
+            "  本流: [main]\n"
+            "  論文: [feat/p3-*, research/wave-scattering-*]\n"
+            "  教材: [edu/*]\n",
+            encoding="utf-8",
+        )
+        tracks = load_tracks(tmp_pm_path)
+        assert tracks["本流"] == ["main"]
+        assert tracks["論文"] == ["feat/p3-*", "research/wave-scattering-*"]
+        assert tracks["教材"] == ["edu/*"]
+
+    def test_scalar_value_promoted_to_list(self, tmp_pm_path):
+        (tmp_pm_path / "tracks.yaml").write_text("tracks:\n  本流: main\n", encoding="utf-8")
+        assert load_tracks(tmp_pm_path) == {"本流": ["main"]}
+
+    def test_missing_tracks_key_returns_empty(self, tmp_pm_path):
+        (tmp_pm_path / "tracks.yaml").write_text("other: 1\n", encoding="utf-8")
+        assert load_tracks(tmp_pm_path) == {}
+
+    def test_non_dict_top_level_returns_empty(self, tmp_pm_path):
+        (tmp_pm_path / "tracks.yaml").write_text("- a\n- b\n", encoding="utf-8")
+        assert load_tracks(tmp_pm_path) == {}
+
+    def test_drops_empty_and_nonstring_patterns(self, tmp_pm_path):
+        (tmp_pm_path / "tracks.yaml").write_text(
+            "tracks:\n  good: [main, '']\n  empty: []\n  bad_type: 5\n",
+            encoding="utf-8",
+        )
+        tracks = load_tracks(tmp_pm_path)
+        assert tracks == {"good": ["main"]}
+
+    def test_malformed_yaml_raises(self, tmp_pm_path):
+        (tmp_pm_path / "tracks.yaml").write_text("tracks: [bad\n  x: {", encoding="utf-8")
+        with pytest.raises(PmServerError, match="Failed to parse"):
+            load_tracks(tmp_pm_path)
 
 
 class TestYamlTransactionLocking:

@@ -1310,6 +1310,110 @@ class TestPmRecall:
         assert matched is True
         assert summary.session_id == "sess-A"
 
+    # ─── PMSERV-125 / ADR-035: logical track labels (.pm/tracks.yaml) ───
+
+    @staticmethod
+    def _write_tracks(tmp_project, body: str):
+        (tmp_project / ".pm" / "tracks.yaml").write_text(body, encoding="utf-8")
+
+    @staticmethod
+    def _save_on_branch(store, session_id, branch):
+        from pm_server.models import SessionSummary
+
+        store.save_session_summary(
+            SessionSummary(
+                session_id=session_id, summary=f"{branch} work", project="testproj", branch=branch
+            )
+        )
+
+    def test_track_logical_label_resolves_glob_to_latest(self, monkeypatch, tmp_project):
+        from pm_server.server import _get_memory_store, pm_recall
+
+        self._write_tracks(tmp_project, "tracks:\n  論文: [feat/p3-*, research/*]\n")
+        self._force_session(monkeypatch, "s-b")
+        store = _get_memory_store(None)
+        self._save_on_branch(store, "s-main", "main")
+        self._save_on_branch(store, "s-a", "feat/p3-a")
+        self._save_on_branch(store, "s-b", "research/wave-1")
+        # Make feat/p3-a the most recently worked of the 論文 line.
+        store._conn.execute(
+            "UPDATE session_summaries SET updated_at = datetime('now', '+1 hour')"
+            " WHERE session_id = ?",
+            ("s-a",),
+        )
+        store._conn.commit()
+
+        result = pm_recall(track="論文")
+        assert result["track"] == "論文"
+        assert result["track_matched"] is True
+        assert result["track_branch"] == "feat/p3-a"
+        assert result["last_session"]["session_id"] == "s-a"
+        # main is NOT part of the 論文 line.
+        assert result["last_session"]["session_id"] != "s-main"
+
+    def test_track_label_priority_then_raw_branch(self, monkeypatch, tmp_project):
+        from pm_server.server import _get_memory_store, pm_recall
+
+        self._write_tracks(tmp_project, "tracks:\n  教材: [edu/*]\n")
+        self._force_session(monkeypatch, "s-edu")
+        store = _get_memory_store(None)
+        self._save_on_branch(store, "s-edu", "edu/intro")
+        self._save_on_branch(store, "s-feat", "feat/x")
+
+        # Logical label resolves via glob.
+        by_label = pm_recall(track="教材")
+        assert by_label["track_matched"] is True
+        assert by_label["track_branch"] == "edu/intro"
+
+        # A non-label value is matched as a raw branch (v1 behavior).
+        by_raw = pm_recall(track="feat/x")
+        assert by_raw["track_matched"] is True
+        assert by_raw["last_session"]["session_id"] == "s-feat"
+
+    def test_track_backward_compat_no_mapping_file(self, monkeypatch, tmp_project):
+        from pm_server.server import _get_memory_store, pm_recall
+
+        # No tracks.yaml at all → track is a raw branch.
+        self._force_session(monkeypatch, "s-main")
+        store = _get_memory_store(None)
+        self._save_on_branch(store, "s-main", "main")
+        result = pm_recall(track="main")
+        assert result["track_matched"] is True
+        assert result["last_session"]["session_id"] == "s-main"
+
+    def test_track_rename_resistance_across_line(self, monkeypatch, tmp_project):
+        """A line spanning an old + renamed branch still returns its latest."""
+        from pm_server.server import _get_memory_store, pm_recall
+
+        self._write_tracks(tmp_project, "tracks:\n  論文: [research/*, feat/p3-*]\n")
+        self._force_session(monkeypatch, "s-new")
+        store = _get_memory_store(None)
+        self._save_on_branch(store, "s-old", "research/wave-old")  # earlier branch name
+        self._save_on_branch(store, "s-new", "feat/p3-renamed")  # later, renamed
+        store._conn.execute(
+            "UPDATE session_summaries SET updated_at = datetime('now', '+1 hour')"
+            " WHERE session_id = ?",
+            ("s-new",),
+        )
+        store._conn.commit()
+        result = pm_recall(track="論文")
+        assert result["track_matched"] is True
+        assert result["last_session"]["session_id"] == "s-new"
+
+    def test_track_malformed_tracks_yaml_warns_and_falls_back(self, monkeypatch, tmp_project):
+        from pm_server.server import _get_memory_store, pm_recall
+
+        self._write_tracks(tmp_project, "tracks: [broken\n  x: {")
+        self._force_session(monkeypatch, "s-main")
+        store = _get_memory_store(None)
+        self._save_on_branch(store, "s-main", "main")
+        result = pm_recall(track="main")
+        # Degrades to raw-branch matching, and surfaces a structured warning.
+        assert result["track_matched"] is True
+        assert result["last_session"]["session_id"] == "s-main"
+        assert "warnings" in result
+        assert result["warnings"][0]["code"] == "tracks_config_invalid"
+
     def test_recall_with_query_no_ambiguity_field(self, monkeypatch):
         self._force_session(monkeypatch, "sess-A")
         from pm_server.server import pm_recall, pm_remember

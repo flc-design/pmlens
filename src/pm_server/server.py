@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as _dt
+import fnmatch
 import json
 import os
 import uuid
@@ -60,6 +61,7 @@ from .storage import (
     load_registry,
     load_risks,
     load_tasks,
+    load_tracks,
     load_workflows,
     next_decision_number,
     next_knowledge_number,
@@ -208,6 +210,49 @@ def _detect_session_ambiguity(
     summaries = store.list_summaries_within(window_minutes=window_minutes, limit=10)
     distinct_sessions = {s.session_id for s in summaries}
     return (len(distinct_sessions) >= 2, summaries)
+
+
+def _resolve_track(
+    store: MemoryStore,
+    project_path: str | None,
+    track: str,
+) -> tuple[SessionSummary | None, bool, dict | None]:
+    """Resolve ``pm_recall(track=...)`` to a session summary.
+
+    Logical labels defined in ``.pm/tracks.yaml`` map to branch globs; a label
+    resolves to the latest summary across ALL matching branches, so a line can
+    span several branches and renaming/adding branches within it never breaks
+    continuity (resolution is at query time — PMSERV-125 / ADR-028 /
+    SynapticLedger ADR-035). A ``track`` that is not a defined label is treated
+    as a raw branch name (v1 behavior); label resolution takes priority. With no
+    mapping file, every track is a raw branch (backward compatible).
+
+    Returns ``(summary, track_matched, warning_or_None)``. The warning (a
+    ``warnings[]`` entry) is set when ``.pm/tracks.yaml`` is present but
+    malformed; resolution then degrades to raw-branch matching.
+    """
+    warning: dict | None = None
+    mapping: dict[str, list[str]] = {}
+    try:
+        mapping = load_tracks(_get_pm_path(project_path))
+    except PmServerError as e:
+        warning = {
+            "code": "tracks_config_invalid",
+            "message": f"Could not load .pm/tracks.yaml: {e}",
+            "remediation": ("Fix or remove .pm/tracks.yaml; falling back to raw-branch matching."),
+        }
+    except ProjectNotFoundError:
+        pass
+
+    if track in mapping:
+        globs = mapping[track]
+        recorded = store.list_distinct_branches()
+        matched = [b for b in recorded if any(fnmatch.fnmatchcase(b, g) for g in globs)]
+        summary, ok = store.get_latest_summary_in_branches(matched)
+        return summary, ok, warning
+
+    summary, ok = store.get_latest_summary_by_branch(track)
+    return summary, ok, warning
 
 
 # ─── Memory store cache (lazy init per project) ─────
@@ -833,17 +878,22 @@ def pm_recall(
     With task_id: memories linked to that task.
     type filter: observation | insight | lesson
     cross_project: search across all projects (Phase 3).
-    track: branch-aware continuity (PMSERV-124 / ADR-028). Pass the current git
-        branch to get the last session recorded on THAT line. The branch is
-        recorded on the save path (pm_session_summary); pm_recall itself never
-        touches git — pass the branch as data (the bundled SessionStart hook
-        surfaces it; re-pass after any ``git checkout``). v1: ``track`` is
-        matched against the recorded git branch (a logical track→branch mapping
-        is a future increment). If no summary was recorded on ``track`` yet, the
-        response falls back to the overall-latest with ``track_matched: false``.
-        For fully isolated parallel lines, prefer one git worktree per line —
-        pm-server scopes context per directory, so recall is branch-aware for
-        free (see ADR-028 / README).
+    track: branch-aware continuity (PMSERV-124/125 / ADR-028). Pass the current
+        git branch — or a logical work-line label — to get the last session
+        recorded on THAT line. The branch is recorded on the save path
+        (pm_session_summary); pm_recall itself never touches git — pass the value
+        as data (the bundled SessionStart hook surfaces the branch; re-pass after
+        any ``git checkout``). Resolution: if ``track`` is a label defined in
+        ``.pm/tracks.yaml`` (e.g. ``論文: [feat/p3-*, research/*]``) it resolves
+        to the latest summary across ALL matching branches (a line may span many
+        branches; renames/additions don't break history since resolution is at
+        query time). Otherwise ``track`` is matched as a raw branch name. With no
+        mapping file, every track is a raw branch (backward compatible). If
+        nothing matches, the response falls back to the overall-latest with
+        ``track_matched: false`` (plus ``track_branch`` when matched). For fully
+        isolated parallel lines, prefer one git worktree per line — pm-server
+        scopes context per directory, so recall is branch-aware for free (see
+        ADR-028 / README).
     """
     if cross_project:
         store = _get_memory_store(project_path)
@@ -874,12 +924,14 @@ def pm_recall(
     # Default: last session summary + recent memories
     if query is None and task_id is None:
         track_matched: bool | None = None
+        tracks_warning: dict | None = None
         if track:
             # Branch/track scopes recall to one work line, which dissolves
             # cross-session ambiguity by construction — so we skip the unscoped
             # ambiguity scan but still emit ambiguity_detected (kept False) to
-            # keep the response shape stable (ADR-028).
-            summary, track_matched = store.get_latest_summary_by_branch(track)
+            # keep the response shape stable (ADR-028). _resolve_track handles
+            # logical labels (.pm/tracks.yaml) and raw branches (PMSERV-125).
+            summary, track_matched, tracks_warning = _resolve_track(store, project_path, track)
             ambiguity, candidates = False, []
         else:
             summary = store.get_latest_summary()
@@ -914,6 +966,12 @@ def pm_recall(
             # (no-track) response stays byte-identical to pre-ADR-028 callers.
             response["track"] = track
             response["track_matched"] = track_matched
+            if track_matched and summary is not None:
+                # Surface which actual branch the context came from — useful
+                # when a logical label spans several branches.
+                response["track_branch"] = summary.branch
+            if tracks_warning is not None:
+                response["warnings"] = [tracks_warning]
         if ambiguity:
             response["last_session_candidates"] = [
                 {

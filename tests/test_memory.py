@@ -638,6 +638,54 @@ class TestBranchAwareSummaries:
         assert moved_matched is True
         assert moved.session_id == "sess-x"
 
+    def test_list_distinct_branches(self, memory_store: MemoryStore):
+        for sid, br in [("a", "main"), ("b", "feat/x"), ("c", "main"), ("d", "")]:
+            memory_store.save_session_summary(
+                SessionSummary(session_id=sid, summary="s", project="p", branch=br)
+            )
+        branches = set(memory_store.list_distinct_branches())
+        # Distinct, non-empty only ("" excluded).
+        assert branches == {"main", "feat/x"}
+
+    def test_latest_in_branches_picks_most_recent_across_set(self, memory_store: MemoryStore):
+        # A logical line spanning several branches (PMSERV-125 resolution).
+        for sid, br in [
+            ("s1", "feat/p3-a"),
+            ("s2", "feat/p3-b"),
+            ("s3", "research/wave-1"),
+        ]:
+            memory_store.save_session_summary(
+                SessionSummary(session_id=sid, summary="s", project="p", branch=br)
+            )
+        # Force s2 to be the most recently worked across the set.
+        memory_store._conn.execute(
+            "UPDATE session_summaries SET updated_at = datetime('now', '+1 hour')"
+            " WHERE session_id = ?",
+            ("s2",),
+        )
+        memory_store._conn.commit()
+        summary, matched = memory_store.get_latest_summary_in_branches(
+            ["feat/p3-a", "feat/p3-b", "research/wave-1"]
+        )
+        assert matched is True
+        assert summary.session_id == "s2"
+
+    def test_latest_in_branches_empty_falls_back(self, memory_store: MemoryStore):
+        memory_store.save_session_summary(
+            SessionSummary(session_id="s1", summary="s", project="p", branch="main")
+        )
+        summary, matched = memory_store.get_latest_summary_in_branches([])
+        assert matched is False
+        assert summary.session_id == "s1"
+
+    def test_latest_in_branches_no_match_falls_back(self, memory_store: MemoryStore):
+        memory_store.save_session_summary(
+            SessionSummary(session_id="s1", summary="s", project="p", branch="main")
+        )
+        summary, matched = memory_store.get_latest_summary_in_branches(["ghost"])
+        assert matched is False
+        assert summary.session_id == "s1"
+
 
 # ─── Server tool integration ───────────────────────────
 

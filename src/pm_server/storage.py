@@ -160,6 +160,46 @@ def _save_project(pm_path: Path, project: Project) -> None:
     _save_yaml(pm_path / "project.yaml", _model_dump(project), "project.yaml")
 
 
+def load_tracks(pm_path: Path) -> dict[str, list[str]]:
+    """Load ``.pm/tracks.yaml`` — logical work-line label → branch glob patterns.
+
+    Used by ``pm_recall(track=...)`` to resolve a logical line label (e.g.
+    本流 / 論文 / 教材) to the git branches whose session summaries belong to that
+    line (PMSERV-125 / ADR-028 / SynapticLedger ADR-035). Resolution happens at
+    *query* time, so renaming or adding branches within a line never breaks
+    continuity history.
+
+    File format (absent file ⇒ ``{}`` ⇒ ``track`` is matched as a raw branch)::
+
+        tracks:
+          本流: [main]
+          論文: [feat/p3-*, research/wave-scattering-*]
+          教材: [edu/*]
+
+    Returns a mapping of ``label -> [fnmatch glob, ...]``. A scalar value is
+    promoted to a one-element list; non-string / empty patterns are dropped; a
+    label left with no patterns is omitted. Raises ``PmServerError`` on
+    malformed YAML (callers may degrade to raw-branch resolution).
+    """
+    data = _load_yaml(pm_path / "tracks.yaml")
+    if not isinstance(data, dict):
+        return {}
+    raw = data.get("tracks")
+    if not isinstance(raw, dict):
+        return {}
+    result: dict[str, list[str]] = {}
+    for label, globs in raw.items():
+        if isinstance(globs, str):
+            patterns = [globs] if globs.strip() else []
+        elif isinstance(globs, list):
+            patterns = [g for g in globs if isinstance(g, str) and g.strip()]
+        else:
+            patterns = []
+        if patterns:
+            result[str(label)] = patterns
+    return result
+
+
 # ─── Tasks ───────────────────────────────────────────
 
 
