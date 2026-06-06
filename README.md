@@ -313,7 +313,28 @@ pm_recall(track="paper")     # last session recorded while on the `paper` branch
 - Under the bundled plugin, the SessionStart hook surfaces the current branch so the model can pass `track=` on its first recall; re-pass it after any `git checkout`.
 - If a line has no recorded summary yet (e.g. an existing DB from before this feature), `pm_recall(track=...)` gracefully falls back to the overall-latest and sets `track_matched: false` — so it never breaks on day one.
 
-> `track` currently matches the raw git branch. A logical track→branch mapping (one line spanning several branches) is a planned increment. See **ADR-028** for the full design rationale.
+#### Logical track labels (`.pm/tracks.yaml`)
+
+A work line is a concept; branches are implementation detail that get renamed and split. Map a logical label to one or more branch **globs** so continuity follows the *line*, not the branch name:
+
+```yaml
+# .pm/tracks.yaml
+tracks:
+  本流: [main]
+  論文: [feat/p3-*, research/wave-scattering-*]
+  教材: [edu/*]
+```
+
+```
+pm_recall(track="論文")   # latest session across ANY branch matching the 論文 globs
+```
+
+- **Resolution is at query time**, so renaming or adding a branch within a line never breaks history (rename-resistant).
+- `track` accepts a **logical label OR a raw branch name** — labels resolve first; anything else is matched as a raw branch.
+- **Backward compatible**: with no `tracks.yaml`, every `track` is a raw branch (the v1 behavior).
+- When matched, the response includes `track_branch` (which actual branch the context came from); a malformed `tracks.yaml` degrades to raw-branch matching and surfaces a `warnings[]` entry.
+
+See **ADR-028** (design) and **ADR-035** on the SynapticLedger side (unified `.pm/` + `track=`).
 
 ---
 

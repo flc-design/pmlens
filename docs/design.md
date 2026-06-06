@@ -333,9 +333,35 @@ worktree ごとに独立するため、**1 ライン = 1 worktree** にすれば
   ため「最後に触ったライン」を id 順では表せない）。
 - UPSERT の branch 更新は `COALESCE(NULLIF(excluded.branch, ''), ...)` で非破壊化
   （検出失敗時の '' で既知ブランチを潰さない／実際の checkout 先には更新する）。
-- `track` は `pm_recall` レスポンスのトップレベルキー（`track` / `track_matched`）として
-  追加し、`last_session` の形（6 キー）は不変に保つ。`track` 未指定時の応答は従来と
-  バイト一致。
+- `track` は `pm_recall` レスポンスのトップレベルキー（`track` / `track_matched` /
+  マッチ時 `track_branch`）として追加し、`last_session` の形（6 キー）は不変に保つ。
+  `track` 未指定時の応答は従来とバイト一致。
+
+#### logical track ラベル (PMSERV-125 / SynapticLedger ADR-035)
+
+「ライン」は概念単位、ブランチは実装詳細（rename/分岐し得る）。論理ラベルを
+`.pm/tracks.yaml` でブランチ glob に map し、継続性を**ラベル単位**で束ねる:
+
+```yaml
+# .pm/tracks.yaml
+tracks:
+  本流: [main]
+  論文: [feat/p3-*, research/wave-scattering-*]
+  教材: [edu/*]
+```
+
+- **解決はクエリ時**（`server._resolve_track`）。`pm_recall(track="論文")` は
+  `storage.load_tracks()` でラベル→glob を引き、`memory.list_distinct_branches()` の
+  記録済みブランチを `fnmatch.fnmatchcase` で照合、マッチ集合の最新を
+  `memory.get_latest_summary_in_branches()`（`updated_at DESC, id DESC`）で返す。
+  → ライン内のブランチ rename/追加が継続性履歴を切らない（rename 耐性）。
+- **ラベル優先**: `track` が `tracks.yaml` のラベルなら glob 解決、そうでなければ raw
+  branch として照合（v1 挙動）。マッピング未定義（ファイル無し）なら全て raw branch
+  ＝後方互換。
+- save 経路は従来どおり raw branch のみ記録（ラベル解決は読み取り専用 = pm_recall の
+  RO 性質を保つ）。`.git/HEAD` 検出は不変。
+- `tracks.yaml` が壊れている場合は raw-branch 照合へ degrade し、`warnings[]` に
+  `tracks_config_invalid` を載せる（サイレントに失敗しない）。
 
 ## 4. MCP Server 設計
 
