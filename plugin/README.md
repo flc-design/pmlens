@@ -12,6 +12,7 @@ this plugin adds a Claude-Code-native install + integration layer on top
 | Manifest | `.claude-plugin/plugin.json` | Plugin metadata |
 | Bundled MCP | `.mcp.json` | Runs `uvx pm-server@x.y` — no prior `pip install` needed |
 | SessionStart hook | `hooks/hooks.json` + `hooks/session-start.sh` | Re-homes the `CLAUDE.md` session ritual: injects a directive to run pm_status/pm_next/pm_recall, warns on duplicate registration, per-session double-fire guard |
+| PostToolUse hook | `hooks/hooks.json` + `hooks/post-tool-use.sh` | Re-homes the git-commit reminder (run pm_update_task/pm_log/pm_next). Directive-only; **defers** when the manual `pm-server hook` is also in `settings.json`, so a user with both never gets a doubled reminder |
 | Skill | `skills/pm/SKILL.md` | Model-invoked restatement of pm-server's behavioural rules |
 
 ### Why a hook + skill instead of CLAUDE.md
@@ -37,7 +38,7 @@ flip tasks to `in_progress`, surface `warnings[]`, …) is therefore re-homed to
 
 ```text
 /plugin marketplace add flc-design/pm-server
-/plugin install pm-server@flc-server-marketplace
+/plugin install pm-server@flc-design
 ```
 
 > **Prerequisite:** `uvx` (from [uv](https://docs.astral.sh/uv/)) on PATH. The
@@ -55,7 +56,10 @@ SessionStart hook detects this and prints a warning. To resolve:
 claude mcp remove pm-server     # drop the manual registration; rely on the plugin
 ```
 
-(Open design question — see "Collision guard" below.)
+The **PostToolUse** hook is safe to leave as-is during migration: the plugin's
+copy auto-defers when it sees the manual `pm-server hook` in `settings.json`, so
+you won't get a doubled commit reminder. To fully retire the manual setup you
+may also remove that hook (`pm-server uninstall-hooks`), but it is not required.
 
 ## Testing in isolation (zero impact on your live setup)
 
@@ -101,16 +105,24 @@ hooks/MCP need the reload).
 - **Dev** — local source via `uv run --project <repo> pm-server serve`, supplied
   through `--mcp-config` in the isolation harness above (not committed).
 
-## Open design questions (pre-publish)
+## Resolved design decisions
 
-- **Collision guard.** Current default: bundle the MCP + warn on duplicates.
-  Alternatives: (A) *detect-and-defer* — a Setup hook runs `claude mcp add` only
-  when pm-server is absent (mutates user config); (B) *centralise* — ship only
-  skills/hooks and require a single shared MCP. Decide before publishing.
-- **`marketplace.json`** — to be added at the repository root
-  (`.claude-plugin/marketplace.json`) listing this `plugin/` directory as the
-  catalog source, for the publish step.
-- **installer.py double-fire** — when the plugin is active, suppress the
-  settings.json hook that `installer.py` injects, or the SessionStart action
-  fires twice. The hook's per-session guard dedupes the *plugin's* own hook, but
-  not an independent settings.json copy.
+- **Collision guard — bundle + warn + documented migration** (ADR-027). The
+  bundled MCP stays; the SessionStart hook detects a manual registration and
+  warns with the exact `claude mcp remove` remediation. New (plugin-only) users
+  never collide — only a user who keeps *both* a manual registration and the
+  plugin sees duplicate `pm_*` tools, and the warning tells them how to resolve
+  it. Rejected: *detect-and-defer* (mutates user config, against pm-server's
+  "never break an existing setup" rule) and *centralise* (loses the
+  "`/plugin install` and it just works" bundling).
+- **`marketplace.json`** — added at the repository root
+  (`.claude-plugin/marketplace.json`), marketplace name `flc-design`, listing
+  this `plugin/` directory (`"source": "./plugin"`) as the catalog source.
+- **PostToolUse parity, not double-fire.** The manual install ships *only* a
+  `PostToolUse` hook (the git-commit reminder) and *no* SessionStart hook, so
+  the original "SessionStart fires twice" worry could not actually occur. The
+  real gap was the opposite: a plugin-only user got *no* commit reminder. The
+  plugin now ships its own `PostToolUse` hook (`hooks/post-tool-use.sh`) that
+  injects the same directive and **defers automatically** when it detects the
+  manual `pm-server hook` in `settings.json` — so a user with both gets exactly
+  one reminder, with zero manual cleanup required.

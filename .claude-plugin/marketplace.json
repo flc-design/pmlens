@@ -1,0 +1,31 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "flc-design",
+  "owner": {
+    "name": "flc-design"
+  },
+  "metadata": {
+    "description": "flc-design Claude Code plugins",
+    "version": "0.9.0"
+  },
+  "plugins": [
+    {
+      "name": "pm-server",
+      "description": "Claude Code project management: task tracking, progress, blockers, ADRs, and a cross-project dashboard. Bundles the pm-server MCP via uvx and re-homes its session rituals into a SessionStart hook + skill.",
+      "source": "./plugin",
+      "author": {
+        "name": "flc-design"
+      },
+      "category": "productivity",
+      "homepage": "https://github.com/flc-design/pm-server",
+      "keywords": [
+        "project-management",
+        "mcp",
+        "tasks",
+        "adr",
+        "workflow",
+        "pm"
+      ]
+    }
+  ]
+}
