@@ -43,12 +43,13 @@ class TestRulesModule:
         assert isinstance(TEMPLATE_VERSION, int)
         assert TEMPLATE_VERSION >= 1
 
-    def test_template_version_pinned_at_v9(self):
-        # ADR-008 4th-tier guard: a bump must be intentional. v9 adds the
-        # X content pipeline rule (.pm → build-in-public X drafts; on-signal
-        # propose, redact-only safety, never auto-post) — PMSERV-119 / ADR-024.
+    def test_template_version_pinned_at_v10(self):
+        # ADR-008 4th-tier guard: a bump must be intentional. v10 adds the
+        # branch-aware recall rule (non-plugin hosts must re-derive the branch
+        # from .git/HEAD and pass it as pm_recall(track=...)) — PMSERV-125 /
+        # ADR-028. v9 added the X content pipeline rule (PMSERV-119 / ADR-024);
         # v8 added the memory-layer routing rule (PMSERV-111 / ADR-023).
-        assert TEMPLATE_VERSION == 9
+        assert TEMPLATE_VERSION == 10
 
     def test_template_contains_x_content_pipeline_section(self):
         # PMSERV-119: the on-signal trigger rule must be present in the
@@ -57,6 +58,18 @@ class TestRulesModule:
         assert "content-pipeline" in CLAUDEMD_TEMPLATE
         assert "pm_redact_draft" in CLAUDEMD_TEMPLATE
         assert "propose-don't-force" in CLAUDEMD_TEMPLATE
+
+    def test_template_contains_branch_aware_recall_section(self):
+        # PMSERV-125 / ADR-028: the rule that teaches hook-less hosts (manual
+        # MCP, Codex) to re-derive the branch from .git/HEAD and pass it as
+        # track=. The load-bearing pieces: the section header, the track=
+        # argument, the .git/HEAD re-derivation, and the .pm/tracks.yaml label
+        # path. The same template is injected into both CLAUDE.md and AGENTS.md,
+        # so this rule reaches the Codex (non-plugin) host that needs it most.
+        assert "ブランチ単位のセッション継続" in CLAUDEMD_TEMPLATE
+        assert "track=" in CLAUDEMD_TEMPLATE
+        assert ".git/HEAD" in CLAUDEMD_TEMPLATE
+        assert ".pm/tracks.yaml" in CLAUDEMD_TEMPLATE
 
     def test_markers_are_strings(self):
         assert "pm-server:begin" in BEGIN_MARKER

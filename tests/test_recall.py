@@ -260,9 +260,10 @@ class TestClaudeMdV3:
     def test_template_version(self):
         from pm_server.claudemd import TEMPLATE_VERSION
 
-        # v9: X content pipeline rule (PMSERV-119 / ADR-024); v8 was the
+        # v10: branch-aware recall rule (PMSERV-125 / ADR-028); v9 was the
+        # X content pipeline rule (PMSERV-119 / ADR-024); v8 was the
         # memory-layer routing rule (PMSERV-111 / ADR-023).
-        assert TEMPLATE_VERSION == 9
+        assert TEMPLATE_VERSION == 10
 
     def test_template_has_pm_recall(self):
         from pm_server.claudemd import CLAUDEMD_TEMPLATE

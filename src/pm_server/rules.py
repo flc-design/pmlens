@@ -30,7 +30,7 @@ TARGET_FILES: dict[str, str] = {
     "codex": "AGENTS.md",
 }
 
-TEMPLATE_VERSION = 9
+TEMPLATE_VERSION = 10
 BEGIN_MARKER = "<!-- pm-server:begin v={version} -->"
 END_MARKER = "<!-- pm-server:end -->"
 BEGIN_PATTERN = re.compile(r"<!-- pm-server:begin v=(\d+) -->")
@@ -43,10 +43,30 @@ CLAUDEMD_TEMPLATE = """\
 ### セッション開始時（最初の応答の前に必ず実行）
 1. pm_status を MCP ツールとして実行し、現在の進捗を表示する
 2. pm_next で次に着手すべきタスクを3件表示する
-3. pm_recall で前回セッションの文脈を取得する
+3. pm_recall で前回セッションの文脈を取得する（複数の作業ラインを行き来している場合は
+   track= を渡す。下記「ブランチ単位のセッション継続」を参照）
 4. ブロッカーや期限超過があれば警告する
 5. pm_status の claudemd.other_rule_sections に他のルールセクションが報告された場合、
    この CLAUDE.md 内の該当セクションのルールも全て実行する
+
+### ブランチ単位のセッション継続（branch-aware recall, ADR-028）
+複数の作業ライン（feature ブランチ / worktree）を行き来する場合、pm_recall に track= を
+渡すと、そのライン専用の前回コンテキストだけを復元できる（track 未指定なら従来どおり全体の
+最新を返すので後方互換）。track= に渡す値の決め方:
+1. **プラグイン環境（Claude Code plugin）**: session-start hook が現在のブランチを提示する
+   ので、その値をそのまま pm_recall(track=...) に渡す。
+2. **hook の無いホスト（手動 MCP 接続・Codex CLI 等）**: hook が無いため、ホスト側（=あなた）
+   が自分でブランチを求める責務を負う。セッション開始時、および git checkout / switch で
+   ブランチを切り替えた直後に、リポジトリの .git/HEAD を読んで現在のブランチ名を求め
+   （`ref: refs/heads/<branch>` の <branch> 部分。HEAD が SHA だけの detached HEAD や、
+   .git が file の worktree はブランチ無しとして扱う）、その値を pm_recall(track="<branch>")
+   に渡す。pm-server は read 経路で git を一切触らない（RO 不変条件 / ADR-028）ため、
+   ブランチの再取得はホスト側で行うこと。
+3. **論理ラベル**: .pm/tracks.yaml に `tracks: {{ラベル: [glob, ...]}}`（例: 本流→main、
+   論文→feat/p3-*）が定義されていれば、ブランチ名の代わりにラベルを track= に渡せる
+   （glob にマッチする複数ブランチを束ねた最新を返す。解決はクエリ時なので rename 耐性あり）。
+4. **結果の解釈**: 応答の track_matched=false は「そのラインにまだ記録が無い」を意味し、
+   overall-latest にフォールバックする。track_branch でどのブランチ由来かを確認できる。
 
 ### タスクに着手する前
 1. 該当タスクを pm_update_task で in_progress に変更する
