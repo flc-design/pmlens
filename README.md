@@ -27,6 +27,10 @@ Track tasks, visualize progress, record decisions — through natural language i
 ✓ MYAPP-014 → in_progress
 ```
 
+**HTML dashboard** (`pm_dashboard`) — phase progress, velocity, blockers, and risks at a glance:
+
+![PM Server HTML dashboard — phases, velocity, blockers, and risks](https://raw.githubusercontent.com/flc-design/pm-server/main/docs/assets/dashboard.png)
+
 ---
 
 ## Features

@@ -27,6 +27,10 @@
 ✓ MYAPP-014 → in_progress
 ```
 
+**HTML ダッシュボード**（`pm_dashboard`）— フェーズ進捗・ベロシティ・ブロッカー・リスクを一目で:
+
+![PM Server HTML ダッシュボード — フェーズ進捗・ベロシティ・ブロッカー・リスク](https://raw.githubusercontent.com/flc-design/pm-server/main/docs/assets/dashboard.png)
+
 ---
 
 ## 特徴
