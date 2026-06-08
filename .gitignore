@@ -60,3 +60,10 @@ AGENTS.md.bak.*
 
 # Synaptic Ledger (local knowledge data)
 .synaptic/
+
+# Blog/marketing article drafts — kept local-only. A product source repo is not
+# the home for marketing posts: Zenn publishes from a dedicated zenn-content repo
+# (articles/ + zenn-cli), note is web-editor only. Drafts live here untracked and
+# are published manually per platform. (The README's dashboard image stays tracked
+# under docs/assets/.)
+docs/articles/
