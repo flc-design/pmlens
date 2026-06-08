@@ -1,7 +1,9 @@
 # pm-server
 
+[![PyPI version](https://img.shields.io/pypi/v/pm-server.svg)](https://pypi.org/project/pm-server/)
+[![Python versions](https://img.shields.io/pypi/pyversions/pm-server.svg)](https://pypi.org/project/pm-server/)
+[![CI](https://github.com/flc-design/pm-server/actions/workflows/ci.yml/badge.svg)](https://github.com/flc-design/pm-server/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/)
 [![Multi-Host](https://img.shields.io/badge/multi--host-Claude%20Code%20%2B%20Codex%20CLI-success)](#multi-host-support-claude-code--codex-cli)
 
 **[日本語版 README はこちら](README.ja.md)**
@@ -30,7 +32,7 @@ Track tasks, visualize progress, record decisions — through natural language i
 ## Features
 
 - **🔌 Multi-host first** — registers in **Claude Code AND Codex CLI** with one command (`pm-server install --target=auto`). Project rules sync to both `CLAUDE.md` and `AGENTS.md` automatically (ADR-008). Switch hosts mid-project without losing context — same `.pm/` data, same workflows
-- **32 MCP tools** — task CRUD, child issues, status, blockers, velocity, dashboard, ADR, session memory, workflows, knowledge records, multi-host rules injection, and more
+- **42 MCP tools** — task CRUD, child issues, status, blockers, velocity, dashboard, ADR, session memory, workflows, knowledge records, multi-host rules injection, cross-host outbox bridge, build-in-public X drafts, and more
 - **Workflow engine** — template-based development workflows with loops, user gates, and chaining (Discovery → Development)
 - **Knowledge records** — structured findings between casual memory and formal ADR (research, tradeoff, spec, etc.)
 - **Super Research skill** — 3 parallel agents (Domain Expert, Critical Analyst, Lateral Thinker) + Depth Check (6 dimensions) + Fact Check + Cross-Check
@@ -204,7 +206,7 @@ dataclasses, atomic-write helpers).
 
 ---
 
-## MCP Tools (32 tools)
+## MCP Tools (42 tools)
 
 ### Project Management
 
@@ -264,6 +266,7 @@ dataclasses, atomic-write helpers).
 |---|---|
 | `pm_record` | Record structured knowledge (research / market / spike / tradeoff / spec / api_design) |
 | `pm_knowledge` | Query, filter, update, and summarize knowledge records |
+| `pm_knowledge_query` | Read-only knowledge query — list / filter / summarize records (ADR-018) |
 
 ### Workflow Engine
 
@@ -275,6 +278,25 @@ dataclasses, atomic-write helpers).
 | `pm_workflow_abandon` | Abandon a workflow (transition to ABANDONED, preserves step history) |
 | `pm_workflow_list` | List all workflow instances with status filter |
 | `pm_workflow_templates` | List available workflow templates (built-in + custom) |
+
+### X Content Pipeline (Build-in-Public, ADR-024)
+
+| Tool | Description |
+|---|---|
+| `pm_draft_x` | Stage a build-in-public X draft from a `.pm` signal — raw content stays internal (PMSERV-113) |
+| `pm_redact_draft` | Layer-1 deterministic redaction prefilter — scrubs hook + each body segment, count-only report |
+| `pm_x_drafts_pending` | Review queue for staged drafts — exposes ONLY redacted / safe fields |
+| `pm_reject_draft` | Discard a staged draft with a mandatory, auditable reason |
+
+### Outbox (Cross-Host Bridge)
+
+| Tool | Description |
+|---|---|
+| `pm_outbox_remember` | Capture a memory / lesson from Claude Desktop into the cross-host outbox |
+| `pm_outbox_log` | Capture a daily-log entry from Claude Desktop into the cross-host outbox |
+| `pm_outbox_pending` | List pending entries in the Desktop outbox (`~/.pm/desktop/desktop.db`) |
+| `pm_outbox_merge` | Promote pending outbox entries into the target project's main store |
+| `pm_outbox_reject` | Reject pending outbox entries with an auditable reason |
 
 ### Maintenance
 
@@ -525,7 +547,7 @@ Claude Code Session
   └── MCP Server (stdio)
         └── pm-server serve
               │
-              ├── server.py    → 32 MCP tools (FastMCP)
+              ├── server.py    → 42 MCP tools (FastMCP)
               ├── models.py    → Pydantic v2 data models (17 models, 15 enums)
               ├── storage.py   → YAML read/write
               ├── workflow.py  → Workflow engine (state machine)

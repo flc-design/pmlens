@@ -1,6 +1,6 @@
 # PM Server Cheatsheet
 
-> **32 MCP tools** for Claude Code project management.
+> **42 MCP tools** for Claude Code + Codex CLI project management.
 > Version 0.3.3+ | Python 3.11+ | PyPI: `pm-server`
 
 ---

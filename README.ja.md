@@ -1,7 +1,9 @@
 # pm-server
 
+[![PyPI version](https://img.shields.io/pypi/v/pm-server.svg)](https://pypi.org/project/pm-server/)
+[![Python versions](https://img.shields.io/pypi/pyversions/pm-server.svg)](https://pypi.org/project/pm-server/)
+[![CI](https://github.com/flc-design/pm-server/actions/workflows/ci.yml/badge.svg)](https://github.com/flc-design/pm-server/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/)
 [![Multi-Host](https://img.shields.io/badge/multi--host-Claude%20Code%20%2B%20Codex%20CLI-success)](#マルチホスト対応-claude-code--codex-cli)
 
 **[English README](README.md)**
@@ -30,7 +32,7 @@
 ## 特徴
 
 - **🔌 マルチホストファースト** — `pm-server install --target=auto` 一発で **Claude Code と Codex CLI の両方に登録**。プロジェクトのルールも `CLAUDE.md` と `AGENTS.md` の両方に自動同期 (ADR-008)。プロジェクト途中でホストを切り替えてもコンテキストを失わない — 同じ `.pm/` データ、同じワークフロー
-- **32 の MCP ツール** — タスク CRUD、子イシュー、ステータス、ブロッカー、ベロシティ、ダッシュボード、ADR、セッションメモリ、ワークフロー、ナレッジレコード、マルチホストルール注入 等
+- **42 の MCP ツール** — タスク CRUD、子イシュー、ステータス、ブロッカー、ベロシティ、ダッシュボード、ADR、セッションメモリ、ワークフロー、ナレッジレコード、マルチホストルール注入、クロスホスト Outbox ブリッジ、build-in-public X 下書き 等
 - **ワークフローエンジン** — テンプレートベースの開発ワークフロー（ループ、ユーザーゲート、チェイン対応：Discovery → Development）
 - **ナレッジレコード** — カジュアルなメモリとフォーマルな ADR の中間に位置する構造化された知見記録（research、tradeoff、spec 等）
 - **Super Research スキル** — 3 並列エージェント（Domain Expert、Critical Analyst、Lateral Thinker）+ Depth Check（6 次元）+ Fact Check + Cross-Check
@@ -201,7 +203,7 @@ pm-server uninstall --target auto
 
 ---
 
-## MCP ツール一覧（32ツール）
+## MCP ツール一覧（42ツール）
 
 ### プロジェクト管理
 
@@ -261,6 +263,7 @@ pm-server uninstall --target auto
 |---|---|
 | `pm_record` | 構造化された知識を記録（research / market / spike / tradeoff / spec / api_design 等） |
 | `pm_knowledge` | 知識レコードの検索・フィルタ・更新・サマリ |
+| `pm_knowledge_query` | 読み取り専用の知識クエリ — 一覧 / フィルタ / サマリ（ADR-018） |
 
 ### ワークフローエンジン
 
@@ -272,6 +275,25 @@ pm-server uninstall --target auto
 | `pm_workflow_abandon` | ワークフローを放棄（ABANDONED へ遷移、ステップ履歴は保持） |
 | `pm_workflow_list` | ステータスフィルタ付きで全ワークフローインスタンスを一覧 |
 | `pm_workflow_templates` | 利用可能なテンプレート一覧（組み込み + カスタム） |
+
+### X コンテンツパイプライン（build-in-public, ADR-024）
+
+| ツール | 説明 |
+|---|---|
+| `pm_draft_x` | `.pm` シグナルから build-in-public の X 下書きをステージング — 原文（原液）は内部保持（PMSERV-113） |
+| `pm_redact_draft` | Layer-1 決定論的 redaction 前処理 — hook と各 body セグメントを除去し件数のみレポート |
+| `pm_x_drafts_pending` | ステージング済み下書きのレビューキュー — redact 済み / 安全フィールドのみ公開 |
+| `pm_reject_draft` | ステージング済み下書きを必須・監査可能な理由付きで破棄 |
+
+### Outbox（クロスホストブリッジ）
+
+| ツール | 説明 |
+|---|---|
+| `pm_outbox_remember` | Claude Desktop の記憶 / 教訓をクロスホスト Outbox に取り込み |
+| `pm_outbox_log` | Claude Desktop の日次ログをクロスホスト Outbox に取り込み |
+| `pm_outbox_pending` | Desktop Outbox（`~/.pm/desktop/desktop.db`）の保留中エントリを一覧 |
+| `pm_outbox_merge` | 保留中の Outbox エントリを対象プロジェクトの本ストアへ昇格 |
+| `pm_outbox_reject` | 保留中の Outbox エントリを監査可能な理由付きで却下 |
 
 ### メンテナンス
 
@@ -460,7 +482,7 @@ Claude Code Session
   └── MCP Server (stdio)
         └── pm-server serve
               │
-              ├── server.py    → 32 MCP ツール (FastMCP)
+              ├── server.py    → 42 MCP ツール (FastMCP)
               ├── models.py    → Pydantic v2 データモデル (17 models, 15 enums)
               ├── storage.py   → YAML 読み書き
               ├── workflow.py  → ワークフローエンジン (state machine)
