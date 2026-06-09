@@ -25,6 +25,7 @@ Concurrency (PMSERV-048 / ADR-011) and the private-save API (PMSERV-067):
 from __future__ import annotations
 
 import datetime as _dt
+import os
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -58,6 +59,10 @@ PM_DIR = ".pm"
 GLOBAL_PM_DIR = Path.home() / ".pm"
 
 DEFAULT_LOCK_TIMEOUT_S = 5.0
+# Env override for the lock-acquire timeout (PMSERV-109). Lets operators on slow
+# or heavily-contended filesystems (networked storage, oversubscribed CI runners)
+# raise the timeout without weakening the in-process fail-fast default.
+_LOCK_TIMEOUT_ENV = "PM_LOCK_TIMEOUT_S"
 _LOCKS_DIR = ".locks"
 _LOCKS_GITIGNORE = "*\n!.gitignore\n"
 
@@ -104,18 +109,43 @@ def _ensure_locks_dir(base_dir: Path) -> Path:
     return lock_dir
 
 
+def _resolve_lock_timeout() -> float:
+    """Resolve the default lock-acquire timeout, honoring ``PM_LOCK_TIMEOUT_S``.
+
+    The in-process default is :data:`DEFAULT_LOCK_TIMEOUT_S` (5s) — deliberately
+    fail-fast so a genuinely stuck lock surfaces quickly to the caller. Operators
+    on slow or heavily-contended filesystems (networked storage, oversubscribed
+    CI runners) can raise it via the ``PM_LOCK_TIMEOUT_S`` environment variable
+    without weakening that default for everyone. Missing, non-numeric, or
+    non-positive values fall back to :data:`DEFAULT_LOCK_TIMEOUT_S`.
+    """
+    raw = os.environ.get(_LOCK_TIMEOUT_ENV)
+    if raw is None:
+        return DEFAULT_LOCK_TIMEOUT_S
+    try:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_LOCK_TIMEOUT_S
+    return value if value > 0 else DEFAULT_LOCK_TIMEOUT_S
+
+
 @contextmanager
 def _yaml_transaction(
     base_dir: Path,
     filename: str,
     *,
-    timeout: float = DEFAULT_LOCK_TIMEOUT_S,
+    timeout: float | None = None,
 ) -> Iterator[None]:
     """Acquire an exclusive lock for a yaml file's read-modify-write cycle.
 
     The lock file lives at ``base_dir/.locks/{stem}.lock`` where ``stem`` is
     ``filename`` with any ``.yaml`` suffix stripped (so callers can pass either
     ``"tasks.yaml"`` or a plain label like ``"registry"``).
+
+    ``timeout`` is the seconds to wait for the lock. When ``None`` (the default
+    used by every mutator), it is resolved via :func:`_resolve_lock_timeout`,
+    which honors the ``PM_LOCK_TIMEOUT_S`` env override. An explicit value (e.g.
+    a short timeout in tests asserting contention) bypasses the env entirely.
 
     Raises ``PmServerError`` if the lock cannot be acquired within ``timeout``
     seconds.
@@ -126,6 +156,8 @@ def _yaml_transaction(
     a ``with _yaml_transaction(...):`` block, do not call another public
     mutator that would acquire the same lock.
     """
+    if timeout is None:
+        timeout = _resolve_lock_timeout()
     lock_dir = _ensure_locks_dir(base_dir)
     stem = filename.removesuffix(".yaml")
     lock_path = lock_dir / f"{stem}.lock"

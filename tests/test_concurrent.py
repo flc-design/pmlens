@@ -19,8 +19,16 @@ from pathlib import Path
 
 import pytest
 
+from pm_server import storage
 from pm_server.models import Task
-from pm_server.storage import add_task, load_tasks
+from pm_server.storage import (
+    _LOCK_TIMEOUT_ENV,
+    DEFAULT_LOCK_TIMEOUT_S,
+    _resolve_lock_timeout,
+    _yaml_transaction,
+    add_task,
+    load_tasks,
+)
 
 # ─── Top-level worker functions (must be module-level for pickling) ──
 
@@ -61,8 +69,15 @@ def cm_pm_path(tmp_path):
 
 
 class TestConcurrentMutations:
-    def test_two_processes_adding_tasks_no_lost_update(self, cm_pm_path):
+    def test_two_processes_adding_tasks_no_lost_update(self, cm_pm_path, monkeypatch):
         """100 add_task calls split across 2 processes should yield 100 tasks."""
+        # On heavily-loaded CI runners (observed on Python 3.12, PMSERV-108/109)
+        # the default 5s lock-acquire timeout can be exceeded purely from
+        # scheduler jitter while a peer process holds the tasks.yaml lock — a
+        # false failure, since locking is working correctly. Give the spawned
+        # workers a generous timeout via the env knob. ``spawn`` inherits the
+        # parent's os.environ, so the children pick this up.
+        monkeypatch.setenv("PM_LOCK_TIMEOUT_S", "30")
         ctx = mp.get_context("spawn")
         p1 = ctx.Process(target=_worker_add_tasks, args=(str(cm_pm_path), "A", 50))
         p2 = ctx.Process(target=_worker_add_tasks, args=(str(cm_pm_path), "B", 50))
@@ -150,3 +165,60 @@ class TestAtomicWriteUnderKill:
         add_task(cm_pm_path, Task(id="POST-001", title="after-kill", phase="phase-1"))
         tasks_after = load_tasks(cm_pm_path)
         assert {t.id for t in tasks_after} == {"ORIG-001", "POST-001"}
+
+
+class TestLockTimeoutEnvKnob:
+    """``PM_LOCK_TIMEOUT_S`` overrides the default lock-acquire timeout (PMSERV-109).
+
+    These are deterministic (no subprocess, no wall-clock waits): the resolver is
+    pure, and the wiring into ``_yaml_transaction`` is verified by spying on the
+    timeout handed to ``FileLock``. This is the fix for the flaky 5s timeout on
+    loaded CI — operators can raise the patience without changing the in-process
+    fail-fast default.
+    """
+
+    def test_resolve_default_when_env_unset(self, monkeypatch):
+        monkeypatch.delenv(_LOCK_TIMEOUT_ENV, raising=False)
+        assert _resolve_lock_timeout() == DEFAULT_LOCK_TIMEOUT_S
+
+    def test_resolve_reads_positive_override(self, monkeypatch):
+        monkeypatch.setenv(_LOCK_TIMEOUT_ENV, "30")
+        assert _resolve_lock_timeout() == 30.0
+
+    def test_resolve_reads_fractional_override(self, monkeypatch):
+        monkeypatch.setenv(_LOCK_TIMEOUT_ENV, "0.5")
+        assert _resolve_lock_timeout() == 0.5
+
+    @pytest.mark.parametrize("bad", ["abc", "", "0", "-1", "nan"])
+    def test_resolve_falls_back_on_invalid(self, monkeypatch, bad):
+        """Non-numeric, empty, zero, negative, or NaN → fail-fast default."""
+        monkeypatch.setenv(_LOCK_TIMEOUT_ENV, bad)
+        assert _resolve_lock_timeout() == DEFAULT_LOCK_TIMEOUT_S
+
+    def _spy_filelock(self, monkeypatch):
+        """Patch storage.FileLock with a spy that records the timeout it receives."""
+        captured: dict[str, float] = {}
+        real_filelock = storage.FileLock
+
+        def spy(path, timeout):
+            captured["timeout"] = timeout
+            return real_filelock(path, timeout=timeout)
+
+        monkeypatch.setattr(storage, "FileLock", spy)
+        return captured
+
+    def test_transaction_uses_env_timeout_by_default(self, monkeypatch, cm_pm_path):
+        """With no explicit timeout, the env value flows through to FileLock."""
+        monkeypatch.setenv(_LOCK_TIMEOUT_ENV, "12.5")
+        captured = self._spy_filelock(monkeypatch)
+        with _yaml_transaction(cm_pm_path, "tasks.yaml"):
+            pass
+        assert captured["timeout"] == 12.5
+
+    def test_explicit_timeout_bypasses_env(self, monkeypatch, cm_pm_path):
+        """An explicit timeout wins over the env (tests asserting contention rely on this)."""
+        monkeypatch.setenv(_LOCK_TIMEOUT_ENV, "12.5")
+        captured = self._spy_filelock(monkeypatch)
+        with _yaml_transaction(cm_pm_path, "tasks.yaml", timeout=3.0):
+            pass
+        assert captured["timeout"] == 3.0
