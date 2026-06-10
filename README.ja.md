@@ -273,7 +273,7 @@ pm-server uninstall --target auto
 
 | ツール | 説明 |
 |---|---|
-| `pm_workflow_start` | テンプレートからワークフローを開始（development / discovery / super-research） |
+| `pm_workflow_start` | テンプレートからワークフローを開始（development / discovery / super-research / brainstorming / content-pipeline） |
 | `pm_workflow_status` | 現在のステップ、進捗、次に取るべきアクションのガイダンスを表示 |
 | `pm_workflow_advance` | 次のステップへ進める（ループ・スキップ対応、artifacts と notes を引き継げる） |
 | `pm_workflow_abandon` | ワークフローを放棄（ABANDONED へ遷移、ステップ履歴は保持） |
@@ -552,7 +552,7 @@ pm-server migrate       # MCP 登録を pm-agent → pm-server に切り替え
 git clone https://github.com/flc-design/pm-server.git
 cd pm-server
 pip install -e ".[dev]"
-pytest                  # 600+ テスト
+pytest                  # 1,000+ テスト
 pytest --cov            # カバレッジ計測（分岐網羅、未到達行を表示）
 ruff check src/         # リント
 ruff format src/        # フォーマット

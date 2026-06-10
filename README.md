@@ -276,7 +276,7 @@ dataclasses, atomic-write helpers).
 
 | Tool | Description |
 |---|---|
-| `pm_workflow_start` | Start a workflow from a template (development / discovery / super-research / brainstorming) |
+| `pm_workflow_start` | Start a workflow from a template (development / discovery / super-research / brainstorming / content-pipeline) |
 | `pm_workflow_status` | View current step, progress, and guidance for active workflow |
 | `pm_workflow_advance` | Advance to next step with artifacts and notes; supports loops and skip |
 | `pm_workflow_abandon` | Abandon a workflow (transition to ABANDONED, preserves step history) |
@@ -617,7 +617,7 @@ Your `.pm/` data directories are **unchanged** — no data migration needed.
 git clone https://github.com/flc-design/pm-server.git
 cd pm-server
 pip install -e ".[dev]"
-pytest                  # 600+ tests
+pytest                  # 1,000+ tests
 pytest --cov            # with coverage (branch coverage, show missing)
 ruff check src/         # Lint
 ruff format src/        # Format

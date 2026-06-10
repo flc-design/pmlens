@@ -1170,8 +1170,8 @@ pm-server/                         # ← pm-agent から改名
 │   └── pm_server/                 # ← pm_agent から改名
 │       ├── __init__.py
 │       ├── __main__.py            # CLI (click)
-│       ├── server.py              # FastMCP Server (16ツール)
-│       ├── models.py              # Pydantic v2 (12モデル, 9 Enum)
+│       ├── server.py              # FastMCP Server (42ツール)
+│       ├── models.py              # Pydantic v2 (18モデル, 15 Enum)
 │       ├── storage.py             # YAML CRUD
 │       ├── installer.py           # claude mcp add ラッパー + migrate
 │       ├── discovery.py           # プロジェクト情報自動推定
@@ -1283,7 +1283,7 @@ Memory Layer 基盤、セッション継続、横断検索・自動化、運用�
 ### 現在の規模
 
 - **42 MCP ツール** (server.py)
-- **17 Pydantic モデル + 15 Enum** (models.py)
+- **18 Pydantic モデル + 15 Enum** (models.py)
 - **1,000+ テスト** (pytest)
 - **5 ワークフローテンプレート** (discovery / development / super-research / brainstorming / content-pipeline)
 - **2 スキル定義** (PM Server / super-research)
