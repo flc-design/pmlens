@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pm-server"
-version = "0.9.0"
+version = "0.10.0"
 description = "Project management MCP server for Claude Code & Codex CLI — track tasks, visualize progress, and manage decisions across AI coding hosts"
 readme = "README.md"
 license = "MIT"

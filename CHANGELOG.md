@@ -1,5 +1,68 @@
 # Changelog
 
+## [0.10.0] - 2026-06-10
+
+This release ships three pillars on top of v0.9.0. **Branch-aware session continuity** (ADR-028/035) lets `pm_recall(track=...)` restore the last context of a specific work line — a raw branch or a logical label defined in `.pm/tracks.yaml` — while the read path stays completely git-free, with the PM_LENS read-only invariant upgraded from convention to a statically proved property. The **.pm → X content pipeline** (ADR-024) adds a per-project staging store and four new MCP tools for build-in-public drafts, with a deterministic Layer-1 redaction prefilter as the shipping safety floor — the server holds no X credentials and structurally cannot post. And a **Claude Code plugin layer** (ADR-026/027) packages pm-server for `/plugin install pm-server@flc-design` with bundled MCP, SessionStart/PostToolUse hooks, and a skill — the host-agnostic MCP core is unchanged. The shared rules template advances v8 → v10, and the storage/installer/discover hardening backlog is cleared. MCP tool count: 38 → 42. Test suite: 1,014 passing.
+
+### Added
+
+- **`pm_recall(track=)` branch-aware session continuity (PMSERV-124, ADR-028)**: per-work-line recall with overall-latest fallback (`track_matched` flag). Branch detection runs on the write path only (`pm_session_summary` text-parses `.git/HEAD`); pm-server never shells out to git, and the read path receives the branch as an argument.
+- **Logical track labels via `.pm/tracks.yaml` (PMSERV-125, ADR-035)**: a label maps to branch globs and resolves at query time (rename-resistant); responses report `track_branch`, and a malformed config degrades to raw-branch matching with a `tracks_config_invalid` warning.
+- **X content pipeline — staging store + 4 MCP tools (PMSERV-114, PMSERV-116, ADR-024)**: per-project `.pm/x_drafts.db` and `pm_draft_x` / `pm_redact_draft` / `pm_reject_draft` / `pm_x_drafts_pending`. The review queue never returns `raw_content`; all four tools are hidden under `PM_LENS`. Tool count 38 → 42.
+- **Layer-1 deterministic redaction prefilter + catalog v2 (PMSERV-115, PMSERV-121)**: scrubs AWS/GitHub/Stripe/Slack tokens, JWTs, private keys, connection strings, plus (v2) Azure keys, GCP service accounts, bearer tokens, IPs, and phone numbers. Count-only reports (never cleartext); internal IDs stay visible by default (`scrub_internal_ids` opt-in); `.pm/redaction.yaml` allow/deny overrides.
+- **`content-pipeline` builtin workflow template + `pm_status.x_drafts_pending` diagnostic (PMSERV-117, PMSERV-118)**: extract → draft → redact → review; the diagnostic probes only when the DB already exists. Builtin templates: 4 → 5.
+- **`pm_draft_x` debounce + golden-fixture regression (PMSERV-121)**: same-session draft bursts collapse to one proposal within a 10-minute window (`force=true` to bypass); a golden fixture pins the end-to-end pipeline artifact.
+- **Claude Code plugin layer (PMSERV-123, ADR-026/027)**: `plugin/` with bundled MCP (`uvx pm-server`, no prior pip install), directive-only SessionStart hook with per-session double-fire guard, PostToolUse commit-reminder parity hook (defers when a manual install is detected), `pm` skill, and a root `marketplace.json` publish catalog. Collision guard decision: bundle + warn + documented migration.
+- **Rules template v8 → v10**: memory-layer routing — pm_remember as SSoT vs auto memory, no dual-write (v8, PMSERV-111); X content pipeline propose-don't-force rule (v9, PMSERV-119); branch-aware re-derive rule for hook-less hosts (v10, PMSERV-125).
+- **CLAUDE.md backup symmetry (PMSERV-058)**: every existing rule file gets a timestamped `.bak` before overwrite, retiring the AGENTS.md-only asymmetry.
+- **`pm_discover` depth-cap exclusion warning (PMSERV-089)**: directories dropped beyond the depth-5 cap are reported with sample paths + remediation instead of vanishing silently (MCP + CLI parity).
+
+### Changed
+
+- **Storage `save_*` helpers privatized to `_save_*` (PMSERV-067)**: the supported write API is the transactional mutators; the three sanctioned in-layer bypass sites are documented in the module docstring.
+- **Installer cleanup (PMSERV-054, PMSERV-055)**: `install_mcp` / `uninstall_mcp` wrappers now emit `DeprecationWarning` (removal target v1.0.0); `InstallResult.status` is `Literal`-typed.
+- **No-op rule injection reports `skipped`, not `updated` (PMSERV-062, PMSERV-110)**: a byte-identical re-injection touches nothing on disk (no spurious backup); `Inject` status fields are `Literal`-typed.
+- **README / repo polish (PMSERV-126)**: 42-tool count, PyPI/CI badges, dashboard screenshot, multi-host metadata, Development Status Alpha → Beta; `uv.lock` tracked for reproducible installs (PMSERV-123).
+
+### Fixed
+
+- **`pm_cleanup` registry TOCTOU (PMSERV-069)**: load + validate + save now run inside one `_yaml_transaction`, so a project registered concurrently can no longer be lost (same fix class as PMSERV-066).
+- **`PM_LOCK_TIMEOUT_S` env knob (PMSERV-109)**: the lock-acquire timeout is resolvable from the environment (production fail-fast default of 5 s unchanged) — fixes the concurrent-test CI flake at the root and doubles as an ops knob for slow/contended filesystems.
+- **`limit=0` pagination guards (PMSERV-121, PMSERV-122)**: `pm_x_drafts_pending` and `pm_outbox_pending` no longer claim `has_more` on a 0-row page, closing an infinite-pagination loop; count-only probes keep working.
+- **Plugin SessionStart hook hardening (PMSERV-123)**: jq-less double-fire guard, atomic marker claim via `set -C`, bounded `claude mcp get` collision probe, 30-day marker reaping.
+- **Code-review follow-ups**: redaction coverage + correctness blockers (PMSERV-115, PMSERV-116); branch-aware recall findings (PMSERV-125).
+
+### Security
+
+- **`x_drafts.db` gitignored (PMSERV-120)**: the staging DB holds pre-redaction `raw_content` (secret at rest) and must never reach the repo.
+- **The X pipeline is structurally non-posting (ADR-024)**: pm-server holds no X credentials and no network path; the redaction report is count-only so it cannot become a second leak vector; posted drafts freeze their `redacted_*` fields via trigger (PMSERV-121).
+- **RO-surface static reachability proof (PMSERV-125)**: an AST call-graph test proves the forward closure of every `RO_ALLOWLIST` tool is disjoint from `read_git_branch` and `subprocess`, upgrading the PM_LENS read-only invariant (ADR-028) from string-match guards to a checked property.
+
+## [0.9.0] - 2026-05-26
+
+*(backfilled 2026-06-10)*
+
+- **`brainstorming` builtin workflow template (PMSERV-107)**: 8-step Double Diamond ideation → requirements → spec → ADR, reusing super-research's 3-parallel-agent pattern with a divergent objective; chains to `development`. Builtin templates: 3 → 4.
+- **MCPB manifest rewritten to the v0.4 schema** with bundled source for the uv runtime (PMSERV-106), plus a 3-layer version-drift check in the bundle build.
+- **Docs**: user-guide, workflow-guide (template 使い分け matrix), and sync-architecture pages added and synced to v0.8.0/0.9.0.
+
+## [0.8.0] - 2026-05-22
+
+*(backfilled 2026-06-10)* — Phase 2 Desktop sync: writes from Desktop land in an **outbox**, never directly in the main store.
+
+- **DesktopOutboxStore + 5 MCP tools (PMSERV-095–098)**: `pm_outbox_remember` / `pm_outbox_log` stage entries under `PM_DESKTOP_WRITE=1`; `pm_outbox_pending` / `pm_outbox_merge` / `pm_outbox_reject` review them from Claude Code.
+- **`pm_status`** exposes the outbox pending count + cleanup (PMSERV-099); installer propagates `PM_DESKTOP_WRITE` and the manifest bundle env (PMSERV-100).
+- **Lens invariant test (PMSERV-102)**: the main `memory.db` is asserted unchanged under Phase 2 — Desktop writes cannot touch the SSoT.
+
+## [0.7.1] - 2026-05-21
+
+*(backfilled 2026-06-10; covers v0.6.2..v0.7.1 — the untagged 0.7.0 work plus the 0.7.1 hotfix)*
+
+- **PM_LENS read-only mode** for Claude Desktop / Cowork (PMSERV-079): RO tool allowlist, project SQLite opened read-only with `immutable=1` (PMSERV-080), `pm_schema` version stamps (PMSERV-078); the 0.7.1 hotfix adds a schema guard + Lens-fallback note in read tools (PMSERV-093, PMSERV-091).
+- **MCPB bundle**: v0.4 manifest + bundle builder + release CI pack (PMSERV-083); env placement aligned with MCPB schema 0.3+ (PMSERV-084).
+- **`resolve_project_path`**: MCP roots + registry picker (PMSERV-082); dead roots branch removed (PMSERV-085). **`discover_projects`** walk bounded with depth cap, excluded dirs, and `~/.pm` skip (PMSERV-081).
+- **Security**: `.git/config` parsed directly instead of invoking git (PMSERV-077); hooks and installer made Lens-aware, `PM_LENS` propagated to host configs (PMSERV-086, PMSERV-087).
+
 ## [0.6.2] - 2026-05-18
 
 This release completes **Phase C** of the KR-008 supply-chain hardening pass (run `pm_recall query="KR-008"` from inside Claude Code). Every GitHub Action in `ci.yml` and `release.yml` is pinned to a full commit SHA, a grouped Dependabot config keeps those pins fresh, and — as a consequence of pinning to the latest majors — the entire CI/release pipeline moves off the deprecated Node 20 runtime ahead of GitHub's 2026-06-02 Node 20 → Node 24 actions deadline. The choice to pin to the latest majors (`actions/upload-artifact` v4 → v7, `actions/download-artifact` v4 → v8) rather than the minimum Node-24 majors — justified by a per-input breaking-change analysis against pm-server's actual usage and an independent cross-check — is recorded as **ADR-013**.
