@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import multiprocessing as mp
+import sqlite3
 import time
 from pathlib import Path
 
@@ -1017,3 +1018,480 @@ class TestSqliteWalConcurrency:
         finally:
             verify.close()
         assert total == 60
+
+
+# ─── PMSERV-090: user_version 0→1 read-write migration coverage ──────────
+#
+# The "user_version=0 → 1 upgrade path" is NOT a numeric N→N+1 framework — the
+# PRAGMA is pinned at 1 and forward-compat is driven by ADDITIVE column
+# migrations (_migrate_session_summaries_updated_at / _branch) that probe
+# PRAGMA table_info and ALTER TABLE the missing columns. Existing tests only
+# exercise fresh-DB invariants and one *read-only* legacy sim
+# (test_branch_queries_tolerate_missing_column_readonly) whose fabricated DB
+# (a) is opened readonly=True so _ensure_schema never runs and (b) already has
+# updated_at and only lacks branch (an *intermediate* version). The genuine
+# 0→1 path — fabricate a truly old DB (user_version=0, session_summaries
+# lacking BOTH updated_at AND branch, with pre-existing rows) and open it
+# read-write so the migration actually runs — was untested. These classes
+# close that gap (finding-g / wf-026).
+#
+# NOTE (deliberate scope): a concurrent two-process migration test is omitted
+# on purpose — WAL contention is already covered by TestSqliteWalConcurrency,
+# and a timing-sensitive migration race would re-introduce exactly the kind of
+# flakiness PMSERV-109 just eliminated. Index *existence* is verified via
+# sqlite_master + PRAGMA index_info (version-independent) rather than EXPLAIN
+# QUERY PLAN (optimizer-dependent).
+
+# Oldest pre-migration session_summaries shape: NO updated_at, NO branch, and
+# no FTS table/triggers (those are created by _ensure_schema on first RW open).
+_V0_LEGACY_SCHEMA_SQL = """\
+CREATE TABLE memories (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id  TEXT NOT NULL,
+    type        TEXT NOT NULL,
+    content     TEXT NOT NULL,
+    task_id     TEXT,
+    decision_id TEXT,
+    tags        TEXT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    project     TEXT NOT NULL
+);
+CREATE TABLE session_summaries (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id  TEXT NOT NULL UNIQUE,
+    summary     TEXT NOT NULL,
+    goals       TEXT,
+    tasks_done  TEXT,
+    decisions   TEXT,
+    pending     TEXT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    project     TEXT NOT NULL
+);
+"""
+
+# Intermediate shape: HAS updated_at (post-PMSERV-049) but still lacks branch
+# (pre-PMSERV-124). Opening RW must add ONLY branch and leave updated_at alone.
+_INTERMEDIATE_SCHEMA_SQL = """\
+CREATE TABLE memories (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id  TEXT NOT NULL,
+    type        TEXT NOT NULL,
+    content     TEXT NOT NULL,
+    task_id     TEXT,
+    decision_id TEXT,
+    tags        TEXT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    project     TEXT NOT NULL
+);
+CREATE TABLE session_summaries (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id  TEXT NOT NULL UNIQUE,
+    summary     TEXT NOT NULL,
+    goals       TEXT,
+    tasks_done  TEXT,
+    decisions   TEXT,
+    pending     TEXT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    project     TEXT NOT NULL
+);
+"""
+
+# Deterministic timestamp baked into the legacy summary so the backfill
+# assertion (updated_at == created_at) is exact, not timing-dependent.
+_LEGACY_CREATED_AT = "2019-03-14 09:00:00"
+
+
+def _build_v0_legacy_db(db_path: Path) -> None:
+    """Create a truly-old pm-server memory.db on disk.
+
+    user_version=0, session_summaries lacking both updated_at and branch, no
+    FTS table/triggers, seeded with one memory and one summary that predate
+    every migration. Opening this read-write must drive the full 0→1 path.
+    """
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.executescript(_V0_LEGACY_SCHEMA_SQL)
+        conn.execute(
+            "INSERT INTO memories (session_id, type, content, task_id, tags, project)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                "sess-legacy",
+                "observation",
+                "antiquated legacy observation",
+                "PMSERV-001",
+                "alpha,beta",
+                "legacyproj",
+            ),
+        )
+        conn.execute(
+            "INSERT INTO session_summaries"
+            " (session_id, summary, goals, tasks_done, decisions, pending, created_at, project)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "sess-legacy",
+                "antiquated summary work",
+                "legacy goal",
+                "[]",
+                "[]",
+                "[]",
+                _LEGACY_CREATED_AT,
+                "legacyproj",
+            ),
+        )
+        conn.execute("PRAGMA user_version = 0")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _build_intermediate_db(db_path: Path) -> None:
+    """Create an intermediate DB (has updated_at, lacks branch) on disk.
+
+    created_at and updated_at are set to DIFFERENT fixed timestamps so the test
+    can prove updated_at is preserved (not re-backfilled to created_at) when the
+    branch-only migration runs.
+    """
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.executescript(_INTERMEDIATE_SCHEMA_SQL)
+        conn.execute(
+            "INSERT INTO session_summaries"
+            " (session_id, summary, goals, tasks_done, decisions, pending,"
+            " created_at, updated_at, project)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "sess-intermediate",
+                "intermediate work",
+                "",
+                "[]",
+                "[]",
+                "[]",
+                "2020-01-01 00:00:00",
+                "2020-06-15 12:00:00",
+                "interproj",
+            ),
+        )
+        conn.execute("PRAGMA user_version = 1")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _raw_session_summary_columns(db_path: Path) -> set[str]:
+    """Read session_summaries columns WITHOUT going through MemoryStore.
+
+    Used to assert the pre-open precondition (columns genuinely absent) so the
+    migration assertions can't be satisfied vacuously by a fresh DB.
+    """
+    conn = sqlite3.connect(str(db_path))
+    try:
+        return {row[1] for row in conn.execute("PRAGMA table_info(session_summaries)").fetchall()}
+    finally:
+        conn.close()
+
+
+def _raw_user_version(db_path: Path) -> int:
+    conn = sqlite3.connect(str(db_path))
+    try:
+        return conn.execute("PRAGMA user_version").fetchone()[0]
+    finally:
+        conn.close()
+
+
+class TestUserVersionZeroToOneMigration:
+    """RW migration of a truly-old DB (user_version=0, no updated_at, no branch)."""
+
+    def test_legacy_db_is_genuinely_v0_before_open(self, tmp_path: Path):
+        """Precondition guard: the fabricated DB really is pre-migration.
+
+        If this fails, every other test in this class would be vacuous (a fresh
+        DB already has both columns + user_version=1).
+        """
+        db_path = tmp_path / "legacy.db"
+        _build_v0_legacy_db(db_path)
+
+        assert _raw_user_version(db_path) == 0
+        cols = _raw_session_summary_columns(db_path)
+        assert "updated_at" not in cols
+        assert "branch" not in cols
+
+    def test_user_version_bumped_0_to_1_on_rw_open(self, tmp_path: Path):
+        db_path = tmp_path / "legacy.db"
+        _build_v0_legacy_db(db_path)
+        assert _raw_user_version(db_path) == 0  # was 0...
+
+        store = MemoryStore(db_path)
+        try:
+            assert store._conn.execute("PRAGMA user_version").fetchone()[0] == 1  # ...now 1
+        finally:
+            store.close()
+
+    def test_updated_at_column_added_and_backfilled_from_created_at(self, tmp_path: Path):
+        db_path = tmp_path / "legacy.db"
+        _build_v0_legacy_db(db_path)
+
+        store = MemoryStore(db_path)
+        try:
+            assert store._column_exists("session_summaries", "updated_at") is True
+            row = store._conn.execute(
+                "SELECT created_at, updated_at FROM session_summaries WHERE session_id = ?",
+                ("sess-legacy",),
+            ).fetchone()
+            # Backfill copied created_at into the newly-added updated_at.
+            assert row["created_at"] == _LEGACY_CREATED_AT
+            assert row["updated_at"] == _LEGACY_CREATED_AT
+        finally:
+            store.close()
+
+    def test_branch_column_added_but_legacy_row_is_null(self, tmp_path: Path):
+        db_path = tmp_path / "legacy.db"
+        _build_v0_legacy_db(db_path)
+
+        store = MemoryStore(db_path)
+        try:
+            assert store._column_exists("session_summaries", "branch") is True
+            row = store._conn.execute(
+                "SELECT branch FROM session_summaries WHERE session_id = ?",
+                ("sess-legacy",),
+            ).fetchone()
+            # No backfill: pre-feature rows legitimately have branch IS NULL.
+            assert row["branch"] is None
+        finally:
+            store.close()
+
+    def test_preexisting_data_survives_migration(self, tmp_path: Path):
+        db_path = tmp_path / "legacy.db"
+        _build_v0_legacy_db(db_path)
+
+        store = MemoryStore(db_path)
+        try:
+            assert store._conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0] == 1
+            mem = store._conn.execute(
+                "SELECT content, tags, task_id FROM memories WHERE session_id = ?",
+                ("sess-legacy",),
+            ).fetchone()
+            assert mem["content"] == "antiquated legacy observation"
+            assert mem["tags"] == "alpha,beta"
+            assert mem["task_id"] == "PMSERV-001"
+
+            summaries = store.list_summaries()
+            assert len(summaries) == 1
+            assert summaries[0].session_id == "sess-legacy"
+            assert summaries[0].summary == "antiquated summary work"
+        finally:
+            store.close()
+
+    def test_has_branch_col_true_after_rw_migration(self, tmp_path: Path):
+        db_path = tmp_path / "legacy.db"
+        _build_v0_legacy_db(db_path)
+
+        store = MemoryStore(db_path)
+        try:
+            # Probed in __init__ AFTER _ensure_schema ran the branch migration.
+            assert store._has_branch_col is True
+        finally:
+            store.close()
+
+    def test_branch_query_falls_back_for_legacy_null_branch(self, tmp_path: Path):
+        db_path = tmp_path / "legacy.db"
+        _build_v0_legacy_db(db_path)
+
+        store = MemoryStore(db_path)
+        try:
+            summary, matched = store.get_latest_summary_by_branch("main")
+            # branch column exists but the legacy row's branch is NULL → no
+            # match → degrade to overall-latest, never raise / return None.
+            assert matched is False
+            assert summary is not None
+            assert summary.session_id == "sess-legacy"
+        finally:
+            store.close()
+
+    def test_indexes_created_with_correct_columns(self, tmp_path: Path):
+        db_path = tmp_path / "legacy.db"
+        _build_v0_legacy_db(db_path)
+
+        store = MemoryStore(db_path)
+        try:
+            names = {
+                r[0]
+                for r in store._conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='index'"
+                ).fetchall()
+            }
+            assert "idx_session_summaries_updated_at" in names
+            assert "idx_session_summaries_branch" in names
+
+            # The composite branch index must be (branch, updated_at) in that
+            # order to serve "WHERE branch = ? ORDER BY updated_at DESC".
+            info = store._conn.execute("PRAGMA index_info(idx_session_summaries_branch)").fetchall()
+            assert [r[2] for r in info] == ["branch", "updated_at"]
+        finally:
+            store.close()
+
+    def test_fts_created_legacy_rows_not_indexed_new_rows_are(self, tmp_path: Path):
+        """FTS table/triggers are created, but pre-migration rows are NOT
+        backfilled into the index (triggers only fire on inserts AFTER the
+        virtual table exists). New saves ARE searchable. This pins the
+        deliberate non-backfill behavior so a future 'rebuild' isn't assumed.
+        """
+        db_path = tmp_path / "legacy.db"
+        _build_v0_legacy_db(db_path)
+
+        store = MemoryStore(db_path)
+        try:
+            # FTS table + triggers exist post-migration.
+            objs = {
+                r[0]
+                for r in store._conn.execute(
+                    "SELECT name FROM sqlite_master WHERE name IN"
+                    " ('memories_fts', 'memories_ai', 'memories_ad')"
+                ).fetchall()
+            }
+            assert {"memories_fts", "memories_ai", "memories_ad"} <= objs
+
+            # Legacy memory predates the FTS index → not found.
+            assert store.search("antiquated") == []
+
+            # A memory saved AFTER migration is indexed via the trigger → found.
+            new_id = store.save(
+                Memory(
+                    session_id="sess-new",
+                    type=MemoryType.OBSERVATION,
+                    content="freshmemory entry",
+                    project="newproj",
+                )
+            )
+            results = store.search("freshmemory")
+            assert any(m.id == new_id for m in results)
+        finally:
+            store.close()
+
+    def test_post_migration_save_with_branch_roundtrips(self, tmp_path: Path):
+        db_path = tmp_path / "legacy.db"
+        _build_v0_legacy_db(db_path)
+
+        store = MemoryStore(db_path)
+        try:
+            store.save_session_summary(
+                SessionSummary(
+                    session_id="sess-new-main",
+                    summary="new branch-aware work",
+                    project="newproj",
+                    branch="main",
+                )
+            )
+            summary, matched = store.get_latest_summary_by_branch("main")
+            assert matched is True
+            assert summary is not None
+            assert summary.session_id == "sess-new-main"
+            assert summary.branch == "main"
+        finally:
+            store.close()
+
+    def test_idempotent_reopen_preserves_state(self, tmp_path: Path):
+        db_path = tmp_path / "legacy.db"
+        _build_v0_legacy_db(db_path)
+
+        # First open migrates 0→1.
+        store1 = MemoryStore(db_path)
+        store1.close()
+
+        # Second open re-runs _ensure_schema + both migrations on the already
+        # migrated DB: must not raise, re-ALTER, bump user_version, or lose data.
+        store2 = MemoryStore(db_path)
+        try:
+            assert store2._conn.execute("PRAGMA user_version").fetchone()[0] == 1
+            assert store2._column_exists("session_summaries", "updated_at") is True
+            assert store2._column_exists("session_summaries", "branch") is True
+            assert store2._conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0] == 1
+            summaries = store2.list_summaries()
+            assert len(summaries) == 1 and summaries[0].session_id == "sess-legacy"
+        finally:
+            store2.close()
+
+    def test_backfill_guard_does_not_clobber_existing_updated_at(self, tmp_path: Path):
+        """Re-running the updated_at migration must not overwrite a row whose
+        updated_at is already set — the ``WHERE updated_at IS NULL`` guard.
+        """
+        db_path = tmp_path / "legacy.db"
+        _build_v0_legacy_db(db_path)
+
+        store = MemoryStore(db_path)
+        try:
+            # Hand-set a sentinel (non-NULL) updated_at on the legacy row.
+            store._conn.execute(
+                "UPDATE session_summaries SET updated_at = ? WHERE session_id = ?",
+                ("1999-12-31 23:59:59", "sess-legacy"),
+            )
+            store._conn.commit()
+
+            # Re-run the migration directly: the ALTER is skipped (column
+            # exists) and the backfill UPDATE must be a no-op on non-NULL rows.
+            store._migrate_session_summaries_updated_at()
+
+            row = store._conn.execute(
+                "SELECT updated_at FROM session_summaries WHERE session_id = ?",
+                ("sess-legacy",),
+            ).fetchone()
+            assert row["updated_at"] == "1999-12-31 23:59:59"
+        finally:
+            store.close()
+
+
+class TestIntermediateDbMigration:
+    """RW migration of an intermediate DB (has updated_at, lacks branch)."""
+
+    def test_intermediate_db_is_genuinely_pre_branch(self, tmp_path: Path):
+        db_path = tmp_path / "intermediate.db"
+        _build_intermediate_db(db_path)
+        cols = _raw_session_summary_columns(db_path)
+        assert "updated_at" in cols  # already present...
+        assert "branch" not in cols  # ...but branch is not
+
+    def test_only_branch_added_updated_at_preserved(self, tmp_path: Path):
+        db_path = tmp_path / "intermediate.db"
+        _build_intermediate_db(db_path)
+
+        store = MemoryStore(db_path)
+        try:
+            assert store._column_exists("session_summaries", "branch") is True
+            row = store._conn.execute(
+                "SELECT created_at, updated_at, branch FROM session_summaries WHERE session_id = ?",
+                ("sess-intermediate",),
+            ).fetchone()
+            # branch added as NULL; updated_at must NOT be re-backfilled to
+            # created_at (the IS NULL guard skips the already-set value).
+            assert row["branch"] is None
+            assert row["created_at"] == "2020-01-01 00:00:00"
+            assert row["updated_at"] == "2020-06-15 12:00:00"
+        finally:
+            store.close()
+
+
+class TestReadonlyV0DbSkipsMigration:
+    """Contrast case: opening a TRUE v0 DB read-only must NOT migrate it.
+
+    Complements the existing intermediate-DB read-only test by using the oldest
+    shape (both columns absent), proving _ensure_schema is skipped entirely.
+    """
+
+    def test_readonly_open_leaves_v0_db_unmigrated(self, tmp_path: Path):
+        db_path = tmp_path / "legacy.db"
+        _build_v0_legacy_db(db_path)
+
+        store = MemoryStore(db_path, readonly=True)
+        try:
+            # Migration never ran: columns still absent, version still 0,
+            # branch probe False — yet read queries degrade gracefully.
+            assert store._has_branch_col is False
+            assert store._column_exists("session_summaries", "updated_at") is False
+            assert store._column_exists("session_summaries", "branch") is False
+            assert store._conn.execute("PRAGMA user_version").fetchone()[0] == 0
+            assert store.list_distinct_branches() == []
+            summary, matched = store.get_latest_summary_by_branch("main")
+            assert matched is False
+            assert summary is not None and summary.session_id == "sess-legacy"
+        finally:
+            store.close()
