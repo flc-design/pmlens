@@ -123,8 +123,8 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
 <body>
 <header class="hero">
   <h1>PM Server — Workflow Guide</h1>
-  <div class="subtitle">Workflow Engine の仕組み・4 builtin templates・カスタム workflow の作り方</div>
-  <div class="meta">バージョン 0.9.0 (2026-05-26) · 関連: <a href="architecture.html">Architecture</a> · <a href="user-guide.html">User Guide</a></div>
+  <div class="subtitle">Workflow Engine の仕組み・5 builtin templates・カスタム workflow の作り方</div>
+  <div class="meta">バージョン 0.10.0 (2026-06-15) · 関連: <a href="architecture.html">Architecture</a> · <a href="user-guide.html">User Guide</a></div>
 </header>
 
 <div class="layout">
@@ -342,7 +342,7 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
 
 <section class="card" id="builtin">
   <h2>5. Builtin Templates 詳解</h2>
-  <p>v0.9.0 に組み込まれる 4 つのテンプレート。
+  <p>v0.10.0 に組み込まれる 5 つのテンプレート。
      <code>pm_workflow_templates</code> で一覧、<code>pm_workflow_start(template="...")</code> で起動。</p>
 
   <h3>5.1 <code>development</code> (9 steps) — 機能開発の正攻法</h3>
@@ -427,6 +427,20 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
     <li><strong>super-research</strong>: 知識構築としての多角的<em>深掘り</em> (KR を生成)。</li>
     <li><strong>brainstorming</strong>: アイデアの<em>創発</em>と要件・仕様への結晶化 (KR + ADR を生成)。</li>
   </ul>
+
+  <h3>5.5 <code>content-pipeline</code> (4 steps) — .pm 由来の知見を build-in-public 投稿へ</h3>
+  <p><code>.pm</code> の副産物 (lesson / insight / 採択 ADR / defect) を、redact 済みで人間レビューを経た
+     build-in-public の X 下書きに変換する workflow (PMSERV-113, ADR-024)。
+     <code>extract</code> (<code>pm_recall</code> で出典を特定し post 価値・自己完結性を確認) →
+     <code>draft</code> (<code>pm_draft_x</code> を<strong>先に</strong>呼んで下書き行を即永続化＝compaction 耐性。
+     <code>raw_content</code> は provenance 用に保持するがレビュー queue には出さない) →
+     <code>redact</code> (<code>pm_redact_draft</code> による Layer-1 決定論スクラブ → redact 済みフィールドに
+     <code>/secret-scan</code> と <code>/privacy-check</code> の Layer-2) →
+     <code>review</code> (<code>pm_x_drafts_pending</code> で redact 済み下書きを人間に提示)。</p>
+  <p><strong>安全モデル:</strong> pm-server は X 認証情報を持たず、ネットワーク送信・投稿を一切行わない
+     — 「自動投稿しない」は gate ではなく<em>構造的保証</em>。redaction が唯一の安全層で、人間が redact 済み
+     下書きをレビューしてシステムの外で<strong>手動投稿</strong>する。workflow engine は gate を強制しないため、
+     どの step も「enforced approval gate」を主張しない (ADR-024)。</p>
 
   <div class="tip">
     <strong>builtin を上書き:</strong> <code>.pm/workflow_templates/development.yaml</code> を作ると、同名の builtin より優先される
@@ -825,7 +839,7 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
   <h3>11.1 builtin template の探索パス確認</h3>
 <pre><span class="prompt">&gt;</span> pm_status の diagnostics を見せて
 <span class="comment"># → diagnostics.builtin_templates_dir.path に builtin の絶対 path</span>
-<span class="comment">#   diagnostics.builtin_templates_dir.template_count で件数 (現在 3)</span></pre>
+<span class="comment">#   diagnostics.builtin_templates_dir.template_count で件数 (現在 5)</span></pre>
 
   <h3>11.2 関連リンク</h3>
   <ul>
@@ -838,7 +852,7 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
 </section>
 
 <footer style="text-align: center; color: var(--muted); font-size: 12px; margin: 24px 0;">
-  PM Server v0.9.0 · Workflow Guide · 2026-05-26
+  PM Server v0.10.0 · Workflow Guide · 2026-06-15
 </footer>
 
 </main>

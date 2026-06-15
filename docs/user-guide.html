@@ -109,7 +109,7 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
 <header class="hero">
   <h1>PM Server — User Guide</h1>
   <div class="subtitle">CLI コマンド・LLM セッション中の UX Tips・進捗管理のベストプラクティス</div>
-  <div class="meta">バージョン 0.9.0 (2026-05-26) · 関連: <a href="architecture.html">Architecture</a> · <a href="workflow-guide.html">Workflow Guide</a> · <a href="cheatsheet.ja.md">Cheatsheet (ja)</a></div>
+  <div class="meta">バージョン 0.10.0 (2026-06-15) · 関連: <a href="architecture.html">Architecture</a> · <a href="workflow-guide.html">Workflow Guide</a> · <a href="cheatsheet.ja.md">Cheatsheet (ja)</a></div>
 </header>
 
 <div class="layout">
@@ -495,10 +495,10 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
 
   <table>
     <tr><th>Host</th><th>役割</th><th>登録ツール数</th><th>典型シナリオ</th></tr>
-    <tr><td><strong>Claude Code</strong> (CLI)</td><td>Full RW — 主要開発環境</td><td>37 (全部)</td><td>実装、test、commit、PR</td></tr>
+    <tr><td><strong>Claude Code</strong> (CLI)</td><td>Full RW — 主要開発環境</td><td>42 (全部)</td><td>実装、test、commit、PR</td></tr>
     <tr><td><strong>Claude Desktop</strong></td><td>Lens RO + Outbox bridge</td><td>15 RO + 2 OUTBOX</td><td>iPad/iPhone で進捗確認、新アイデアを Desktop で <code>pm_outbox_remember</code> で書き留めて後で Code から merge</td></tr>
     <tr><td><strong>Claude Cowork</strong></td><td>Lens RO のみ</td><td>15 RO</td><td>passive viewer (進捗確認のみ)</td></tr>
-    <tr><td><strong>Codex CLI</strong></td><td>Full RW (AGENTS.md 経由)</td><td>37</td><td>Code を補完する secondary CLI、cross-check 用</td></tr>
+    <tr><td><strong>Codex CLI</strong></td><td>Full RW (AGENTS.md 経由)</td><td>42</td><td>Code を補完する secondary CLI、cross-check 用</td></tr>
   </table>
 
   <h3>9.1 install / update のターゲット切り替え</h3>
@@ -659,7 +659,7 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
 </section>
 
 <footer style="text-align: center; color: var(--muted); font-size: 12px; margin: 24px 0;">
-  PM Server v0.9.0 · User Guide · 2026-05-26
+  PM Server v0.10.0 · User Guide · 2026-06-15
 </footer>
 
 </main>
