@@ -9,10 +9,10 @@
     "name": "flc-design",
     "url": "https://github.com/flc-design"
   },
-  "homepage": "https://github.com/flc-design/pm-server",
+  "homepage": "https://github.com/flc-design/pmlens",
   "repository": {
     "type": "git",
-    "url": "https://github.com/flc-design/pm-server"
+    "url": "https://github.com/flc-design/pmlens"
   },
   "license": "MIT",
   "keywords": [

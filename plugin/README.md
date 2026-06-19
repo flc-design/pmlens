@@ -1,6 +1,6 @@
 # pm-server — Claude Code plugin
 
-A **hybrid** distribution layer for [pm-server](https://github.com/flc-design/pm-server).
+A **hybrid** distribution layer for [pm-server](https://github.com/flc-design/pmlens).
 The host-agnostic MCP core stays as-is (so Codex and other hosts keep working);
 this plugin adds a Claude-Code-native install + integration layer on top
 (ADR-027).
@@ -37,7 +37,7 @@ flip tasks to `in_progress`, surface `warnings[]`, …) is therefore re-homed to
 ## Install (end users)
 
 ```text
-/plugin marketplace add flc-design/pm-server
+/plugin marketplace add flc-design/pmlens
 /plugin install pm-server@flc-design
 ```
 

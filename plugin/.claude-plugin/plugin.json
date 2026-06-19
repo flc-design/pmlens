@@ -5,8 +5,8 @@
   "author": {
     "name": "flc-design"
   },
-  "homepage": "https://github.com/flc-design/pm-server",
-  "repository": "https://github.com/flc-design/pm-server",
+  "homepage": "https://github.com/flc-design/pmlens",
+  "repository": "https://github.com/flc-design/pmlens",
   "license": "MIT",
   "keywords": [
     "project-management",

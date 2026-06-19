@@ -2,7 +2,7 @@
 
 [![PyPI version](https://img.shields.io/pypi/v/pm-server.svg)](https://pypi.org/project/pm-server/)
 [![Python versions](https://img.shields.io/pypi/pyversions/pm-server.svg)](https://pypi.org/project/pm-server/)
-[![CI](https://github.com/flc-design/pm-server/actions/workflows/ci.yml/badge.svg)](https://github.com/flc-design/pm-server/actions/workflows/ci.yml)
+[![CI](https://github.com/flc-design/pmlens/actions/workflows/ci.yml/badge.svg)](https://github.com/flc-design/pmlens/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Multi-Host](https://img.shields.io/badge/multi--host-Claude%20Code%20%2B%20Codex%20CLI-success)](#マルチホスト対応-claude-code--codex-cli)
 
@@ -29,7 +29,7 @@
 
 **HTML ダッシュボード**（`pm_dashboard`）— フェーズ進捗・ベロシティ・ブロッカー・リスクを一目で:
 
-![PM Lens HTML ダッシュボード — フェーズ進捗・ベロシティ・ブロッカー・リスク](https://raw.githubusercontent.com/flc-design/pm-server/main/docs/assets/dashboard.png)
+![PM Lens HTML ダッシュボード — フェーズ進捗・ベロシティ・ブロッカー・リスク](https://raw.githubusercontent.com/flc-design/pmlens/main/docs/assets/dashboard.png)
 
 ---
 
@@ -549,8 +549,8 @@ pm-server migrate       # MCP 登録を pm-agent → pm-server に切り替え
 ## 開発
 
 ```bash
-git clone https://github.com/flc-design/pm-server.git
-cd pm-server
+git clone https://github.com/flc-design/pmlens.git
+cd pmlens
 pip install -e ".[dev]"
 pytest                  # 1,000+ テスト
 pytest --cov            # カバレッジ計測（分岐網羅、未到達行を表示）
