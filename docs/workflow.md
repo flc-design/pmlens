@@ -2,13 +2,13 @@
 
 **Version**: 2.1.0
 **Date**: 2026-04-08
-**Author**: Shinichi Nakazato / FLC design co., ltd.
+**Author**: Shinichi Nakazato / FLC design Co., Ltd.
 
 ---
 
 ## 1. 概要
 
-Claude Code を中心に、PM Server で自律的な開発を構造化するワークフロー。
+Claude Code を中心に、PM Lens で自律的な開発を構造化するワークフロー。
 Claude Desktop（claude.ai）は企画・ブレストなどコードに縛られない思考が必要な場面で使う。
 
 ### 役割の変遷
@@ -17,7 +17,7 @@ Claude Desktop（claude.ai）は企画・ブレストなどコードに縛られ
 v1.0 (2025): Desktop = 設計者、Code = 実装者（固定分離）
 v2.0 (2026): Code = 設計 + 実装 + 管理（自律開発）
              Desktop = 企画・ブレスト（コードに縛られない思考）
-             PM Server = 構造化レイヤー（どちらで設計しても一元管理）
+             PM Lens = 構造化レイヤー（どちらで設計しても一元管理）
 ```
 
 ### 2026年4月時点の Claude Code の能力
@@ -38,7 +38,7 @@ v2.0 (2026): Code = 設計 + 実装 + 管理（自律開発）
 | ゼロからの企画・ブレスト | claude.ai / Desktop | コードに縛られない自由な思考 |
 | 市場調査・技術比較 | どちらでも可 | 両方 Web 検索できる |
 | アーキテクチャ設計 | Code (Plan mode) | コードベースを見ながら設計 |
-| タスク分解・実装計画 | Code (PM Server) | pm_add_task で構造化 |
+| タスク分解・実装計画 | Code (PM Lens) | pm_add_task で構造化 |
 | 実装・テスト | Code | 当然 |
 | レビュー・修正 | Code (/review) | コード内で完結 |
 | リリース判定 | 人間 + pm_dashboard | 俯瞰判断は人間の仕事 |
@@ -53,7 +53,7 @@ v2.0 (2026): Code = 設計 + 実装 + 管理（自律開発）
 ### Code で完結する場面（2026年以降）
 
 - アーキテクチャ設計（Plan mode + code-architect）
-- フェーズ分割と実装計画（PM Server でタスク登録）
+- フェーズ分割と実装計画（PM Lens でタスク登録）
 - 実装・テスト・コミット
 - コードレビュー（/review コマンド）
 - 複数タスクの並列実行（Dispatch + 並列エージェント）
@@ -108,12 +108,12 @@ project/
 ```
 
 `PM初期化して` で `.pm/` ディレクトリの作成と CLAUDE.md への自動行動ルール追記が行われる。
-続けて設計書を読ませてタスクを一括登録させると、PM Server がタスクを構造化。
+続けて設計書を読ませてタスクを一括登録させると、PM Lens がタスクを構造化。
 以降は `pm_next` で自律的に進む。
 
 ### Step 4: 自律開発サイクル
 
-**場所**: Claude Code（PM Server が進行管理）
+**場所**: Claude Code（PM Lens が進行管理）
 
 ```
 pm_status → pm_next → 実装 → テスト → pm_update_task → git commit → pm_next → ...
@@ -152,7 +152,7 @@ Claude Code は CLAUDE.md の自動行動ルールに従い：
 **いつ使う**: 何度も繰り返すパターン（review, test, lint, git-organize）
 **制約**: 新規作成後は Claude Code の再起動が必要
 
-### パターン B: PM Server タスク経由（一回きりの指示）
+### パターン B: PM Lens タスク経由（一回きりの指示）
 
 ```
 Claude Desktop or Code で pm_add_task に詳細な仕様を登録
@@ -171,12 +171,12 @@ docs/prompts/next-task.md にタスク仕様を書く
 Claude Code に「docs/prompts/next-task.md を読んで実行して」と言う
 ```
 
-**いつ使う**: PM Server に登録するほどでもない小さな修正
+**いつ使う**: PM Lens に登録するほどでもない小さな修正
 **利点**: 再起動不要。
 
 ---
 
-## 5. PM Server 統合
+## 5. PM Lens 統合
 
 ### CLAUDE.md の自動管理
 
@@ -184,9 +184,9 @@ Claude Code に「docs/prompts/next-task.md を読んで実行して」と言う
 マーカー（`<!-- pm-server:begin -->` / `<!-- pm-server:end -->`）で囲まれるため、
 他のセクションに影響しない。
 
-PM Server のバージョンアップ後は `pm-server update-claudemd --all` で全プロジェクトのルールを一括更新できる。
+PM Lens のバージョンアップ後は `pm-server update-claudemd --all` で全プロジェクトのルールを一括更新できる。
 
-### PM Server チートシート
+### PM Lens チートシート
 
 ```
 進捗は？              → pm_status
@@ -224,7 +224,7 @@ main ─────────────────────────
 - ブランチ名: `{type}/{短い説明}`
 - マージは squash merge（きれいな履歴）
 - マージ後は `git branch -D`（squash merge 後は -d では拒否される）
-- PM Server のタスクIDをコミットメッセージに含める
+- PM Lens のタスクIDをコミットメッセージに含める
 
 ### コミットメッセージ（Conventional Commits）
 
@@ -244,7 +244,7 @@ chore: update dependencies
 ### 再利用パターン専用
 
 スラッシュコマンドは「何度も使う定型作業」だけに使う。
-一回きりのタスク指示は PM Server タスクかプロンプトファイルで。
+一回きりのタスク指示は PM Lens タスクかプロンプトファイルで。
 
 ### 推奨コマンドセット
 

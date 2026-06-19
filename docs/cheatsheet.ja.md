@@ -1,4 +1,4 @@
-# PM Server チートシート
+# PM Lens チートシート
 
 > Claude Code + Codex CLI 用プロジェクト管理 MCP Server — **42 ツール**
 > Version 0.10.0 | Python 3.11+ | PyPI: `pm-server`

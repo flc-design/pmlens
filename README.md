@@ -1,14 +1,14 @@
-# pm-server
+# PM Lens
 
 [![PyPI version](https://img.shields.io/pypi/v/pm-server.svg)](https://pypi.org/project/pm-server/)
 [![Python versions](https://img.shields.io/pypi/pyversions/pm-server.svg)](https://pypi.org/project/pm-server/)
-[![CI](https://github.com/flc-design/pm-server/actions/workflows/ci.yml/badge.svg)](https://github.com/flc-design/pm-server/actions/workflows/ci.yml)
+[![CI](https://github.com/flc-design/pmlens/actions/workflows/ci.yml/badge.svg)](https://github.com/flc-design/pmlens/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Multi-Host](https://img.shields.io/badge/multi--host-Claude%20Code%20%2B%20Codex%20CLI-success)](#multi-host-support-claude-code--codex-cli)
 
 **[日本語版 README はこちら](README.ja.md)**
 
-**PM Server for Claude Code + Codex CLI** — a project management MCP server that works across multiple AI coding assistants.
+**PM Lens for Claude Code + Codex CLI** — a project management MCP server that works across multiple AI coding assistants.
 
 Track tasks, visualize progress, record decisions — through natural language in your Claude Code _or_ Codex CLI session. One PM substrate, multiple hosts.
 
@@ -29,7 +29,7 @@ Track tasks, visualize progress, record decisions — through natural language i
 
 **HTML dashboard** (`pm_dashboard`) — phase progress, velocity, blockers, and risks at a glance:
 
-![PM Server HTML dashboard — phases, velocity, blockers, and risks](https://raw.githubusercontent.com/flc-design/pm-server/main/docs/assets/dashboard.png)
+![PM Lens HTML dashboard — phases, velocity, blockers, and risks](https://raw.githubusercontent.com/flc-design/pmlens/main/docs/assets/dashboard.png)
 
 ---
 
@@ -614,8 +614,8 @@ Your `.pm/` data directories are **unchanged** — no data migration needed.
 ## Development
 
 ```bash
-git clone https://github.com/flc-design/pm-server.git
-cd pm-server
+git clone https://github.com/flc-design/pmlens.git
+cd pmlens
 pip install -e ".[dev]"
 pytest                  # 1,000+ tests
 pytest --cov            # with coverage (branch coverage, show missing)
@@ -638,8 +638,10 @@ ruff format src/        # Format
 
 ## Trademark notice
 
-"PM Server" is a generic project-management server designation, used here as the
-display name of this Python package distributed on PyPI as `pm-server`.
+"PM Lens"™ is a trademark of FLC design Co., Ltd., used as the display name of
+this project. The project is currently distributed on PyPI as `pm-server`; the
+PyPI package, the Python import name (`pm_server`), and the MCP tooling retain
+the `pm-server` / `pm_server` identifiers during the transition to the PM Lens brand.
 
 This project is **not affiliated with, endorsed by, or sponsored by**:
 
@@ -647,6 +649,7 @@ This project is **not affiliated with, endorsed by, or sponsored by**:
 - **Percona Monitoring and Management** (PMM Server) (Percona LLC)
 - **Apple Carbon Print Manager** (`PMServer` opaque type in the deprecated ApplicationServices framework) (Apple Inc.)
 - **Informatica PowerCenter** (`pmserver.exe` Integration Service daemon) (Informatica LLC)
+- **Lens** (the Kubernetes IDE) (Mirantis, Inc.)
 - Any other product, vendor, or service that may use similar terminology.
 
 All trademarks are the property of their respective owners.
@@ -655,4 +658,4 @@ All trademarks are the property of their respective owners.
 
 ## License
 
-MIT — Shinichi Nakazato / FLC design co., ltd.
+MIT — Shinichi Nakazato / FLC design Co., Ltd.

@@ -1,8 +1,8 @@
-# pm-server Memory Layer 設計書
+# PM Lens Memory Layer 設計書
 
 **Version**: 0.4.0
 **Date**: 2026-04-13
-**Author**: Shinichi Nakazato / FLC design co., ltd.
+**Author**: Shinichi Nakazato / FLC design Co., Ltd.
 **Status**: Implemented (実装完了)
 **Based on**: claude-mem (50K stars) の機能分析 + pm-server 既存基盤の活用
 

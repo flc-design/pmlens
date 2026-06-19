@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
-<title>PM Server — Architecture & Behavior</title>
+<title>PM Lens — Architecture & Behavior</title>
 <style>
 :root {
   --bg: #fafafa;
@@ -87,9 +87,9 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
 </head>
 <body>
 <header class="hero">
-  <h1>PM Server — Architecture &amp; Behavior</h1>
+  <h1>PM Lens — Architecture &amp; Behavior</h1>
   <div class="subtitle">Claude Code 用プロジェクト管理 MCP サーバーの全体機能・データフロー・状態遷移マップ</div>
-  <div class="meta">バージョン 0.9.0 (2026-05-26 時点) · 37 MCP tools · 15 RO + 2 outbox-RW + 20 full-RW · 803+ tests · MIT</div>
+  <div class="meta">バージョン 0.10.0 (2026-06-15 時点) · 42 MCP tools · 15 RO + 2 outbox-RW + 25 full-RW · 1,033 tests · MIT</div>
   <div class="meta">関連ドキュメント: <a href="user-guide.html">User Guide (CLI &amp; UX Tips)</a> · <a href="workflow-guide.html">Workflow Guide (作り方)</a> · <a href="cheatsheet.ja.md">Cheatsheet (ja)</a></div>
 </header>
 
@@ -114,7 +114,7 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
 <section class="card" id="overview">
   <h2>1. Overview</h2>
   <p>
-    <strong>PM Server</strong> は Claude Code 用のプロジェクト管理 MCP (Model Context Protocol) サーバー。
+    <strong>PM Lens</strong> は Claude Code 用のプロジェクト管理 MCP (Model Context Protocol) サーバー。
     タスク追跡・進捗可視化・ブロッカー検知・ADR 記録・横断ダッシュボード・workflow 状態マシン・
     SQLite メモリ層 (FTS5 全文検索) を一体提供する。
   </p>
@@ -149,7 +149,7 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
 
     <rect x="340" y="90" width="200" height="56" rx="6" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
     <text x="440" y="111" text-anchor="middle" font-weight="700">server.py</text>
-    <text x="440" y="126" text-anchor="middle" fill="#666" font-size="11">FastMCP + 37 @_tool()</text>
+    <text x="440" y="126" text-anchor="middle" fill="#666" font-size="11">FastMCP + 42 @_tool()</text>
     <text x="440" y="140" text-anchor="middle" fill="#666" font-size="11">PM_LENS + PM_DESKTOP_WRITE gating</text>
 
     <!-- Mid layer: features -->
@@ -208,7 +208,7 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
 
     <rect x="550" y="360" width="150" height="48" rx="6" fill="#dcfce7" stroke="#16a34a" stroke-width="1.5"/>
     <text x="625" y="380" text-anchor="middle" font-weight="700">models.py</text>
-    <text x="625" y="396" text-anchor="middle" fill="#666" font-size="10">Pydantic v2 (17 models)</text>
+    <text x="625" y="396" text-anchor="middle" fill="#666" font-size="10">Pydantic v2 (18 models)</text>
 
     <rect x="340" y="430" width="200" height="40" rx="6" fill="#fce7f3" stroke="#be185d"/>
     <text x="440" y="455" text-anchor="middle" font-weight="700">utils.py — shared helpers</text>
@@ -257,7 +257,7 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
 
 <section class="card" id="tools">
   <h2>3. MCP Tool Catalog</h2>
-  <p>37 個の MCP ツールがカテゴリ別に提供される。配布モードによって登録される ツール集合が異なる:
+  <p>42 個の MCP ツールがカテゴリ別に提供される。配布モードによって登録される ツール集合が異なる:
      <span class="badge badge-ro">RO</span> は Lens モード (<code>PM_LENS=1</code>) で利用可能、
      <span class="badge" style="background:#ede9fe;color:#6d28d9">OUTBOX</span> は Lens + <code>PM_DESKTOP_WRITE=1</code> で追加開放される Desktop Outbox 書込み tool、
      <span class="badge badge-rw">RW</span> は full pm-server (Claude Code / Codex 配布) のみ。</p>
@@ -322,7 +322,7 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
     <tr><td><code>pm_workflow_list</code></td><td>active/completed/paused/abandoned 一覧</td><td><span class="badge badge-ro">RO</span></td></tr>
     <tr><td><code>pm_workflow_templates</code></td><td>builtin + custom テンプレート一覧</td><td><span class="badge badge-ro">RO</span></td></tr>
   </table>
-  <p class="muted">15 RO + 2 OUTBOX-RW + 20 Full-RW = 37 ツール (2026-05-26, v0.9.0)。Lens 配布では RO_ALLOWLIST 外の
+  <p class="muted">15 RO + 2 OUTBOX-RW + 25 Full-RW = 42 ツール (2026-06-15, v0.10.0)。Lens 配布では RO_ALLOWLIST 外の
      ツールが FastMCP に未登録 = 構造的不変条件 (ADR-015/017/018)。OUTBOX 2 ツールは <code>PM_DESKTOP_WRITE=1</code>
      が追加で立った時のみ登録され、main <code>.pm/memory.db</code> は touch しない (ADR-019)。</p>
 </section>
@@ -392,7 +392,7 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
     <text x="260" y="264" text-anchor="middle" fill="#666" font-size="10">pm_memory_search, pm_dashboard, pm_workflow_status …</text>
 
     <rect x="460" y="210" width="320" height="60" rx="6" fill="#fee2e2" stroke="#dc2626" stroke-width="1.5"/>
-    <text x="620" y="232" text-anchor="middle" font-weight="700">FastMCP 未登録 (22 tools)</text>
+    <text x="620" y="232" text-anchor="middle" font-weight="700">FastMCP 未登録 (27 tools)</text>
     <text x="620" y="250" text-anchor="middle" fill="#666" font-size="10">pm_add_task, pm_update_task, pm_log, pm_remember,</text>
     <text x="620" y="264" text-anchor="middle" fill="#666" font-size="10">pm_init, pm_cleanup, pm_workflow_start, pm_outbox_pending …</text>
 
@@ -413,7 +413,7 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
 
 <section class="card" id="workflow">
   <h2>5. Workflow Engine</h2>
-  <p>3 つの builtin テンプレートでステートマシン化された開発プロセスを提供。各 step が
+  <p>5 つの builtin テンプレートでステートマシン化された開発プロセスを提供。各 step が
      <code>tool_hint</code>/<code>skill_hint</code>/<code>agent_hint</code> でガイダンスを返し、
      <code>gate: user_approval</code> step では明示的承認待ち、<code>loop: true</code> step では
      品質スコアによるループバックを許容する。</p>
@@ -511,6 +511,15 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
   <h3>5.3 <code>discovery</code> (調査・ブレスト)</h3>
   <p class="muted">scope → research → analysis → synthesis → proposal の 5 step。完了時に <code>chain_to: development</code>
      で次の開発 workflow 起動を提案する。</p>
+
+  <h3>5.4 <code>brainstorming</code> (8 steps, diverge↔evaluate ループ)</h3>
+  <p class="muted">3 並列エージェントで発散 → 6 dimension scoring で収束 (Double Diamond)。要件・仕様を KR 化し
+     ADR 起票して <code>chain_to: development</code>。詳細は workflow-guide.html §5.4。</p>
+
+  <h3>5.5 <code>content-pipeline</code> (4 steps, ADR-024)</h3>
+  <p class="muted">.pm の知見 (lesson/insight/ADR/defect) を redact 済みの build-in-public X 下書きへ変換
+     (extract → draft → redact → review)。pm-server は X 認証情報を持たず投稿しない — redaction が唯一の安全層。
+     詳細は workflow-guide.html §5.5。</p>
 </section>
 
 <section class="card" id="tasks">
@@ -622,7 +631,7 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
     <tr><th></th><th>PyPI <code>pm-server</code></th><th>.mcpb bundle (Lens)</th><th>.mcpb + PM_DESKTOP_WRITE</th></tr>
     <tr><td><strong>対象 host</strong></td><td>Claude Code (CLI) / Codex CLI</td><td>Claude Cowork / その他 viewer</td><td>Claude Desktop (Phase 2 bridge)</td></tr>
     <tr><td><strong>インストール</strong></td><td><code>pip install pm-server</code> &rarr; <code>pm-server install</code></td><td>.mcpb ファイルを host に drag &amp; drop</td><td>.mcpb + manifest が <code>PM_DESKTOP_WRITE=1</code> を auto-propagate (PMSERV-100)</td></tr>
-    <tr><td><strong>登録 tools</strong></td><td>Full RW (37 tools)</td><td>Lens RO (15 tools)</td><td>RO 15 + OUTBOX-RW 2 = 17 tools</td></tr>
+    <tr><td><strong>登録 tools</strong></td><td>Full RW (42 tools)</td><td>Lens RO (15 tools)</td><td>RO 15 + OUTBOX-RW 2 = 17 tools</td></tr>
     <tr><td><strong>環境変数</strong></td><td>未設定</td><td><code>PM_LENS=1</code></td><td><code>PM_LENS=1, PM_DESKTOP_WRITE=1</code></td></tr>
     <tr><td><strong>SQLite モード</strong></td><td>RW main + outbox</td><td><code>?mode=ro&amp;immutable=1</code> main / outbox 不触</td><td>main は RO 不変、outbox <code>~/.pm/desktop/desktop.db</code> は append-only RW</td></tr>
     <tr><td><strong>同一バイナリ?</strong></td><td>はい — 配布物は 1 種類、env で role gating</td><td colspan="2" style="text-align:center">←</td></tr>
@@ -742,7 +751,7 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
 </section>
 
 <footer style="text-align: center; color: var(--muted); font-size: 12px; margin: 24px 0;">
-  Generated 2026-05-26 · pm-server v0.9.0 · Phase 2 Desktop Outbox (ADR-019) shipped · 803+ tests · 37 MCP tools
+  Generated 2026-06-15 · pm-server v0.10.0 · Phase 2 Desktop Outbox (ADR-019) shipped · 1,033 tests · 42 MCP tools
 </footer>
 
 </main>

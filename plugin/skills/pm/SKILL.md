@@ -9,7 +9,7 @@ description: >
   作業セッション開始時と終了時にも自動的に状態を確認・更新すること。
 ---
 
-# PM Server Skill (plugin-homed)
+# PM Lens Skill (plugin-homed)
 
 > This skill is the **plugin-homed** copy of pm-server's behavioural rules.
 > The manually-registered MCP setup drives these rules via `CLAUDE.md`, but
@@ -19,7 +19,7 @@ description: >
 
 ## 概要
 
-PM Server は Claude Code のプロジェクト管理を自動化する MCP Server。
+PM Lens は Claude Code のプロジェクト管理を自動化する MCP Server。
 各プロジェクトの `.pm/` ディレクトリに YAML でタスク・ADR・ログを管理し、
 `~/.pm/registry.yaml` で全プロジェクトを横断的に俯瞰できる。
 
