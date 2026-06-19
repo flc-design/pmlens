@@ -1,6 +1,6 @@
-# PM Server Documentation
+# PM Lens Documentation
 
-PM Server の各種ドキュメント。読者層と用途で 3 つの HTML ガイドに分かれている。
+PM Lens の各種ドキュメント。読者層と用途で 3 つの HTML ガイドに分かれている。
 
 ## 読者別の入口
 

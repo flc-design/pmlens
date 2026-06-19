@@ -1,8 +1,8 @@
-# pm-server — Claude Code プロジェクト管理システム設計書
+# PM Lens — Claude Code プロジェクト管理システム設計書
 
 **Version**: 0.5.0
 **Date**: 2026-04-16
-**Author**: Shinichi Nakazato / FLC design co., ltd.
+**Author**: Shinichi Nakazato / FLC design Co., Ltd.
 **Status**: Implemented (Phase 1-7 complete)
 **License**: MIT
 **PyPI**: `pm-server`

@@ -9,11 +9,11 @@ description: >
   作業セッション開始時と終了時にも自動的に状態を確認・更新すること。
 ---
 
-# PM Server Skill
+# PM Lens Skill
 
 ## 概要
 
-PM Server は Claude Code のプロジェクト管理を自動化する MCP Server。
+PM Lens は Claude Code のプロジェクト管理を自動化する MCP Server。
 各プロジェクトの `.pm/` ディレクトリにYAMLでタスク・ADR・ログを管理し、
 `~/.pm/registry.yaml` で全プロジェクトを横断的に俯瞰できる。
 

@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+
+- Rebrand product display name to "PM Lens" (pmlens): updated product display name across README/docs, the GitHub repository name, and the .mcpb/plugin display surfaces (display layer only).
+
+### Notes
+
+- The PyPI distribution name (`pm-server`), MCP registration key, Python import name (`pm_server`), local folder name, all GitHub/PyPI URLs, and in-code display strings (~60) remain unchanged for backward compatibility and will migrate together at publish time (Phase-2).
+
 ## [0.10.0] - 2026-06-10
 
 This release ships three pillars on top of v0.9.0. **Branch-aware session continuity** (ADR-028/035) lets `pm_recall(track=...)` restore the last context of a specific work line — a raw branch or a logical label defined in `.pm/tracks.yaml` — while the read path stays completely git-free, with the PM_LENS read-only invariant upgraded from convention to a statically proved property. The **.pm → X content pipeline** (ADR-024) adds a per-project staging store and four new MCP tools for build-in-public drafts, with a deterministic Layer-1 redaction prefilter as the shipping safety floor — the server holds no X credentials and structurally cannot post. And a **Claude Code plugin layer** (ADR-026/027) packages pm-server for `/plugin install pm-server@flc-design` with bundled MCP, SessionStart/PostToolUse hooks, and a skill — the host-agnostic MCP core is unchanged. The shared rules template advances v8 → v10, and the storage/installer/discover hardening backlog is cleared. MCP tool count: 38 → 42. Test suite: 1,014 passing.

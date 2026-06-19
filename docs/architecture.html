@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
-<title>PM Server — Architecture & Behavior</title>
+<title>PM Lens — Architecture & Behavior</title>
 <style>
 :root {
   --bg: #fafafa;
@@ -87,7 +87,7 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
 </head>
 <body>
 <header class="hero">
-  <h1>PM Server — Architecture &amp; Behavior</h1>
+  <h1>PM Lens — Architecture &amp; Behavior</h1>
   <div class="subtitle">Claude Code 用プロジェクト管理 MCP サーバーの全体機能・データフロー・状態遷移マップ</div>
   <div class="meta">バージョン 0.10.0 (2026-06-15 時点) · 42 MCP tools · 15 RO + 2 outbox-RW + 25 full-RW · 1,033 tests · MIT</div>
   <div class="meta">関連ドキュメント: <a href="user-guide.html">User Guide (CLI &amp; UX Tips)</a> · <a href="workflow-guide.html">Workflow Guide (作り方)</a> · <a href="cheatsheet.ja.md">Cheatsheet (ja)</a></div>
@@ -114,7 +114,7 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
 <section class="card" id="overview">
   <h2>1. Overview</h2>
   <p>
-    <strong>PM Server</strong> は Claude Code 用のプロジェクト管理 MCP (Model Context Protocol) サーバー。
+    <strong>PM Lens</strong> は Claude Code 用のプロジェクト管理 MCP (Model Context Protocol) サーバー。
     タスク追跡・進捗可視化・ブロッカー検知・ADR 記録・横断ダッシュボード・workflow 状態マシン・
     SQLite メモリ層 (FTS5 全文検索) を一体提供する。
   </p>
