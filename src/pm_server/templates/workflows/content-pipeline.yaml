@@ -1,4 +1,4 @@
-# PM Server — Content Pipeline Workflow Template (PMSERV-113, ADR-024)
+# PM Lens — Content Pipeline Workflow Template (PMSERV-113, ADR-024)
 # Extract → Draft → Redact → Review (manual post)
 # Turns a .pm by-product (lesson / insight / ADR / defect) into a redacted,
 # human-reviewed build-in-public X draft.

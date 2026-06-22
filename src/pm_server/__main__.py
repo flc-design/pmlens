@@ -1,4 +1,4 @@
-"""CLI entry point for PM Server."""
+"""CLI entry point for PM Lens."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from . import __version__
 @click.group()
 @click.version_option(version=__version__, prog_name="pm-server")
 def cli():
-    """PM Server — Claude Code Project Management."""
+    """PM Lens — Claude Code Project Management."""
 
 
 _TARGET_CHOICES = ["claude-code", "codex", "auto", "all"]
@@ -79,7 +79,7 @@ def _print_inject_summary(summary) -> None:
     help="Show what would happen without making changes.",
 )
 def install(target: str, dry_run: bool):
-    """Register PM Server as an MCP server in the chosen host(s)."""
+    """Register PM Lens as an MCP server in the chosen host(s)."""
     from . import installer
 
     summary = installer.install(target=target, dry_run=dry_run)
@@ -104,7 +104,7 @@ def install(target: str, dry_run: bool):
     help="Show what would happen without making changes.",
 )
 def uninstall(target: str, dry_run: bool):
-    """Remove PM Server from MCP host(s)."""
+    """Remove PM Lens from MCP host(s)."""
     from . import installer
 
     summary = installer.uninstall(target=target, dry_run=dry_run)
@@ -229,7 +229,7 @@ def context_inject_cmd():
 
 @cli.group()
 def hook():
-    """Manage Claude Code hooks for PM Server."""
+    """Manage Claude Code hooks for PM Lens."""
 
 
 @hook.command("post-tool-use")
@@ -242,7 +242,7 @@ def hook_post_tool_use():
 
 @cli.command("install-hooks")
 def install_hooks_cmd():
-    """Install PM Server hooks into Claude Code settings."""
+    """Install PM Lens hooks into Claude Code settings."""
     from .hooks import install_hooks
 
     msg = install_hooks()
@@ -252,7 +252,7 @@ def install_hooks_cmd():
 
 @cli.command("uninstall-hooks")
 def uninstall_hooks_cmd():
-    """Remove PM Server hooks from Claude Code settings."""
+    """Remove PM Lens hooks from Claude Code settings."""
     from .hooks import uninstall_hooks
 
     msg = uninstall_hooks()
@@ -263,7 +263,7 @@ def uninstall_hooks_cmd():
 @cli.command("update-claudemd")
 @click.option("--all", "all_projects", is_flag=True, help="Update all registered projects.")
 def update_claudemd_cmd(all_projects: bool):
-    """Update PM Server rules in CLAUDE.md.
+    """Update PM Lens rules in CLAUDE.md.
 
     Without --all: updates current project only.
     With --all: updates all registered projects.
@@ -329,7 +329,7 @@ def update_claudemd_cmd(all_projects: bool):
     help="Apply to every registered project (target/dry_run apply per-project).",
 )
 def update_rules_cmd(target: str, dry_run: bool, all_projects: bool):
-    """Inject PM Server rules into CLAUDE.md and/or AGENTS.md.
+    """Inject PM Lens rules into CLAUDE.md and/or AGENTS.md.
 
     Compared to ``update-claudemd``: also handles AGENTS.md for Codex
     CLI (ADR-008). Default ``target=auto`` detects which hosts are

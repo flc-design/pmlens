@@ -93,7 +93,7 @@ project/
 
 **CLAUDE.md に必ず含めるもの:**
 - プロジェクト概要・技術スタック
-- PM Server 自動行動ルール（`pm_init` で自動追記される）
+- PM Lens 自動行動ルール（`pm_init` で自動追記される）
 - Git 規約（ブランチ戦略 + Conventional Commits）
 - コーディング規約
 - 成功指標
@@ -180,7 +180,7 @@ Claude Code に「docs/prompts/next-task.md を読んで実行して」と言う
 
 ### CLAUDE.md の自動管理
 
-`pm_init` を実行すると、CLAUDE.md に PM Server 自動行動ルールが自動追記される。
+`pm_init` を実行すると、CLAUDE.md に PM Lens 自動行動ルールが自動追記される。
 マーカー（`<!-- pm-server:begin -->` / `<!-- pm-server:end -->`）で囲まれるため、
 他のセクションに影響しない。
 

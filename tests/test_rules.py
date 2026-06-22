@@ -43,13 +43,15 @@ class TestRulesModule:
         assert isinstance(TEMPLATE_VERSION, int)
         assert TEMPLATE_VERSION >= 1
 
-    def test_template_version_pinned_at_v10(self):
-        # ADR-008 4th-tier guard: a bump must be intentional. v10 adds the
-        # branch-aware recall rule (non-plugin hosts must re-derive the branch
-        # from .git/HEAD and pass it as pm_recall(track=...)) — PMSERV-125 /
-        # ADR-028. v9 added the X content pipeline rule (PMSERV-119 / ADR-024);
-        # v8 added the memory-layer routing rule (PMSERV-111 / ADR-023).
-        assert TEMPLATE_VERSION == 10
+    def test_template_version_pinned_at_v11(self):
+        # ADR-008 4th-tier guard: a bump must be intentional. v11 is the PM Lens
+        # rebrand — the rule-section heading "PM Server 自動行動ルール" becomes
+        # "PM Lens 自動行動ルール", so the bump re-injects the new heading into
+        # existing CLAUDE.md/AGENTS.md (marker slug unchanged) — PMSERV-136 /
+        # ADR-032. v10 added the branch-aware recall rule (PMSERV-125 / ADR-028);
+        # v9 the X content pipeline rule (PMSERV-119 / ADR-024); v8 the
+        # memory-layer routing rule (PMSERV-111 / ADR-023).
+        assert TEMPLATE_VERSION == 11
 
     def test_template_contains_x_content_pipeline_section(self):
         # PMSERV-119: the on-signal trigger rule must be present in the
@@ -337,7 +339,7 @@ class TestInjectSummaryDataclass:
             target_file="CLAUDE.md",
             host="claude-code",
             status="updated",
-            message="updated PM Server rules",
+            message="updated PM Lens rules",
         )
         s = InjectSummary(
             results=[r1],
@@ -728,7 +730,7 @@ class TestCliUpdateRules:
                     target_file="CLAUDE.md",
                     host="claude-code",
                     status="created",
-                    message="created CLAUDE.md with PM Server rules",
+                    message="created CLAUDE.md with PM Lens rules",
                     is_dry_run=dry_run,
                 ),
             ],
@@ -746,14 +748,14 @@ class TestCliUpdateRules:
                     target_file="CLAUDE.md",
                     host="claude-code",
                     status="updated",
-                    message="updated PM Server rules in CLAUDE.md",
+                    message="updated PM Lens rules in CLAUDE.md",
                     is_dry_run=dry_run,
                 ),
                 InjectResult(
                     target_file="AGENTS.md",
                     host="codex",
                     status="created",
-                    message="created AGENTS.md with PM Server rules",
+                    message="created AGENTS.md with PM Lens rules",
                     is_dry_run=dry_run,
                 ),
             ],
@@ -786,7 +788,7 @@ class TestCliUpdateRules:
 
         assert result.exit_code == 0
         assert captured == {"target": "auto", "dry_run": False}
-        assert "✓ CLAUDE.md: created CLAUDE.md with PM Server rules" in result.output
+        assert "✓ CLAUDE.md: created CLAUDE.md with PM Lens rules" in result.output
 
     def test_target_codex_dispatch(self, monkeypatch, tmp_path):
         from click.testing import CliRunner
@@ -805,7 +807,7 @@ class TestCliUpdateRules:
                         target_file="AGENTS.md",
                         host="codex",
                         status="created",
-                        message="created AGENTS.md with PM Server rules",
+                        message="created AGENTS.md with PM Lens rules",
                     )
                 ],
                 created=["AGENTS.md"],
@@ -917,7 +919,7 @@ class TestCliUpdateRules:
                         target_file="AGENTS.md",
                         host="codex",
                         status="updated",
-                        message="updated PM Server rules in AGENTS.md (v6 → v7)",
+                        message="updated PM Lens rules in AGENTS.md (v6 → v7)",
                         backup_path=backup,
                     )
                 ],

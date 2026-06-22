@@ -17,7 +17,7 @@ launch time. That means the bundle MUST include:
 This script validates the manifest against the v0.4 schema (the previous
 ``server.uv = {package, command, args}`` shape was an unreleased preview —
 Claude Desktop's Zod validator rejects it with "Unrecognized key(s) in object:
-'uv'"; see PMSERV-106). It then writes ``dist/pm-server-<version>.mcpb``.
+'uv'"; see PMSERV-106). It then writes ``dist/pmlens-<version>.mcpb``.
 
 Run from the repo root: ``python scripts/build_mcpb.py``.
 """
@@ -166,7 +166,7 @@ def _iter_package_sources(package_root: Path):
 
 def build_bundle(version: str) -> Path:
     DIST_DIR.mkdir(parents=True, exist_ok=True)
-    out_path = DIST_DIR / f"pm-server-{version}.mcpb"
+    out_path = DIST_DIR / f"pmlens-{version}.mcpb"
 
     top_files = [
         MANIFEST_PATH,

@@ -1,4 +1,4 @@
-"""Shared fixtures for PM Server tests."""
+"""Shared fixtures for PM Lens tests."""
 
 import datetime as _dt
 from pathlib import Path

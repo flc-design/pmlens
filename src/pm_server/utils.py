@@ -1,4 +1,4 @@
-"""Shared utilities for PM Server."""
+"""Shared utilities for PM Lens."""
 
 from __future__ import annotations
 

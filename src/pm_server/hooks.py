@@ -1,4 +1,4 @@
-"""Claude Code hooks for PM Server lifecycle enforcement.
+"""Claude Code hooks for PM Lens lifecycle enforcement.
 
 Provides PostToolUse hook that injects PM reminders after git commits,
 and functions to install/uninstall hooks in Claude Code settings.
@@ -184,7 +184,7 @@ def handle_post_tool_use() -> None:
     if "git commit" not in command:
         return
 
-    # Only act on projects with PM Server
+    # Only act on projects with PM Lens
     pm_path = Path(cwd) / ".pm"
     if not pm_path.exists():
         return
@@ -211,7 +211,7 @@ def _build_commit_reminder(pm_path: Path) -> str:
     active = [t for t in tasks if t.status == TaskStatus.IN_PROGRESS]
 
     if lens_mode:
-        lines = ["[PM Server Lens] Git commit completed. (Read-only mode)"]
+        lines = ["[PM Lens] Git commit completed. (Read-only mode)"]
         if active:
             task_ids = ", ".join(t.id for t in active)
             lines.append(f"1. pm_next — check recommended next tasks (active: {task_ids})")
@@ -222,7 +222,7 @@ def _build_commit_reminder(pm_path: Path) -> str:
         lines.append("Tip: to update tasks or log progress, use the full pm-server (Claude Code).")
         return "\n".join(lines)
 
-    lines = ["[PM Server] Git commit completed. Please execute:"]
+    lines = ["[PM Lens] Git commit completed. Please execute:"]
 
     if active:
         task_ids = ", ".join(t.id for t in active)

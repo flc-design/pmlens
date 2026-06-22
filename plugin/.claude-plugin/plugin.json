@@ -1,6 +1,6 @@
 {
   "name": "pm-server",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "PM Lens — Claude Code project management: task tracking, progress, blockers, ADRs, and a cross-project dashboard. Bundles the pm-server MCP (via uvx) and re-homes its session rituals into a SessionStart hook + skill, since plugins cannot ship a CLAUDE.md.",
   "author": {
     "name": "flc-design"

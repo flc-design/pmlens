@@ -176,7 +176,7 @@ rationale (detect-then-patch, backup, dry-run, absolute-path embedding).
 
 ### Project rules injection (CLAUDE.md / AGENTS.md)
 
-`pm_init` and `pm_update_rules` keep PM Server's auto-action rules synced
+`pm_init` and `pm_update_rules` keep PM Lens's auto-action rules synced
 into the appropriate per-host instruction file:
 
 | Host          | Instruction file |
@@ -306,7 +306,7 @@ dataclasses, atomic-write helpers).
 
 | Tool | Description |
 |---|---|
-| `pm_update_rules` | Update PM Server rules section in CLAUDE.md and/or AGENTS.md (multi-host, ADR-008). Default `target=auto` detects installed hosts |
+| `pm_update_rules` | Update PM Lens rules section in CLAUDE.md and/or AGENTS.md (multi-host, ADR-008). Default `target=auto` detects installed hosts |
 | `pm_update_claudemd` | Legacy alias of `pm_update_rules(target="claude-code")` — deprecated since v0.6.0, removal in v1.0.0 |
 
 ---
@@ -397,7 +397,7 @@ YAML files are human-readable and hand-editable. Memory DB is the source of trut
 Add this to your project's `CLAUDE.md` for automatic PM behavior (or run `pm-server update-rules`):
 
 ```markdown
-## PM Server 自動行動ルール（必ず従うこと）
+## PM Lens 自動行動ルール（必ず従うこと）
 
 ### セッション開始時（最初の応答の前に必ず実行）
 1. pm_status を MCP ツールとして実行し、現在の進捗を表示する
@@ -523,12 +523,12 @@ pm-server discover .       # Scan for projects with .pm/ directories
 pm-server status           # Show project status from terminal
 pm-server context-inject   # Print session context to stdout (for hook integration)
 pm-server migrate          # Migrate from pm-agent (rename transition)
-pm-server update-rules     # Inject PM Server rules into CLAUDE.md and/or AGENTS.md (ADR-008).
+pm-server update-rules     # Inject PM Lens rules into CLAUDE.md and/or AGENTS.md (ADR-008).
                            # --target {auto,all,claude-code,codex} (default: auto)
                            # --dry-run / --all (apply to every registered project)
 pm-server update-claudemd  # Legacy alias of `update-rules --target=claude-code`. Deprecated since v0.6.0.
 pm-server install-hooks    # Manually install Claude Code hooks (auto-installed via pm_status)
-pm-server uninstall-hooks  # Remove PM Server hooks from Claude Code settings
+pm-server uninstall-hooks  # Remove PM Lens hooks from Claude Code settings
 ```
 
 ---

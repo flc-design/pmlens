@@ -1,4 +1,4 @@
-"""Dashboard generation — HTML (Jinja2 + Chart.js) and text fallback for PM Server."""
+"""Dashboard generation — HTML (Jinja2 + Chart.js) and text fallback for PM Lens."""
 
 from __future__ import annotations
 
@@ -244,7 +244,7 @@ def _render_portfolio_text(ctx: dict) -> str:
     """Plain-text portfolio dashboard."""
     lines = [
         f"{'=' * 60}",
-        f"  PM Server — Portfolio Dashboard ({ctx['today']})",
+        f"  PM Lens — Portfolio Dashboard ({ctx['today']})",
         f"  {ctx['total_projects']} projects registered",
         f"{'=' * 60}",
         "",

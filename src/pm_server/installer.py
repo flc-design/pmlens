@@ -211,7 +211,7 @@ def install_claude_code(*, dry_run: bool = False) -> InstallResult:
         return InstallResult(
             target="claude-code",
             status="already_registered",
-            message="PM Server is already registered in Claude Code",
+            message="PM Lens is already registered in Claude Code",
             is_dry_run=dry_run,
             lens_mode=lens_mode,
         )
@@ -221,7 +221,7 @@ def install_claude_code(*, dry_run: bool = False) -> InstallResult:
         return InstallResult(
             target="claude-code",
             status="installed",
-            message=f"would register PM Server in Claude Code (user scope){suffix}.",
+            message=f"would register PM Lens in Claude Code (user scope){suffix}.",
             is_dry_run=True,
             lens_mode=lens_mode,
         )
@@ -260,7 +260,7 @@ def install_claude_code(*, dry_run: bool = False) -> InstallResult:
             target="claude-code",
             status="installed",
             message=(
-                f"PM Server registered in Claude Code (user scope){suffix}. "
+                f"PM Lens registered in Claude Code (user scope){suffix}. "
                 "Restart Claude Code to activate."
             ),
             lens_mode=lens_mode,
@@ -309,7 +309,7 @@ def uninstall_claude_code(*, dry_run: bool = False) -> InstallResult:
         return InstallResult(
             target="claude-code",
             status="skipped",
-            message="PM Server not registered in Claude Code",
+            message="PM Lens not registered in Claude Code",
             is_dry_run=dry_run,
         )
 
@@ -317,7 +317,7 @@ def uninstall_claude_code(*, dry_run: bool = False) -> InstallResult:
         return InstallResult(
             target="claude-code",
             status="uninstalled",
-            message="would unregister PM Server from Claude Code",
+            message="would unregister PM Lens from Claude Code",
             is_dry_run=True,
         )
 
@@ -331,7 +331,7 @@ def uninstall_claude_code(*, dry_run: bool = False) -> InstallResult:
         return InstallResult(
             target="claude-code",
             status="uninstalled",
-            message="PM Server unregistered from Claude Code",
+            message="PM Lens unregistered from Claude Code",
         )
 
     return InstallResult(
@@ -440,7 +440,7 @@ def install_codex(*, dry_run: bool = False) -> InstallResult:
             return InstallResult(
                 target="codex",
                 status="already_registered",
-                message="PM Server is already registered in Codex",
+                message="PM Lens is already registered in Codex",
                 is_dry_run=dry_run,
                 lens_mode=lens_mode,
             )
@@ -450,12 +450,12 @@ def install_codex(*, dry_run: bool = False) -> InstallResult:
         suffix = " in Lens (read-only) mode" if lens_mode else ""
         if "mcp_servers" not in doc or "pm-server" not in doc.get("mcp_servers", {}):
             message = (
-                f"would register PM Server in Codex (user scope){suffix}. "
+                f"would register PM Lens in Codex (user scope){suffix}. "
                 "Would back up to ~/.codex/config.toml.bak.<ts> before write."
             )
         else:
             message = (
-                f"would update PM Server in Codex{suffix} "
+                f"would update PM Lens in Codex{suffix} "
                 "(path or PM_LENS env changed). "
                 "Would back up to ~/.codex/config.toml.bak.<ts> before write."
             )
@@ -487,7 +487,7 @@ def install_codex(*, dry_run: bool = False) -> InstallResult:
         doc["mcp_servers"]["pm-server"] = section
         suffix = " in Lens (read-only) mode" if lens_mode else ""
         message = (
-            f"PM Server registered in Codex (user scope){suffix}. "
+            f"PM Lens registered in Codex (user scope){suffix}. "
             f"Backup at {backup_path}. Restart Codex to activate."
         )
     else:
@@ -521,7 +521,7 @@ def install_codex(*, dry_run: bool = False) -> InstallResult:
                     del section["env"]
         suffix = " in Lens (read-only) mode" if lens_mode else ""
         message = (
-            f"PM Server updated in Codex{suffix} (path or PM_LENS env changed). "
+            f"PM Lens updated in Codex{suffix} (path or PM_LENS env changed). "
             f"Backup at {backup_path}. Restart Codex to activate."
         )
 
@@ -582,12 +582,12 @@ def uninstall_codex(*, dry_run: bool = False) -> InstallResult:
         residual_keys = [k for k in section.keys() if k not in managed]
         if not residual_keys:
             message = (
-                "would unregister PM Server from Codex. "
+                "would unregister PM Lens from Codex. "
                 "Would back up to ~/.codex/config.toml.bak.<ts> before write."
             )
         else:
             message = (
-                "would remove PM Server top-level fields from Codex. "
+                "would remove PM Lens top-level fields from Codex. "
                 "Sub-tables would be preserved — remove manually if no longer needed. "
                 "Would back up to ~/.codex/config.toml.bak.<ts> before write."
             )
@@ -610,10 +610,10 @@ def uninstall_codex(*, dry_run: bool = False) -> InstallResult:
         del doc["mcp_servers"]["pm-server"]
         if not doc["mcp_servers"]:
             del doc["mcp_servers"]
-        message = f"PM Server unregistered from Codex. Backup at {backup_path}."
+        message = f"PM Lens unregistered from Codex. Backup at {backup_path}."
     else:
         message = (
-            "PM Server top-level fields removed from Codex. "
+            "PM Lens top-level fields removed from Codex. "
             "Sub-tables preserved — remove manually if no longer needed. "
             f"Backup at {backup_path}."
         )

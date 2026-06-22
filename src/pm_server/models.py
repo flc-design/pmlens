@@ -1,4 +1,4 @@
-"""Pydantic v2 data models for PM Server."""
+"""Pydantic v2 data models for PM Lens."""
 
 import datetime as _dt
 from enum import StrEnum
@@ -156,7 +156,7 @@ class WorkflowStatus(StrEnum):
 
 
 class PmServerError(Exception):
-    """Base exception for PM Server."""
+    """Base exception for PM Lens."""
 
 
 class ProjectNotFoundError(PmServerError):
