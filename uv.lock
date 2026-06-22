@@ -950,7 +950,7 @@ wheels = [
 ]
 
 [[package]]
-name = "pm-server"
+name = "pmlens"
 version = "0.11.0"
 source = { editable = "." }
 dependencies = [
