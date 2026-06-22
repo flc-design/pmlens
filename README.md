@@ -397,7 +397,7 @@ YAML files are human-readable and hand-editable. Memory DB is the source of trut
 Add this to your project's `CLAUDE.md` for automatic PM behavior (or run `pm-server update-rules`):
 
 ```markdown
-## PM Server 自動行動ルール（必ず従うこと）
+## PM Lens 自動行動ルール（必ず従うこと）
 
 ### セッション開始時（最初の応答の前に必ず実行）
 1. pm_status を MCP ツールとして実行し、現在の進捗を表示する

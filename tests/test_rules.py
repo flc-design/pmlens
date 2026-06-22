@@ -43,13 +43,15 @@ class TestRulesModule:
         assert isinstance(TEMPLATE_VERSION, int)
         assert TEMPLATE_VERSION >= 1
 
-    def test_template_version_pinned_at_v10(self):
-        # ADR-008 4th-tier guard: a bump must be intentional. v10 adds the
-        # branch-aware recall rule (non-plugin hosts must re-derive the branch
-        # from .git/HEAD and pass it as pm_recall(track=...)) — PMSERV-125 /
-        # ADR-028. v9 added the X content pipeline rule (PMSERV-119 / ADR-024);
-        # v8 added the memory-layer routing rule (PMSERV-111 / ADR-023).
-        assert TEMPLATE_VERSION == 10
+    def test_template_version_pinned_at_v11(self):
+        # ADR-008 4th-tier guard: a bump must be intentional. v11 is the PM Lens
+        # rebrand — the rule-section heading "PM Server 自動行動ルール" becomes
+        # "PM Lens 自動行動ルール", so the bump re-injects the new heading into
+        # existing CLAUDE.md/AGENTS.md (marker slug unchanged) — PMSERV-136 /
+        # ADR-032. v10 added the branch-aware recall rule (PMSERV-125 / ADR-028);
+        # v9 the X content pipeline rule (PMSERV-119 / ADR-024); v8 the
+        # memory-layer routing rule (PMSERV-111 / ADR-023).
+        assert TEMPLATE_VERSION == 11
 
     def test_template_contains_x_content_pipeline_section(self):
         # PMSERV-119: the on-signal trigger rule must be present in the

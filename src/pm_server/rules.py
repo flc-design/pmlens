@@ -30,7 +30,7 @@ TARGET_FILES: dict[str, str] = {
     "codex": "AGENTS.md",
 }
 
-TEMPLATE_VERSION = 10
+TEMPLATE_VERSION = 11
 BEGIN_MARKER = "<!-- pm-server:begin v={version} -->"
 END_MARKER = "<!-- pm-server:end -->"
 BEGIN_PATTERN = re.compile(r"<!-- pm-server:begin v=(\d+) -->")
@@ -38,7 +38,7 @@ OTHER_SECTION_PATTERN = re.compile(r"<!-- ([\w-]+):begin")
 
 CLAUDEMD_TEMPLATE = """\
 <!-- pm-server:begin v={version} -->
-## PM Server 自動行動ルール（必ず従うこと）
+## PM Lens 自動行動ルール（必ず従うこと）
 
 ### セッション開始時（最初の応答の前に必ず実行）
 1. pm_status を MCP ツールとして実行し、現在の進捗を表示する
