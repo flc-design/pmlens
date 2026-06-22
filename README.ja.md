@@ -174,7 +174,7 @@ pm-server uninstall --target auto
 
 ### プロジェクトルール注入 (CLAUDE.md / AGENTS.md)
 
-`pm_init` と `pm_update_rules` は PM Server の自動行動ルールを host 毎の
+`pm_init` と `pm_update_rules` は PM Lens の自動行動ルールを host 毎の
 適切な指示ファイルに同期します:
 
 | Host          | 指示ファイル     |
@@ -303,7 +303,7 @@ pm-server uninstall --target auto
 
 | ツール | 説明 |
 |---|---|
-| `pm_update_rules` | CLAUDE.md / AGENTS.md の PM Server ルールセクションを最新版に更新（マルチホスト対応、ADR-008）。デフォルト `target=auto` でインストール済 host を自動検出 |
+| `pm_update_rules` | CLAUDE.md / AGENTS.md の PM Lens ルールセクションを最新版に更新（マルチホスト対応、ADR-008）。デフォルト `target=auto` でインストール済 host を自動検出 |
 | `pm_update_claudemd` | レガシー alias of `pm_update_rules(target="claude-code")` — v0.6.0 以降 deprecated、v1.0.0 で削除 |
 
 ---
@@ -464,12 +464,12 @@ pm-server discover .       # .pm/ を持つプロジェクトをスキャン
 pm-server status           # ターミナルからステータス確認
 pm-server context-inject   # セッションコンテキストを stdout に出力（hook 連携用）
 pm-server migrate          # pm-agent からの移行（MCP 登録の切り替え）
-pm-server update-rules     # PM Server ルールを CLAUDE.md / AGENTS.md に注入（ADR-008）。
+pm-server update-rules     # PM Lens ルールを CLAUDE.md / AGENTS.md に注入（ADR-008）。
                            # --target {auto,all,claude-code,codex} (default: auto)
                            # --dry-run / --all (登録された全プロジェクトに適用)
 pm-server update-claudemd  # レガシー alias of `update-rules --target=claude-code`。v0.6.0 以降 deprecated
 pm-server install-hooks    # Claude Code の hook を手動インストール（通常は pm_status で自動）
-pm-server uninstall-hooks  # PM Server の hook を削除
+pm-server uninstall-hooks  # PM Lens の hook を削除
 ```
 
 ---

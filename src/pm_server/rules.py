@@ -1,4 +1,4 @@
-"""Project rules auto-management for PM Server.
+"""Project rules auto-management for PM Lens.
 
 Manages a marker-delimited section in target rule files (``CLAUDE.md``
 for Claude Code; ``AGENTS.md`` for Codex CLI). This module is the
@@ -166,7 +166,7 @@ pm-server は X 認証情報も投稿機能も持たず、自動投稿は構造�
 
 
 def get_claudemd_status(project_root: Path) -> dict:
-    """Return the PM Server section status in CLAUDE.md.
+    """Return the PM Lens section status in CLAUDE.md.
 
     Returns:
         dict with keys: exists, has_pm_section, version, up_to_date,
@@ -214,7 +214,7 @@ def _separator_for(content: str) -> str:
 
 
 def ensure_claudemd(project_root: Path) -> str:
-    """Ensure CLAUDE.md has the PM Server rules section.
+    """Ensure CLAUDE.md has the PM Lens rules section.
 
     Called from pm_init. Behavior:
     - No CLAUDE.md -> create with PM section
@@ -231,24 +231,24 @@ def ensure_claudemd(project_root: Path) -> str:
 
     if not status["exists"]:
         claude_md.write_text(template + "\n", encoding="utf-8")
-        return "created CLAUDE.md with PM Server rules"
+        return "created CLAUDE.md with PM Lens rules"
 
     content = claude_md.read_text(encoding="utf-8")
 
     if not status["has_pm_section"]:
         separator = _separator_for(content)
         claude_md.write_text(content + separator + template + "\n", encoding="utf-8")
-        return "appended PM Server rules to CLAUDE.md"
+        return "appended PM Lens rules to CLAUDE.md"
 
     if status["up_to_date"]:
-        return "CLAUDE.md already has up-to-date PM Server rules (skipped)"
+        return "CLAUDE.md already has up-to-date PM Lens rules (skipped)"
 
     # Old version -> replace
     return _replace_pm_section(claude_md, content, template)
 
 
 def update_claudemd(project_root: Path) -> str:
-    """Update the PM Server rules section to the latest template.
+    """Update the PM Lens rules section to the latest template.
 
     Called from the pm_update_claudemd MCP tool. Unlike ensure_claudemd,
     this always replaces regardless of version.
@@ -262,14 +262,14 @@ def update_claudemd(project_root: Path) -> str:
 
     if not status["exists"]:
         claude_md.write_text(template + "\n", encoding="utf-8")
-        return "created CLAUDE.md with PM Server rules"
+        return "created CLAUDE.md with PM Lens rules"
 
     content = claude_md.read_text(encoding="utf-8")
 
     if not status["has_pm_section"]:
         separator = _separator_for(content)
         claude_md.write_text(content + separator + template + "\n", encoding="utf-8")
-        return "appended PM Server rules to CLAUDE.md"
+        return "appended PM Lens rules to CLAUDE.md"
 
     return _replace_pm_section(claude_md, content, template)
 
@@ -286,19 +286,19 @@ def _replace_pm_section(claude_md: Path, content: str, template: str) -> str:
         new_content = before + template + after
         claude_md.write_text(new_content, encoding="utf-8")
         old_version = int(begin_match.group(1))
-        return f"updated PM Server rules in CLAUDE.md (v{old_version} → v{TEMPLATE_VERSION})"
+        return f"updated PM Lens rules in CLAUDE.md (v{old_version} → v{TEMPLATE_VERSION})"
 
     if begin_match and end_idx == -1:
         # Corrupted: begin marker exists but no end marker — remove begin and everything after it
         before = content[: begin_match.start()]
         new_content = before.rstrip() + "\n\n" + template + "\n"
         claude_md.write_text(new_content, encoding="utf-8")
-        return "replaced corrupted PM Server section in CLAUDE.md"
+        return "replaced corrupted PM Lens section in CLAUDE.md"
 
     # No markers at all — fallback to append
     separator = _separator_for(content)
     claude_md.write_text(content + separator + template + "\n", encoding="utf-8")
-    return "appended PM Server rules to CLAUDE.md (no markers found)"
+    return "appended PM Lens rules to CLAUDE.md (no markers found)"
 
 
 # --- PMSERV-044: multi-host detection + injection layer -------------------
@@ -429,7 +429,7 @@ InjectStatus = Literal[
 
 @dataclass(frozen=True)
 class InjectResult:
-    """Outcome of injecting PM Server rules into a single rule file.
+    """Outcome of injecting PM Lens rules into a single rule file.
 
     Backward-compat-sensitive substrings in ``message`` are kept for
     legacy ``pm_update_claudemd`` callers (the v0.4.x dict shape is
@@ -535,7 +535,7 @@ def _inject_into_file(
             target_file=target_file,
             host=host,
             status="created",
-            message=f"created {target_file} with PM Server rules",
+            message=f"created {target_file} with PM Lens rules",
             is_dry_run=dry_run,
         )
 
@@ -568,26 +568,26 @@ def _inject_into_file(
             # create a spurious CLAUDE.md backup for a no change (PMSERV-062).
             status = "skipped"
             message = (
-                f"PM Server rules in {target_file} already up to date "
+                f"PM Lens rules in {target_file} already up to date "
                 f"(v{TEMPLATE_VERSION}); no changes"
             )
         else:
             status = "updated"
             message = (
-                f"updated PM Server rules in {target_file} (v{old_version} → v{TEMPLATE_VERSION})"
+                f"updated PM Lens rules in {target_file} (v{old_version} → v{TEMPLATE_VERSION})"
             )
     elif begin_match and end_idx == -1:
         # Corrupted: begin without end — treat as replace-from-corruption
         before = content[: begin_match.start()]
         new_content = before.rstrip() + "\n\n" + template + "\n"
         status = "updated"
-        message = f"replaced corrupted PM Server section in {target_file}"
+        message = f"replaced corrupted PM Lens section in {target_file}"
     else:
         # No markers — append
         separator = _separator_for(content)
         new_content = content + separator + template + "\n"
         status = "appended"
-        message = f"appended PM Server rules to {target_file}"
+        message = f"appended PM Lens rules to {target_file}"
 
     # Backup + write only when the content actually changes. A no-op (status
     # "skipped" above) must not create a spurious backup or rewrite the file
@@ -686,7 +686,7 @@ def inject_pm_rules(
     target: str = "auto",
     dry_run: bool = False,
 ) -> InjectSummary:
-    """Inject PM Server rules into per-host rule files.
+    """Inject PM Lens rules into per-host rule files.
 
     Args:
         project_root: Project root directory holding the rule files.

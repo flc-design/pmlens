@@ -1,4 +1,4 @@
-"""FastMCP server with all PM Server tools."""
+"""FastMCP server with all PM Lens tools."""
 
 from __future__ import annotations
 
@@ -412,7 +412,7 @@ def pm_init(project_path: str | None = None, project_name: str | None = None) ->
     # Register in global registry
     register_project(root, project.name)
 
-    # Ensure CLAUDE.md has PM Server rules
+    # Ensure CLAUDE.md has PM Lens rules
     from .claudemd import ensure_claudemd
 
     claudemd_result = ensure_claudemd(root)
@@ -2122,10 +2122,10 @@ def pm_cleanup() -> dict:
 
 @_tool()
 def pm_update_claudemd(project_path: str | None = None) -> dict:
-    """Update the PM Server rules section in CLAUDE.md to the latest version.
+    """Update the PM Lens rules section in CLAUDE.md to the latest version.
 
     Creates CLAUDE.md if it doesn't exist.
-    Uses markers to identify and replace only the PM Server section.
+    Uses markers to identify and replace only the PM Lens section.
     Other content in CLAUDE.md is preserved.
 
     .. deprecated:: 0.6.0
@@ -2163,7 +2163,7 @@ def pm_update_rules(
     target: str = "auto",
     dry_run: bool = False,
 ) -> dict:
-    """Inject PM Server rules into CLAUDE.md and/or AGENTS.md.
+    """Inject PM Lens rules into CLAUDE.md and/or AGENTS.md.
 
     Args:
         project_path: Project root. Auto-detected if omitted.

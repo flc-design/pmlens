@@ -63,11 +63,11 @@ class TestProjectStorage:
     def test_yaml_has_header(self, tmp_pm_path, sample_project):
         _save_project(tmp_pm_path, sample_project)
         content = (tmp_pm_path / "project.yaml").read_text()
-        assert content.startswith("# PM Server - project.yaml")
+        assert content.startswith("# PM Lens - project.yaml")
 
     def test_load_legacy_yaml_without_pm_schema(self, tmp_pm_path):
         legacy = (
-            "# PM Server - project.yaml\n"
+            "# PM Lens - project.yaml\n"
             "name: legacy-proj\n"
             "display_name: Legacy\n"
             "version: 0.5.1\n"

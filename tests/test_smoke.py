@@ -39,7 +39,7 @@ def _assert_no_duplicate_dry_run_tags(output: str) -> None:
     """No output line may contain more than one `[dry-run]` tag.
 
     PMSERV-039 regression: the bug produced lines like
-    `✓ [dry-run] claude-code: [dry-run] would register PM Server...`
+    `✓ [dry-run] claude-code: [dry-run] would register PM Lens...`
     where the tag appeared twice because both the renderer and the
     message constructor added it. The fix made the CLI renderer
     (__main__.py::_print_install_summary, _print_inject_summary) the

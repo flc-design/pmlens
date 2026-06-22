@@ -981,7 +981,7 @@ class TestInstallCodex:
                 command = "npx"
                 args = ["-y", "@modelcontextprotocol/server-filesystem"]
 
-                # PM Server section comment
+                # PM Lens section comment
                 [mcp_servers.pm-server]
                 command = "/old/pm-server"
                 args = ["serve"]
@@ -993,7 +993,7 @@ class TestInstallCodex:
         install_codex()
         new_text = fake_codex_config.read_text()
         assert "# Top-of-file comment" in new_text
-        assert "# PM Server section comment" in new_text
+        assert "# PM Lens section comment" in new_text
         assert "[mcp_servers.filesystem]" in new_text
 
     def test_creates_backup(self, fake_codex_config, tmp_path, monkeypatch):
@@ -1355,7 +1355,7 @@ class TestUninstallCodex:
         assert result.status == "uninstalled"
         assert result.is_dry_run is True
         assert result.backup_path is None
-        assert "would remove pm server top-level fields" in result.message.lower()
+        assert "would remove pm lens top-level fields" in result.message.lower()
         assert "sub-tables would be preserved" in result.message.lower()
         # Sub-tables and top-level fields untouched on disk.
         assert fake_codex_config.read_text(encoding="utf-8") == original_content
@@ -1412,7 +1412,7 @@ class TestCliInstallation:
 
     @staticmethod
     def _ok_summary_single_host(target: str = "claude-code") -> InstallSummary:
-        return InstallSummary(results=[InstallResult(target, "installed", "PM Server registered")])
+        return InstallSummary(results=[InstallResult(target, "installed", "PM Lens registered")])
 
     @staticmethod
     def _ok_summary_all_hosts() -> InstallSummary:
@@ -1441,7 +1441,7 @@ class TestCliInstallation:
         assert result.exit_code == 0
         assert captured == {"target": "claude-code", "dry_run": False}
         # Backward-compat: target prefix added but everything else preserved.
-        assert "✓ claude-code: PM Server registered" in result.output
+        assert "✓ claude-code: PM Lens registered" in result.output
 
     def test_install_target_all_renders_hosts_in_known_order(self, monkeypatch):
         from click.testing import CliRunner
@@ -1478,7 +1478,7 @@ class TestCliInstallation:
                     InstallResult(
                         "claude-code",
                         "installed",
-                        "would register PM Server in Claude Code (user scope).",
+                        "would register PM Lens in Claude Code (user scope).",
                         is_dry_run=True,
                     )
                 ]
@@ -1540,7 +1540,7 @@ class TestCliInstallation:
             captured["target"] = target
             captured["dry_run"] = dry_run
             return InstallSummary(
-                results=[InstallResult("claude-code", "uninstalled", "PM Server unregistered")]
+                results=[InstallResult("claude-code", "uninstalled", "PM Lens unregistered")]
             )
 
         monkeypatch.setattr("pm_server.installer.uninstall", fake_uninstall)
@@ -1548,7 +1548,7 @@ class TestCliInstallation:
 
         assert result.exit_code == 0
         assert captured == {"target": "claude-code", "dry_run": False}
-        assert "✓ claude-code: PM Server unregistered" in result.output
+        assert "✓ claude-code: PM Lens unregistered" in result.output
 
 
 # ─── PMSERV-100 / ADR-019 — PM_DESKTOP_WRITE propagation ───────────

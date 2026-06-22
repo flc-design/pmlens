@@ -337,7 +337,7 @@ class TestInjectSummaryDataclass:
             target_file="CLAUDE.md",
             host="claude-code",
             status="updated",
-            message="updated PM Server rules",
+            message="updated PM Lens rules",
         )
         s = InjectSummary(
             results=[r1],
@@ -728,7 +728,7 @@ class TestCliUpdateRules:
                     target_file="CLAUDE.md",
                     host="claude-code",
                     status="created",
-                    message="created CLAUDE.md with PM Server rules",
+                    message="created CLAUDE.md with PM Lens rules",
                     is_dry_run=dry_run,
                 ),
             ],
@@ -746,14 +746,14 @@ class TestCliUpdateRules:
                     target_file="CLAUDE.md",
                     host="claude-code",
                     status="updated",
-                    message="updated PM Server rules in CLAUDE.md",
+                    message="updated PM Lens rules in CLAUDE.md",
                     is_dry_run=dry_run,
                 ),
                 InjectResult(
                     target_file="AGENTS.md",
                     host="codex",
                     status="created",
-                    message="created AGENTS.md with PM Server rules",
+                    message="created AGENTS.md with PM Lens rules",
                     is_dry_run=dry_run,
                 ),
             ],
@@ -786,7 +786,7 @@ class TestCliUpdateRules:
 
         assert result.exit_code == 0
         assert captured == {"target": "auto", "dry_run": False}
-        assert "✓ CLAUDE.md: created CLAUDE.md with PM Server rules" in result.output
+        assert "✓ CLAUDE.md: created CLAUDE.md with PM Lens rules" in result.output
 
     def test_target_codex_dispatch(self, monkeypatch, tmp_path):
         from click.testing import CliRunner
@@ -805,7 +805,7 @@ class TestCliUpdateRules:
                         target_file="AGENTS.md",
                         host="codex",
                         status="created",
-                        message="created AGENTS.md with PM Server rules",
+                        message="created AGENTS.md with PM Lens rules",
                     )
                 ],
                 created=["AGENTS.md"],
@@ -917,7 +917,7 @@ class TestCliUpdateRules:
                         target_file="AGENTS.md",
                         host="codex",
                         status="updated",
-                        message="updated PM Server rules in AGENTS.md (v6 → v7)",
+                        message="updated PM Lens rules in AGENTS.md (v6 → v7)",
                         backup_path=backup,
                     )
                 ],

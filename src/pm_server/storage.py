@@ -1,4 +1,4 @@
-"""YAML file storage for PM Server.
+"""YAML file storage for PM Lens.
 
 All YAML operations use safe_load / safe_dump only (security).
 Output is human-readable with comment headers.
@@ -71,7 +71,7 @@ _LOCKS_GITIGNORE = "*\n!.gitignore\n"
 
 
 def _yaml_header(filename: str) -> str:
-    return f"# PM Server - {filename}\n"
+    return f"# PM Lens - {filename}\n"
 
 
 def _load_yaml(path: Path) -> dict | list | None:

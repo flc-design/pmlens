@@ -370,7 +370,7 @@ def load_redaction_config(pm_path: Path) -> dict:
 
 
 _REDACTION_CONFIG_TEMPLATE = """\
-# PM Server — per-project redaction overrides (.pm/redaction.yaml)
+# PM Lens — per-project redaction overrides (.pm/redaction.yaml)
 # Layered on top of the in-package catalog (redaction.py). safe_load only.
 #
 # allow: literal strings the catalog WOULD scrub but you want kept verbatim
