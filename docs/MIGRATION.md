@@ -31,7 +31,8 @@ cites it.
 1. **Real `pmlens` version: `0.11.0`** — lineage continuation from pm-server
    0.10.0; safely above the reserved 0.0.1 placeholder.
 2. **Keep `pm-server` as a thin rename-wrapper** — a new distribution
-   `name = "pm-server"`, `version = "0.10.1"`, `dependency "pmlens>=0.11.0"`,
+   `name = "pm-server"`, `version = "0.11.0"` (matches pyproject so the plugin's
+   `uvx pm-server@0.11.0` pin resolves to it), `dependency "pmlens>=0.11.0"`,
    with a re-export stub. Lives in a new `packaging/pm-server-wrapper/`
    (mirroring `packaging/pmlens-reservation/`). Published **manually, once**
    (wheel + sdist only, **no** `.mcpb`).
@@ -81,10 +82,17 @@ renames moved to Phase-3; marker slug is invariant). No test references this fil
 ### Step 2 — Version bump `0.10.0` → `0.11.0`
 
 - **Files (one commit):** `pyproject.toml:7`, `manifest.json:5`,
-  `src/pm_server/__init__.py:3`.
+  `src/pm_server/__init__.py:3`, `uv.lock` (workspace entry), **and the plugin
+  version surfaces** — `plugin/.claude-plugin/plugin.json` (`version`),
+  `.claude-plugin/marketplace.json` (`metadata.version`), `plugin/.mcp.json`
+  (`uvx pm-server@` pin → `pm-server@0.11.0`), `plugin/README.md` pins.
 - **Lockstep:** `tests/test_manifest.py` (~45-48 `test_version_matches_pyproject`,
-  ~51-63 `test_init_version_matches_pyproject`) reads all three and asserts
-  equality — no test edit needed, but all three files **must** be in this commit.
+  ~51-63 `test_init_version_matches_pyproject`) **and**
+  `tests/test_plugin.py::TestPluginVersionSync` (4 tests) require *every* version
+  surface — including the plugin pins — to equal pyproject. The plugin surfaces
+  are therefore **not** deferrable (discovered by the full-suite gate, not the
+  recon plan). The pin keeps the `pm-server` name (resolved by the wrapper);
+  `uvx pm-server@0.11.0` becomes installable once the wrapper ships in Step 6.
 - Do **not** change `pyproject` `name=` here (that is the irreversible Step 6).
   Leave `TEMPLATE_VERSION` alone (it moves in Step 4).
 - **Verify:** `pytest tests/test_manifest.py`.
@@ -147,19 +155,20 @@ its test assertions to avoid a split-brain state.
   - reserved `pmlens` 0.0.1 confirmed `< 0.11.0`.
 - Publish: push tag `v0.11.0` → `release.yml` stops at the **`pypi` environment
   manual approval** (the sole one-way door) → OIDC Trusted Publisher uploads.
-- **Within hours:** manually publish the `pm-server` wrapper (0.10.1,
+- **Within hours:** manually publish the `pm-server` wrapper (0.11.0,
   `dependency pmlens>=0.11.0`) so `pip install pm-server` / `uvx pm-server` /
-  the plugin pin never break.
+  the committed plugin pin `uvx pm-server@0.11.0` all resolve.
 - **Verify:** `pip install pmlens==0.11.0` works; PyPI shows 0.11.0 shadowing
   0.0.1; `pip install pm-server` resolves to pmlens via the wrapper.
 
 ### Post-publish follow-ups (separate commits, not in Steps 1-6)
 
-- **Plugin uvx pin** — *only after* pmlens is live: flip
-  `plugin/.mcp.json:5` `pm-server@0.10.0` → `pmlens@0.11.0` (and the `:3` key if
-  Phase-3 lands) with `plugin/README.md` pins and `tests/test_plugin.py` regexes
-  (~218-240) in lockstep. uvx resolves the pin against the live index, so this
-  must not precede publish.
+- **Plugin version pin** — the plugin's `uvx pm-server@` pin and the
+  `plugin.json` / `marketplace.json` versions are bumped to `0.11.0` in **Step 2**
+  (enforced by `tests/test_plugin.py::TestPluginVersionSync` — cannot be
+  deferred). The pin keeps the `pm-server` package name, resolved by the wrapper;
+  it becomes installable once the wrapper@0.11.0 ships (Step 6). Flipping the pin's
+  package name to `pmlens` and the `.mcp.json` `:3` registration key is **Phase-3**.
 - **SKILL.md sync** — `skill/SKILL.md` and `plugin/skills/pm/SKILL.md` have
   diverged (plugin variant is the superset). No test enforces equality;
   converge in a dedicated docs cleanup (non-blocking).
