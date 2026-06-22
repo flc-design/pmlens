@@ -1,0 +1,42 @@
+# Minimal name-reservation distribution for "pmlens".
+#
+# This is NOT the real PM Lens package. It exists only to claim the `pmlens`
+# name on PyPI (under the flc-design account) ahead of the Phase-2 rename
+# migration, so the name cannot be squatted in the interim.
+#
+# The real package currently ships as `pm-server`. The full entity migration
+# (import rename, MCP key, rename-wrapper, etc.) is tracked in docs/MIGRATION.md.
+#
+# Version is intentionally pinned at 0.0.1 so it stays below any real release
+# (>=0.11.0): once the real `pmlens` ships, `pip install pmlens` resolves to it
+# automatically and this placeholder never shadows it.
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pmlens"
+version = "0.0.1"
+description = "PM Lens — name reservation placeholder. The project currently ships as 'pm-server'; this reserves the future 'pmlens' name."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+authors = [{ name = "Shinichi Nakazato" }]
+maintainers = [{ name = "FLC design Co., Ltd." }]
+keywords = ["placeholder", "name-reservation", "pm-server", "pmlens", "pm-lens"]
+classifiers = [
+    "Development Status :: 1 - Planning",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+
+[project.urls]
+Homepage = "https://github.com/flc-design/pmlens"
+Repository = "https://github.com/flc-design/pmlens"
+Issues = "https://github.com/flc-design/pmlens/issues"
+
+[tool.setuptools]
+packages = ["pmlens"]
