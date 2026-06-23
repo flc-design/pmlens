@@ -83,6 +83,25 @@ pip install --upgrade pm-server
 > レガシーの `pm_update_claudemd` ツールは後方互換 alias として引き続き利用可能（CLAUDE.md 限定）。
 > v0.6.0 以降 `DeprecationWarning` を発火、v1.0.0 で削除予定（PMSERV-055）。
 
+### トラブルシューティング: アップデート後に MCP が接続できない
+
+`pip install --upgrade` 直後に Claude Code が MCP 接続失敗（または `pm-server: ENOENT`）を
+報告する場合、多くは **インストールの中断** が原因です。pip が展開の途中で止まる
+（Ctrl-C・スリープ・ディスク不足）と、パッケージが半分だけ書き込まれた状態になり、
+`pip list` は「インストール済み」と表示するのに、一部のモジュールと `pm-server`
+コンソールスクリプトが欠落 → ランチャーが見つからない、という症状になります。
+
+コードパッケージ（`pmlens`）を強制クリーン再インストールして復旧します:
+
+```bash
+pip install --force-reinstall --no-deps pmlens==<version>
+pyenv rehash          # pyenv 利用時のみ — shim を再生成
+pm-server --help      # 確認 → "PM Lens — ..."
+```
+
+MCP サーバーは起動時のみ接続するため、復旧後は **Claude Code を再起動** してください
+（実行中セッションでは失敗した接続は自動再試行されません）。
+
 ### プロジェクト初期化
 
 ```

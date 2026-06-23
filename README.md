@@ -84,6 +84,25 @@ You can also update manually:
 > (CLAUDE.md only). It emits a `DeprecationWarning` since v0.6.0 and is slated
 > for removal in v1.0.0 (PMSERV-055).
 
+### Troubleshooting: MCP fails to connect after an update
+
+If Claude Code reports an MCP connection failure (or `pm-server: ENOENT`) right
+after `pip install --upgrade`, the usual cause is an **interrupted install**. If
+pip is stopped mid-extraction (Ctrl-C, sleep, low disk), the package can be left
+half-written: `pip list` still shows it as installed, but some modules and the
+`pm-server` console script are missing — so the launcher can't be found.
+
+Recover with a forced clean reinstall of the code package (`pmlens`):
+
+```bash
+pip install --force-reinstall --no-deps pmlens==<version>
+pyenv rehash          # pyenv users only — regenerate the shim
+pm-server --help      # verify → "PM Lens — ..."
+```
+
+MCP servers connect only at startup, so **restart Claude Code** afterward (a
+failed connection is not retried within a running session).
+
 ### Initialize a project
 
 ```
