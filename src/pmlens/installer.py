@@ -27,6 +27,7 @@ Public surface:
 
 from __future__ import annotations
 
+import copy
 import os
 import shutil
 import subprocess
@@ -786,3 +787,367 @@ def migrate_from_pm_agent():
                     print(f"⚠ {claude_md} contains 'pm-agent' references — please update manually")
 
     print("\n✓ Migration complete. Restart Claude Code to activate.")
+
+
+# --- Phase-3 rebrand migration: pm-server identity -> pmlens ---------------
+#
+# PMSERV-137 / ADR-034. The user-facing namespace flip (FastMCP name + the
+# `pm-server` registration KEY -> `pmlens`) lands in step 6; this updater is
+# built and tested BEFORE the flip and goes live with it. It moves an existing
+# install from the legacy identity to the new one across three surfaces —
+# Claude Code MCP key, Codex config table, and settings.json auto-approve
+# permissions — on the SAME structured framework as install()/_safe_call/
+# InstallSummary/dry_run (NOT cloned from the print-based migrate_from_pm_agent).
+# Every mutating path is dry-run previewable, writes a timestamped backup, and is
+# idempotent/re-runnable. The settings.json perm rewrite is ADDITIVE (the legacy
+# entries are kept) so it is harmless and reversible.
+
+#: Legacy vs new MCP registration key (server-name) and settings.json perm prefix.
+_OLD_MCP_KEY = "pm-server"
+_NEW_MCP_KEY = "pmlens"
+_LEGACY_PERM_PREFIX = "mcp__pm-server__"
+_NEW_PERM_PREFIX = "mcp__pmlens__"
+
+#: Result target labels for the migrate surfaces.
+_SETTINGS_TARGET = "claude-code-settings"
+
+
+def migrate_claude_code(*, dry_run: bool = False) -> InstallResult:
+    """Re-register the Claude Code MCP server under the new ``pmlens`` key.
+
+    Probes for the legacy ``pm-server`` registration; if present, registers
+    ``pmlens`` (user scope, mirroring :func:`install_claude_code`'s env
+    propagation) and removes the old key. Idempotent: a machine with no
+    legacy registration yields ``status="skipped"``.
+
+    SCOPE NOTE: ``claude mcp`` add/remove/get are driven at ``--scope user``
+    (the framework-wide convention). A ``pm-server`` registered at *project*
+    or *local* scope is NOT enumerable here and is surfaced as an explicit
+    manual-removal instruction in the message rather than silently reported
+    clean (ADR-034 residual risk: SCOPE LEAK).
+    """
+    claude_path = shutil.which("claude")
+    if claude_path is None:
+        return InstallResult(
+            target="claude-code",
+            status="skipped",
+            message="claude command not found. Install Claude Code first.",
+            is_dry_run=dry_run,
+        )
+
+    probe = subprocess.run(
+        [claude_path, "mcp", "get", _OLD_MCP_KEY],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if probe.returncode != 0:
+        return InstallResult(
+            target="claude-code",
+            status="skipped",
+            message=(
+                f"{_OLD_MCP_KEY} not registered in Claude Code (user scope) — nothing to migrate"
+            ),
+            is_dry_run=dry_run,
+        )
+
+    scope_note = (
+        f" If {_OLD_MCP_KEY} is also registered at project or local scope, remove it "
+        f"manually with `claude mcp remove {_OLD_MCP_KEY} --scope project|local`."
+    )
+
+    if dry_run:
+        return InstallResult(
+            target="claude-code",
+            status="installed",
+            message=(
+                f"would register {_NEW_MCP_KEY} and remove {_OLD_MCP_KEY} (user scope)."
+                + scope_note
+            ),
+            is_dry_run=True,
+        )
+
+    pm_server_path = shutil.which("pm-server")
+    if pm_server_path is None:
+        return InstallResult(
+            target="claude-code",
+            status="failed",
+            message="pm-server command not found in PATH",
+            is_dry_run=dry_run,
+        )
+
+    add_cmd: list[str] = [
+        claude_path,
+        "mcp",
+        "add",
+        "--transport",
+        "stdio",
+        "--scope",
+        "user",
+    ]
+    if _lens_mode_active():
+        add_cmd.extend(["--env", "PM_LENS=1"])
+    if _desktop_write_mode_active():
+        add_cmd.extend(["--env", "PM_DESKTOP_WRITE=1"])
+    add_cmd.extend([_NEW_MCP_KEY, "--", pm_server_path, "serve"])
+
+    add = subprocess.run(add_cmd, capture_output=True, text=True, timeout=10)
+    if add.returncode != 0:
+        return InstallResult(
+            target="claude-code",
+            status="failed",
+            message=f"failed to register {_NEW_MCP_KEY}: {add.stderr}",
+            is_dry_run=dry_run,
+        )
+
+    remove = subprocess.run(
+        [claude_path, "mcp", "remove", _OLD_MCP_KEY, "--scope", "user"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if remove.returncode != 0:
+        return InstallResult(
+            target="claude-code",
+            status="failed",
+            message=(
+                f"registered {_NEW_MCP_KEY} but failed to remove {_OLD_MCP_KEY}: {remove.stderr}"
+            ),
+            is_dry_run=dry_run,
+        )
+
+    return InstallResult(
+        target="claude-code",
+        status="installed",
+        message=(
+            f"migrated Claude Code: {_OLD_MCP_KEY} -> {_NEW_MCP_KEY} (user scope). "
+            "Restart Claude Code to activate." + scope_note
+        ),
+        is_dry_run=dry_run,
+    )
+
+
+def migrate_codex(*, dry_run: bool = False) -> InstallResult:
+    """Re-key the Codex ``[mcp_servers.pm-server]`` table to ``[mcp_servers.pmlens]``.
+
+    Deep-copies the ENTIRE legacy table — including user-authored
+    ``[mcp_servers.pm-server.tools.*]`` and ``env`` sub-tables — to the new
+    key, then deletes the old key. The deep-copy is load-bearing: tomlkit
+    containers hold live references, so a plain ``servers["pmlens"] =
+    servers["pm-server"]`` assignment would alias the same object and corrupt
+    (or orphan) the sub-tables when the old key is deleted. Routing through
+    ``uninstall_codex`` + ``install_codex`` is also wrong — uninstall preserves
+    user sub-tables UNDER the old key and install builds a fresh table without
+    them (silent config loss). Idempotent + timestamped backup.
+    """
+    config_path = _codex_config_path()
+    if not config_path.exists():
+        return InstallResult(
+            target="codex",
+            status="skipped",
+            message="~/.codex/config.toml not found — Codex CLI not installed",
+            is_dry_run=dry_run,
+        )
+
+    doc = tomlkit.parse(config_path.read_text(encoding="utf-8"))
+    servers = doc.get("mcp_servers")
+    if not servers or _OLD_MCP_KEY not in servers:
+        return InstallResult(
+            target="codex",
+            status="skipped",
+            message=f"{_OLD_MCP_KEY} not registered in Codex — nothing to migrate",
+            is_dry_run=dry_run,
+        )
+    if _NEW_MCP_KEY in servers:
+        return InstallResult(
+            target="codex",
+            status="already_registered",
+            message=f"{_NEW_MCP_KEY} already registered in Codex — migration already applied",
+            is_dry_run=dry_run,
+        )
+
+    if dry_run:
+        return InstallResult(
+            target="codex",
+            status="installed",
+            message=(
+                f"would deep-copy [mcp_servers.{_OLD_MCP_KEY}] (incl. tools.*/env "
+                f"sub-tables) to [mcp_servers.{_NEW_MCP_KEY}] then delete the old key. "
+                "Would back up to ~/.codex/config.toml.bak.<ts> before write."
+            ),
+            backup_path=None,
+            is_dry_run=True,
+        )
+
+    backup_path = _backup_codex_config(config_path)
+    # Deep-copy so user sub-tables survive byte-for-byte under the new key; a
+    # plain move would alias live tomlkit refs and orphan them on delete.
+    servers[_NEW_MCP_KEY] = copy.deepcopy(servers[_OLD_MCP_KEY])
+    del servers[_OLD_MCP_KEY]
+    _atomic_write_toml(config_path, doc)
+
+    return InstallResult(
+        target="codex",
+        status="installed",
+        message=(
+            f"migrated Codex: [mcp_servers.{_OLD_MCP_KEY}] -> "
+            f"[mcp_servers.{_NEW_MCP_KEY}] (sub-tables preserved). Backup at {backup_path}."
+        ),
+        backup_path=str(backup_path),
+        is_dry_run=dry_run,
+    )
+
+
+def migrate_settings_perms(*, dry_run: bool = False) -> InstallResult:
+    """Additively rewrite ``mcp__pm-server__*`` auto-approve perms to ``mcp__pmlens__*``.
+
+    Walks ``permissions.{allow,ask,deny}`` in ``~/.claude/settings.json`` and,
+    for every legacy ``mcp__pm-server__<tool>`` entry, APPENDS the
+    ``mcp__pmlens__<tool>`` twin if it is missing — the legacy entry is KEPT.
+    This is the fix for the one silent-breakage surface: after the namespace
+    flip, auto-approved tools would otherwise revert to prompting. Additive
+    means idempotent, harmless, and reversible (a downgrade still matches the
+    retained old entries). Timestamped backup before write.
+    """
+    from . import hooks
+
+    path = hooks._settings_path()
+    settings = hooks._load_settings(path)
+    perms = settings.get("permissions")
+    if not isinstance(perms, dict):
+        return InstallResult(
+            target=_SETTINGS_TARGET,
+            status="skipped",
+            message="no permissions block in settings.json — nothing to migrate",
+            is_dry_run=dry_run,
+        )
+
+    additions: dict[str, list[str]] = {}
+    total = 0
+    for list_name in ("allow", "ask", "deny"):
+        entries = perms.get(list_name)
+        if not isinstance(entries, list):
+            continue
+        existing = {e for e in entries if isinstance(e, str)}
+        new_entries: list[str] = []
+        for entry in entries:
+            if isinstance(entry, str) and entry.startswith(_LEGACY_PERM_PREFIX):
+                twin = _NEW_PERM_PREFIX + entry[len(_LEGACY_PERM_PREFIX) :]
+                if twin not in existing and twin not in new_entries:
+                    new_entries.append(twin)
+        if new_entries:
+            additions[list_name] = new_entries
+            total += len(new_entries)
+
+    if total == 0:
+        return InstallResult(
+            target=_SETTINGS_TARGET,
+            status="skipped",
+            message="no mcp__pm-server__* permissions to migrate",
+            is_dry_run=dry_run,
+        )
+
+    if dry_run:
+        return InstallResult(
+            target=_SETTINGS_TARGET,
+            status="installed",
+            message=(
+                f"would additively add {total} mcp__pmlens__* permission(s) "
+                "(keeping the existing mcp__pm-server__* entries) and back up "
+                "settings.json first."
+            ),
+            is_dry_run=True,
+        )
+
+    backup = _timestamped_backup(path)
+    for list_name, new_entries in additions.items():
+        perms[list_name].extend(new_entries)
+    hooks._save_settings(path, settings)
+
+    return InstallResult(
+        target=_SETTINGS_TARGET,
+        status="installed",
+        message=(
+            f"added {total} mcp__pmlens__* permission(s) additively "
+            f"(mcp__pm-server__* kept). Backup at {backup}."
+        ),
+        backup_path=str(backup),
+        is_dry_run=dry_run,
+    )
+
+
+def migrate_to_pmlens(*, dry_run: bool = False) -> InstallSummary:
+    """Orchestrate the full pm-server -> pmlens migration across every surface.
+
+    Runs the Claude Code re-registration, the Codex table re-key, and the
+    settings.json additive perm rewrite, each isolated via :func:`_safe_call`
+    so one surface's failure never aborts the others (ADR-007 case C). Returns
+    an :class:`InstallSummary`; ``dry_run`` previews all three without writing.
+    """
+    results = [
+        _safe_call(lambda: migrate_claude_code(dry_run=dry_run), "claude-code"),
+        _safe_call(lambda: migrate_codex(dry_run=dry_run), "codex"),
+        _safe_call(lambda: migrate_settings_perms(dry_run=dry_run), _SETTINGS_TARGET),
+    ]
+    return InstallSummary(results=results)
+
+
+def legacy_pm_server_awareness(*, identity_is_pmlens: bool) -> dict | None:
+    """Read-only awareness probe for the pm-server -> pmlens cutover (ADR-034).
+
+    Returns a banner dict when THIS build runs the new ``pmlens`` identity
+    (``identity_is_pmlens=True`` — true only after the step-6 FastMCP-name flip)
+    AND the user still has legacy ``pm-server`` config: ``mcp__pm-server__*``
+    permissions in ``~/.claude/settings.json`` and/or a ``[mcp_servers.pm-server]``
+    table in ``~/.codex/config.toml``. The banner carries the count of permission
+    entries that ``migrate-from-pm-server`` would rewrite, so the user sees the
+    blast radius before running it. Returns ``None`` otherwise.
+
+    Reads config files ONLY — it never spawns ``claude mcp get`` nor shells to
+    git, honouring the read-path RO invariant (ADR-028). Fully defensive: any
+    parse/IO error is treated as "no legacy config" so a read tool never raises.
+    """
+    if not identity_is_pmlens:
+        return None
+
+    from . import hooks
+
+    perm_entries = 0
+    try:
+        settings = hooks._load_settings(hooks._settings_path())
+        perms = settings.get("permissions")
+        if isinstance(perms, dict):
+            for list_name in ("allow", "ask", "deny"):
+                entries = perms.get(list_name)
+                if isinstance(entries, list):
+                    perm_entries += sum(
+                        1
+                        for e in entries
+                        if isinstance(e, str) and e.startswith(_LEGACY_PERM_PREFIX)
+                    )
+    except Exception:
+        perm_entries = 0
+
+    codex_legacy = False
+    try:
+        config_path = _codex_config_path()
+        if config_path.exists():
+            import tomllib
+
+            doc = tomllib.loads(config_path.read_text(encoding="utf-8"))
+            servers = doc.get("mcp_servers")
+            codex_legacy = isinstance(servers, dict) and _OLD_MCP_KEY in servers
+    except Exception:
+        codex_legacy = False
+
+    if perm_entries == 0 and not codex_legacy:
+        return None
+
+    return {
+        "message": (
+            "PM Server is now PM Lens. Run `pmlens migrate-from-pm-server` to "
+            "re-register the MCP server and migrate your settings."
+        ),
+        "perm_entries": perm_entries,
+        "codex_legacy": codex_legacy,
+    }

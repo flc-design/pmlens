@@ -509,6 +509,24 @@ def pm_status(project_path: str | None = None) -> dict:
                 "call pm_x_drafts_pending to review the redacted draft and post manually",
             ]
 
+    # PMSERV-137 / ADR-034 — read-only pm-server -> pmlens cutover awareness.
+    # Dormant until the step-6 identity flip makes this build's FastMCP name
+    # "pmlens"; it then surfaces a one-command migration prompt (with the
+    # permission-rewrite blast radius) while legacy pm-server config remains.
+    # Probes config files only — no subprocess — honouring the RO read-path
+    # invariant (ADR-028).
+    from .installer import legacy_pm_server_awareness
+
+    awareness = legacy_pm_server_awareness(identity_is_pmlens=(mcp.name == "pmlens"))
+    if awareness is not None:
+        diagnostics["legacy_pm_server"] = awareness
+        detail = (
+            f" ({awareness['perm_entries']} permission(s) to rewrite)"
+            if awareness["perm_entries"]
+            else ""
+        )
+        next_actions = [*next_actions, awareness["message"] + detail]
+
     return {
         "project": {
             "name": project.name,

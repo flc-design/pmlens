@@ -214,6 +214,47 @@ def migrate():
     migrate_from_pm_agent()
 
 
+def _run_migrate_to_pmlens(dry_run: bool) -> None:
+    """Shared body for the pm-server -> pmlens migration CLI commands."""
+    from . import installer
+
+    summary = installer.migrate_to_pmlens(dry_run=dry_run)
+    _print_install_summary(summary)
+    if any(r.status == "failed" for r in summary.results):
+        raise click.exceptions.Exit(1)
+
+
+@cli.command("migrate-from-pm-server")
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Preview the migration across all hosts without writing.",
+)
+def migrate_from_pm_server_cmd(dry_run: bool):
+    """Migrate an existing pm-server install to the PM Lens (pmlens) identity.
+
+    Re-registers the MCP server under the new ``pmlens`` key (Claude Code +
+    Codex), deep-copies the Codex ``[mcp_servers.pm-server]`` table preserving
+    user sub-tables, and additively rewrites ``mcp__pm-server__*`` permissions
+    to ``mcp__pmlens__*`` in settings.json. The legacy ``migrate`` command
+    (pm-agent -> pm-server) is unaffected.
+    """
+    _run_migrate_to_pmlens(dry_run)
+
+
+@cli.command("upgrade")
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Preview the migration across all hosts without writing.",
+)
+def upgrade_cmd(dry_run: bool):
+    """Alias for ``migrate-from-pm-server``."""
+    _run_migrate_to_pmlens(dry_run)
+
+
 @cli.command("context-inject")
 def context_inject_cmd():
     """Print session context to stdout for Claude Code injection.
