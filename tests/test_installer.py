@@ -9,7 +9,7 @@ from unittest.mock import patch
 import pytest
 import tomlkit
 
-from pm_server.installer import (
+from pmlens.installer import (
     InstallResult,
     InstallStatus,
     InstallSummary,
@@ -38,13 +38,13 @@ def fake_codex_config(tmp_path, monkeypatch):
     """
     config_path = tmp_path / ".codex" / "config.toml"
     config_path.parent.mkdir(exist_ok=True)
-    monkeypatch.setattr("pm_server.installer._codex_config_path", lambda: config_path)
+    monkeypatch.setattr("pmlens.installer._codex_config_path", lambda: config_path)
     return config_path
 
 
 class TestInstallMcp:
     def test_pm_server_not_found(self):
-        with patch("pm_server.installer.shutil.which", return_value=None):
+        with patch("pmlens.installer.shutil.which", return_value=None):
             msg = install_mcp()
             assert "pm-server command not found" in msg
 
@@ -52,7 +52,7 @@ class TestInstallMcp:
         def which(name):
             return "/usr/bin/pm-server" if name == "pm-server" else None
 
-        with patch("pm_server.installer.shutil.which", side_effect=which):
+        with patch("pmlens.installer.shutil.which", side_effect=which):
             msg = install_mcp()
             assert "claude command not found" in msg
 
@@ -61,9 +61,9 @@ class TestInstallMcp:
             return f"/usr/bin/{name}"
 
         with (
-            patch("pm_server.installer.shutil.which", side_effect=which),
+            patch("pmlens.installer.shutil.which", side_effect=which),
             patch(
-                "pm_server.installer.subprocess.run",
+                "pmlens.installer.subprocess.run",
                 return_value=_make_result(0),
             ),
         ):
@@ -86,8 +86,8 @@ class TestInstallMcp:
             return _make_result(0)
 
         with (
-            patch("pm_server.installer.shutil.which", side_effect=which),
-            patch("pm_server.installer.subprocess.run", side_effect=mock_run),
+            patch("pmlens.installer.shutil.which", side_effect=which),
+            patch("pmlens.installer.subprocess.run", side_effect=mock_run),
         ):
             msg = install_mcp()
             assert "registered" in msg.lower()
@@ -103,8 +103,8 @@ class TestInstallMcp:
             return _make_result(1, stderr="some error")
 
         with (
-            patch("pm_server.installer.shutil.which", side_effect=which),
-            patch("pm_server.installer.subprocess.run", side_effect=mock_run),
+            patch("pmlens.installer.shutil.which", side_effect=which),
+            patch("pmlens.installer.subprocess.run", side_effect=mock_run),
         ):
             msg = install_mcp()
             assert "failed to register" in msg.lower()
@@ -121,8 +121,8 @@ class TestInstallMcp:
             return _make_result(1) if "get" in cmd else _make_result(0)
 
         with (
-            patch("pm_server.installer.shutil.which", side_effect=which),
-            patch("pm_server.installer.subprocess.run", side_effect=mock_run),
+            patch("pmlens.installer.shutil.which", side_effect=which),
+            patch("pmlens.installer.subprocess.run", side_effect=mock_run),
             pytest.warns(DeprecationWarning, match=r"install_mcp.*1\.0\.0"),
         ):
             install_mcp()
@@ -130,15 +130,15 @@ class TestInstallMcp:
 
 class TestUninstallMcp:
     def test_claude_not_found(self):
-        with patch("pm_server.installer.shutil.which", return_value=None):
+        with patch("pmlens.installer.shutil.which", return_value=None):
             msg = uninstall_mcp()
             assert "claude command not found" in msg
 
     def test_uninstall_success(self):
         with (
-            patch("pm_server.installer.shutil.which", return_value="/usr/bin/claude"),
+            patch("pmlens.installer.shutil.which", return_value="/usr/bin/claude"),
             patch(
-                "pm_server.installer.subprocess.run",
+                "pmlens.installer.subprocess.run",
                 return_value=_make_result(0),
             ),
         ):
@@ -147,9 +147,9 @@ class TestUninstallMcp:
 
     def test_uninstall_not_registered(self):
         with (
-            patch("pm_server.installer.shutil.which", return_value="/usr/bin/claude"),
+            patch("pmlens.installer.shutil.which", return_value="/usr/bin/claude"),
             patch(
-                "pm_server.installer.subprocess.run",
+                "pmlens.installer.subprocess.run",
                 return_value=_make_result(1, stderr="not found"),
             ),
         ):
@@ -159,8 +159,8 @@ class TestUninstallMcp:
     def test_uninstall_mcp_emits_deprecation_warning(self):
         """PMSERV-055: uninstall_mcp deprecation mirrors install_mcp."""
         with (
-            patch("pm_server.installer.shutil.which", return_value="/usr/bin/claude"),
-            patch("pm_server.installer.subprocess.run", return_value=_make_result(0)),
+            patch("pmlens.installer.shutil.which", return_value="/usr/bin/claude"),
+            patch("pmlens.installer.subprocess.run", return_value=_make_result(0)),
             pytest.warns(DeprecationWarning, match=r"uninstall_mcp.*1\.0\.0"),
         ):
             uninstall_mcp()
@@ -178,7 +178,7 @@ class TestMigrateFromPmAgent:
 
         monkeypatch.setattr(subprocess, "run", mock_run)
         monkeypatch.setattr(
-            "pm_server.installer.shutil.which",
+            "pmlens.installer.shutil.which",
             lambda name: "/usr/bin/claude" if name == "claude" else f"/usr/bin/{name}",
         )
 
@@ -188,7 +188,7 @@ class TestMigrateFromPmAgent:
         (registry_dir / "registry.yaml").write_text("projects: []")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
-        from pm_server.installer import migrate_from_pm_agent
+        from pmlens.installer import migrate_from_pm_agent
 
         migrate_from_pm_agent()
 
@@ -206,7 +206,7 @@ class TestInstallClaudeCode:
     """Structured install_claude_code (PMSERV-037)."""
 
     def test_pm_server_not_found_returns_failed(self):
-        with patch("pm_server.installer.shutil.which", return_value=None):
+        with patch("pmlens.installer.shutil.which", return_value=None):
             r = install_claude_code()
             assert r.target == "claude-code"
             assert r.status == "failed"
@@ -216,7 +216,7 @@ class TestInstallClaudeCode:
         def which(name):
             return "/usr/bin/pm-server" if name == "pm-server" else None
 
-        with patch("pm_server.installer.shutil.which", side_effect=which):
+        with patch("pmlens.installer.shutil.which", side_effect=which):
             r = install_claude_code()
             assert r.status == "skipped"
             assert "claude command not found" in r.message
@@ -226,9 +226,9 @@ class TestInstallClaudeCode:
             return f"/usr/bin/{name}"
 
         with (
-            patch("pm_server.installer.shutil.which", side_effect=which),
+            patch("pmlens.installer.shutil.which", side_effect=which),
             patch(
-                "pm_server.installer.subprocess.run",
+                "pmlens.installer.subprocess.run",
                 return_value=_make_result(0),
             ),
         ):
@@ -247,8 +247,8 @@ class TestInstallClaudeCode:
             return _make_result(1) if call_count == 1 else _make_result(0)
 
         with (
-            patch("pm_server.installer.shutil.which", side_effect=which),
-            patch("pm_server.installer.subprocess.run", side_effect=mock_run),
+            patch("pmlens.installer.shutil.which", side_effect=which),
+            patch("pmlens.installer.subprocess.run", side_effect=mock_run),
         ):
             r = install_claude_code()
             assert r.status == "installed"
@@ -267,8 +267,8 @@ class TestInstallClaudeCode:
             return _make_result(1)  # mcp get -> not registered
 
         with (
-            patch("pm_server.installer.shutil.which", side_effect=which),
-            patch("pm_server.installer.subprocess.run", side_effect=mock_run),
+            patch("pmlens.installer.shutil.which", side_effect=which),
+            patch("pmlens.installer.subprocess.run", side_effect=mock_run),
         ):
             r = install_claude_code(dry_run=True)
 
@@ -286,9 +286,9 @@ class TestInstallClaudeCode:
             return f"/usr/bin/{name}"
 
         with (
-            patch("pm_server.installer.shutil.which", side_effect=which),
+            patch("pmlens.installer.shutil.which", side_effect=which),
             patch(
-                "pm_server.installer.subprocess.run",
+                "pmlens.installer.subprocess.run",
                 return_value=_make_result(0),
             ),
         ):
@@ -304,9 +304,9 @@ class TestUninstallClaudeCode:
         """Pre-check distinguishes "not registered" from genuine removal errors."""
 
         with (
-            patch("pm_server.installer.shutil.which", return_value="/usr/bin/claude"),
+            patch("pmlens.installer.shutil.which", return_value="/usr/bin/claude"),
             patch(
-                "pm_server.installer.subprocess.run",
+                "pmlens.installer.subprocess.run",
                 return_value=_make_result(1, stderr="not found"),
             ),
         ):
@@ -324,8 +324,8 @@ class TestUninstallClaudeCode:
             return _make_result(0)  # mcp get -> registered
 
         with (
-            patch("pm_server.installer.shutil.which", return_value="/usr/bin/claude"),
-            patch("pm_server.installer.subprocess.run", side_effect=mock_run),
+            patch("pmlens.installer.shutil.which", return_value="/usr/bin/claude"),
+            patch("pmlens.installer.subprocess.run", side_effect=mock_run),
         ):
             r = uninstall_claude_code(dry_run=True)
 
@@ -351,8 +351,8 @@ class TestUninstallClaudeCode:
             return _make_result(1, stderr="permission denied")
 
         with (
-            patch("pm_server.installer.shutil.which", return_value="/usr/bin/claude"),
-            patch("pm_server.installer.subprocess.run", side_effect=mock_run),
+            patch("pmlens.installer.shutil.which", return_value="/usr/bin/claude"),
+            patch("pmlens.installer.subprocess.run", side_effect=mock_run),
         ):
             r = uninstall_claude_code()
 
@@ -368,7 +368,7 @@ class TestInstallOrchestrator:
         def which(name):
             return "/usr/bin/pm-server" if name == "pm-server" else None
 
-        with patch("pm_server.installer.shutil.which", side_effect=which):
+        with patch("pmlens.installer.shutil.which", side_effect=which):
             summary = install(target="claude-code")
         assert len(summary.results) == 1
         assert summary.results[0].target == "claude-code"
@@ -385,7 +385,7 @@ class TestInstallOrchestrator:
         def which(name):
             return "/usr/bin/pm-server" if name == "pm-server" else None
 
-        with patch("pm_server.installer.shutil.which", side_effect=which):
+        with patch("pmlens.installer.shutil.which", side_effect=which):
             summary = install(target="auto")
         targets = [r.target for r in summary.results]
         assert "claude-code" in targets
@@ -399,8 +399,8 @@ class TestInstallOrchestrator:
             raise RuntimeError("kaboom")
 
         with (
-            patch("pm_server.installer.shutil.which", side_effect=which),
-            patch("pm_server.installer.subprocess.run", side_effect=mock_run),
+            patch("pmlens.installer.shutil.which", side_effect=which),
+            patch("pmlens.installer.subprocess.run", side_effect=mock_run),
         ):
             summary = install(target="auto")
 
@@ -423,9 +423,9 @@ class TestInstallOrchestrator:
     def test_uninstall_target_claude_code_directly(self):
         """uninstall(target='claude-code') dispatches to uninstall_claude_code (PMSERV-040)."""
         with (
-            patch("pm_server.installer.shutil.which", return_value="/usr/bin/claude"),
+            patch("pmlens.installer.shutil.which", return_value="/usr/bin/claude"),
             patch(
-                "pm_server.installer.subprocess.run",
+                "pmlens.installer.subprocess.run",
                 return_value=_make_result(0),
             ),
         ):
@@ -440,7 +440,7 @@ class TestInstallOrchestrator:
         def which(name):
             return "/usr/bin/pm-server" if name == "pm-server" else None
 
-        with patch("pm_server.installer.shutil.which", side_effect=which):
+        with patch("pmlens.installer.shutil.which", side_effect=which):
             summary = install(target="all")
         targets = [r.target for r in summary.results]
         assert targets == ["claude-code", "codex"]
@@ -462,13 +462,13 @@ class TestInstallOrchestrator:
         fake_codex_config.write_text("# stub\n", encoding="utf-8")
 
         with (
-            patch("pm_server.installer.shutil.which", side_effect=which),
+            patch("pmlens.installer.shutil.which", side_effect=which),
             patch(
-                "pm_server.installer.subprocess.run",
+                "pmlens.installer.subprocess.run",
                 return_value=_make_result(1),  # claude mcp get -> not registered
             ),
             patch(
-                "pm_server.installer._resolve_pm_server_path",
+                "pmlens.installer._resolve_pm_server_path",
                 return_value=Path("/usr/bin/pm-server"),
             ),
         ):
@@ -491,9 +491,9 @@ class TestInstallOrchestrator:
         fake_codex_config.write_text(codex_content, encoding="utf-8")
 
         with (
-            patch("pm_server.installer.shutil.which", return_value="/usr/bin/claude"),
+            patch("pmlens.installer.shutil.which", return_value="/usr/bin/claude"),
             patch(
-                "pm_server.installer.subprocess.run",
+                "pmlens.installer.subprocess.run",
                 return_value=_make_result(0),  # mcp get -> registered
             ),
         ):
@@ -570,7 +570,7 @@ class TestInstallSummary:
         drifting apart."""
         from typing import get_args
 
-        from pm_server.installer import _STATUS_PRIORITY
+        from pmlens.installer import _STATUS_PRIORITY
 
         assert set(_STATUS_PRIORITY) == set(get_args(InstallStatus))
         assert len(_STATUS_PRIORITY) == len(get_args(InstallStatus))  # no dupes
@@ -597,20 +597,20 @@ class TestLensModeActive:
 
     @pytest.mark.parametrize("truthy", ["1", "true", "True", "yes", "ON"])
     def test_truthy_values(self, truthy, monkeypatch):
-        from pm_server.installer import _lens_mode_active
+        from pmlens.installer import _lens_mode_active
 
         monkeypatch.setenv("PM_LENS", truthy)
         assert _lens_mode_active() is True
 
     @pytest.mark.parametrize("falsy", ["0", "false", "no", "", "off"])
     def test_falsy_values(self, falsy, monkeypatch):
-        from pm_server.installer import _lens_mode_active
+        from pmlens.installer import _lens_mode_active
 
         monkeypatch.setenv("PM_LENS", falsy)
         assert _lens_mode_active() is False
 
     def test_unset_is_false(self, monkeypatch):
-        from pm_server.installer import _lens_mode_active
+        from pmlens.installer import _lens_mode_active
 
         monkeypatch.delenv("PM_LENS", raising=False)
         assert _lens_mode_active() is False
@@ -635,8 +635,8 @@ class TestInstallClaudeCodeLensMode:
             return _make_result(1) if call_count == 1 else _make_result(0)
 
         with (
-            patch("pm_server.installer.shutil.which", side_effect=which),
-            patch("pm_server.installer.subprocess.run", side_effect=mock_run),
+            patch("pmlens.installer.shutil.which", side_effect=which),
+            patch("pmlens.installer.subprocess.run", side_effect=mock_run),
         ):
             r = install_claude_code()
 
@@ -665,8 +665,8 @@ class TestInstallClaudeCodeLensMode:
             return _make_result(1) if call_count == 1 else _make_result(0)
 
         with (
-            patch("pm_server.installer.shutil.which", side_effect=which),
-            patch("pm_server.installer.subprocess.run", side_effect=mock_run),
+            patch("pmlens.installer.shutil.which", side_effect=which),
+            patch("pmlens.installer.subprocess.run", side_effect=mock_run),
         ):
             r = install_claude_code()
 
@@ -681,8 +681,8 @@ class TestInstallClaudeCodeLensMode:
             return f"/usr/bin/{name}"
 
         with (
-            patch("pm_server.installer.shutil.which", side_effect=which),
-            patch("pm_server.installer.subprocess.run", return_value=_make_result(1)),
+            patch("pmlens.installer.shutil.which", side_effect=which),
+            patch("pmlens.installer.subprocess.run", return_value=_make_result(1)),
         ):
             r = install_claude_code(dry_run=True)
 
@@ -700,7 +700,7 @@ class TestInstallCodexLensMode:
         monkeypatch.setenv("PM_LENS", "1")
         fake_codex_config.write_text("", encoding="utf-8")
         monkeypatch.setattr(
-            "pm_server.installer._resolve_pm_server_path", lambda: tmp_path / "pm-server"
+            "pmlens.installer._resolve_pm_server_path", lambda: tmp_path / "pm-server"
         )
 
         r = install_codex()
@@ -719,7 +719,7 @@ class TestInstallCodexLensMode:
         monkeypatch.delenv("PM_LENS", raising=False)
         fake_codex_config.write_text("", encoding="utf-8")
         monkeypatch.setattr(
-            "pm_server.installer._resolve_pm_server_path", lambda: tmp_path / "pm-server"
+            "pmlens.installer._resolve_pm_server_path", lambda: tmp_path / "pm-server"
         )
 
         r = install_codex()
@@ -735,7 +735,7 @@ class TestInstallCodexLensMode:
     ):
         monkeypatch.setenv("PM_LENS", "1")
         pm_server_path = tmp_path / "pm-server"
-        monkeypatch.setattr("pm_server.installer._resolve_pm_server_path", lambda: pm_server_path)
+        monkeypatch.setattr("pmlens.installer._resolve_pm_server_path", lambda: pm_server_path)
         fake_codex_config.write_text(
             textwrap.dedent(
                 f"""
@@ -760,7 +760,7 @@ class TestInstallCodexLensMode:
         # Expect: status=installed (mutation) + env.PM_LENS now "1".
         monkeypatch.setenv("PM_LENS", "1")
         pm_server_path = tmp_path / "pm-server"
-        monkeypatch.setattr("pm_server.installer._resolve_pm_server_path", lambda: pm_server_path)
+        monkeypatch.setattr("pmlens.installer._resolve_pm_server_path", lambda: pm_server_path)
         fake_codex_config.write_text(
             textwrap.dedent(
                 f"""
@@ -788,7 +788,7 @@ class TestInstallCodexLensMode:
         # Expect: env.PM_LENS removed; if env table becomes empty, removed too.
         monkeypatch.delenv("PM_LENS", raising=False)
         pm_server_path = tmp_path / "pm-server"
-        monkeypatch.setattr("pm_server.installer._resolve_pm_server_path", lambda: pm_server_path)
+        monkeypatch.setattr("pmlens.installer._resolve_pm_server_path", lambda: pm_server_path)
         fake_codex_config.write_text(
             textwrap.dedent(
                 f"""
@@ -817,7 +817,7 @@ class TestInstallCodexLensMode:
         monkeypatch.setenv("PM_LENS", "1")
         fake_codex_config.write_text("", encoding="utf-8")
         monkeypatch.setattr(
-            "pm_server.installer._resolve_pm_server_path", lambda: tmp_path / "pm-server"
+            "pmlens.installer._resolve_pm_server_path", lambda: tmp_path / "pm-server"
         )
 
         r = install_codex(dry_run=True)
@@ -835,31 +835,31 @@ class TestResolvePmServerPath:
         fake_python = tmp_path / "python"
         fake_pm_server = tmp_path / "pm-server"
         fake_pm_server.write_text("")
-        monkeypatch.setattr("pm_server.installer.sys.executable", str(fake_python))
-        from pm_server.installer import _resolve_pm_server_path
+        monkeypatch.setattr("pmlens.installer.sys.executable", str(fake_python))
+        from pmlens.installer import _resolve_pm_server_path
 
         path = _resolve_pm_server_path()
         assert path == fake_pm_server.resolve()
 
     def test_falls_back_to_shutil_which(self, tmp_path, monkeypatch):
         fake_python = tmp_path / "python"
-        monkeypatch.setattr("pm_server.installer.sys.executable", str(fake_python))
+        monkeypatch.setattr("pmlens.installer.sys.executable", str(fake_python))
         fallback = tmp_path / "fallback-pm-server"
         fallback.write_text("")
         monkeypatch.setattr(
-            "pm_server.installer.shutil.which",
+            "pmlens.installer.shutil.which",
             lambda name: str(fallback) if name == "pm-server" else None,
         )
-        from pm_server.installer import _resolve_pm_server_path
+        from pmlens.installer import _resolve_pm_server_path
 
         path = _resolve_pm_server_path()
         assert path == fallback.resolve()
 
     def test_raises_when_not_found(self, tmp_path, monkeypatch):
         fake_python = tmp_path / "python"
-        monkeypatch.setattr("pm_server.installer.sys.executable", str(fake_python))
-        monkeypatch.setattr("pm_server.installer.shutil.which", lambda name: None)
-        from pm_server.installer import _resolve_pm_server_path
+        monkeypatch.setattr("pmlens.installer.sys.executable", str(fake_python))
+        monkeypatch.setattr("pmlens.installer.shutil.which", lambda name: None)
+        from pmlens.installer import _resolve_pm_server_path
 
         with pytest.raises(FileNotFoundError, match="pm-server binary not found"):
             _resolve_pm_server_path()
@@ -873,7 +873,7 @@ class TestInstallCodex:
         pm = tmp_path / "pm-server"
         pm.write_text("")
         resolved = pm.resolve()
-        monkeypatch.setattr("pm_server.installer._resolve_pm_server_path", lambda: resolved)
+        monkeypatch.setattr("pmlens.installer._resolve_pm_server_path", lambda: resolved)
         return resolved
 
     def test_skipped_when_config_not_found(self, fake_codex_config):
@@ -1402,7 +1402,7 @@ class TestCliInstallation:
     """CLI ↔ orchestrator wiring (PMSERV-039).
 
     These tests use ``click.testing.CliRunner`` and patch
-    ``pm_server.installer.install`` / ``...uninstall`` directly so the
+    ``pmlens.installer.install`` / ``...uninstall`` directly so the
     test exercises only the CLI surface (option parsing, exit code,
     output rendering) — the orchestrator's behavior is covered by the
     ``TestInstallOrchestrator`` class. The ``__main__`` module imports
@@ -1426,7 +1426,7 @@ class TestCliInstallation:
     def test_install_no_flags_dispatches_with_claude_code_target(self, monkeypatch):
         from click.testing import CliRunner
 
-        from pm_server.__main__ import cli
+        from pmlens.__main__ import cli
 
         captured = {}
 
@@ -1435,7 +1435,7 @@ class TestCliInstallation:
             captured["dry_run"] = dry_run
             return self._ok_summary_single_host("claude-code")
 
-        monkeypatch.setattr("pm_server.installer.install", fake_install)
+        monkeypatch.setattr("pmlens.installer.install", fake_install)
         result = CliRunner().invoke(cli, ["install"])
 
         assert result.exit_code == 0
@@ -1446,13 +1446,13 @@ class TestCliInstallation:
     def test_install_target_all_renders_hosts_in_known_order(self, monkeypatch):
         from click.testing import CliRunner
 
-        from pm_server.__main__ import cli
+        from pmlens.__main__ import cli
 
         def fake_install(target: str = "claude-code", *, dry_run: bool = False):
             assert target == "all"
             return self._ok_summary_all_hosts()
 
-        monkeypatch.setattr("pm_server.installer.install", fake_install)
+        monkeypatch.setattr("pmlens.installer.install", fake_install)
         result = CliRunner().invoke(cli, ["install", "--target", "all"])
 
         assert result.exit_code == 0
@@ -1464,7 +1464,7 @@ class TestCliInstallation:
     def test_install_dry_run_flag_propagates_and_outputs_dry_run_tag(self, monkeypatch):
         from click.testing import CliRunner
 
-        from pm_server.__main__ import cli
+        from pmlens.__main__ import cli
 
         captured = {}
 
@@ -1484,7 +1484,7 @@ class TestCliInstallation:
                 ]
             )
 
-        monkeypatch.setattr("pm_server.installer.install", fake_install)
+        monkeypatch.setattr("pmlens.installer.install", fake_install)
         result = CliRunner().invoke(cli, ["install", "--dry-run"])
 
         assert result.exit_code == 0
@@ -1497,12 +1497,12 @@ class TestCliInstallation:
     def test_install_failed_result_exits_non_zero(self, monkeypatch):
         from click.testing import CliRunner
 
-        from pm_server.__main__ import cli
+        from pmlens.__main__ import cli
 
         def fake_install(target: str = "claude-code", *, dry_run: bool = False):
             return InstallSummary(results=[InstallResult("claude-code", "failed", "boom")])
 
-        monkeypatch.setattr("pm_server.installer.install", fake_install)
+        monkeypatch.setattr("pmlens.installer.install", fake_install)
         result = CliRunner().invoke(cli, ["install"])
 
         assert result.exit_code == 1
@@ -1512,7 +1512,7 @@ class TestCliInstallation:
         """Both-host failure with --target all still surfaces exit code 1 (PMSERV-039 / S2)."""
         from click.testing import CliRunner
 
-        from pm_server.__main__ import cli
+        from pmlens.__main__ import cli
 
         def fake_install(target: str = "claude-code", *, dry_run: bool = False):
             return InstallSummary(
@@ -1522,7 +1522,7 @@ class TestCliInstallation:
                 ]
             )
 
-        monkeypatch.setattr("pm_server.installer.install", fake_install)
+        monkeypatch.setattr("pmlens.installer.install", fake_install)
         result = CliRunner().invoke(cli, ["install", "--target", "all"])
 
         assert result.exit_code == 1
@@ -1532,7 +1532,7 @@ class TestCliInstallation:
     def test_uninstall_no_flags_dispatches_with_claude_code_target(self, monkeypatch):
         from click.testing import CliRunner
 
-        from pm_server.__main__ import cli
+        from pmlens.__main__ import cli
 
         captured = {}
 
@@ -1543,7 +1543,7 @@ class TestCliInstallation:
                 results=[InstallResult("claude-code", "uninstalled", "PM Lens unregistered")]
             )
 
-        monkeypatch.setattr("pm_server.installer.uninstall", fake_uninstall)
+        monkeypatch.setattr("pmlens.installer.uninstall", fake_uninstall)
         result = CliRunner().invoke(cli, ["uninstall"])
 
         assert result.exit_code == 0
@@ -1559,20 +1559,20 @@ class TestDesktopWriteModeActive:
 
     @pytest.mark.parametrize("truthy", ["1", "true", "True", "yes", "ON"])
     def test_truthy_values(self, truthy, monkeypatch):
-        from pm_server.installer import _desktop_write_mode_active
+        from pmlens.installer import _desktop_write_mode_active
 
         monkeypatch.setenv("PM_DESKTOP_WRITE", truthy)
         assert _desktop_write_mode_active() is True
 
     @pytest.mark.parametrize("falsy", ["0", "false", "no", "", "off"])
     def test_falsy_values(self, falsy, monkeypatch):
-        from pm_server.installer import _desktop_write_mode_active
+        from pmlens.installer import _desktop_write_mode_active
 
         monkeypatch.setenv("PM_DESKTOP_WRITE", falsy)
         assert _desktop_write_mode_active() is False
 
     def test_unset_is_false(self, monkeypatch):
-        from pm_server.installer import _desktop_write_mode_active
+        from pmlens.installer import _desktop_write_mode_active
 
         monkeypatch.delenv("PM_DESKTOP_WRITE", raising=False)
         assert _desktop_write_mode_active() is False
@@ -1598,8 +1598,8 @@ class TestInstallClaudeCodeDesktopWritePropagation:
             return _make_result(1) if call_count == 1 else _make_result(0)
 
         with (
-            patch("pm_server.installer.shutil.which", side_effect=which),
-            patch("pm_server.installer.subprocess.run", side_effect=mock_run),
+            patch("pmlens.installer.shutil.which", side_effect=which),
+            patch("pmlens.installer.subprocess.run", side_effect=mock_run),
         ):
             r = install_claude_code()
 
@@ -1626,8 +1626,8 @@ class TestInstallClaudeCodeDesktopWritePropagation:
             return _make_result(1) if call_count == 1 else _make_result(0)
 
         with (
-            patch("pm_server.installer.shutil.which", side_effect=which),
-            patch("pm_server.installer.subprocess.run", side_effect=mock_run),
+            patch("pmlens.installer.shutil.which", side_effect=which),
+            patch("pmlens.installer.subprocess.run", side_effect=mock_run),
         ):
             r = install_claude_code()
 
@@ -1655,8 +1655,8 @@ class TestInstallClaudeCodeDesktopWritePropagation:
             return _make_result(1) if call_count == 1 else _make_result(0)
 
         with (
-            patch("pm_server.installer.shutil.which", side_effect=which),
-            patch("pm_server.installer.subprocess.run", side_effect=mock_run),
+            patch("pmlens.installer.shutil.which", side_effect=which),
+            patch("pmlens.installer.subprocess.run", side_effect=mock_run),
         ):
             install_claude_code()
 
@@ -1673,7 +1673,7 @@ class TestInstallCodexDesktopWritePropagation:
         monkeypatch.setenv("PM_DESKTOP_WRITE", "1")
         fake_codex_config.write_text("", encoding="utf-8")
         monkeypatch.setattr(
-            "pm_server.installer._resolve_pm_server_path", lambda: tmp_path / "pm-server"
+            "pmlens.installer._resolve_pm_server_path", lambda: tmp_path / "pm-server"
         )
 
         r = install_codex()
@@ -1689,7 +1689,7 @@ class TestInstallCodexDesktopWritePropagation:
         monkeypatch.setenv("PM_DESKTOP_WRITE", "1")
         fake_codex_config.write_text("", encoding="utf-8")
         monkeypatch.setattr(
-            "pm_server.installer._resolve_pm_server_path", lambda: tmp_path / "pm-server"
+            "pmlens.installer._resolve_pm_server_path", lambda: tmp_path / "pm-server"
         )
 
         r = install_codex()
@@ -1716,7 +1716,7 @@ class TestInstallCodexDesktopWritePropagation:
         monkeypatch.delenv("PM_LENS", raising=False)
         monkeypatch.delenv("PM_DESKTOP_WRITE", raising=False)
         monkeypatch.setattr(
-            "pm_server.installer._resolve_pm_server_path", lambda: tmp_path / "pm-server"
+            "pmlens.installer._resolve_pm_server_path", lambda: tmp_path / "pm-server"
         )
 
         r = install_codex()

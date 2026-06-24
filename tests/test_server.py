@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 import pytest
 
-from pm_server.server import (
+from pmlens.server import (
     pm_add_decision,
     pm_add_issue,
     pm_add_task,
@@ -26,7 +26,7 @@ from pm_server.server import (
     pm_velocity,
     pm_workflow_templates,
 )
-from pm_server.storage import (
+from pmlens.storage import (
     _save_project,
     _save_tasks,
     init_pm_directory,
@@ -174,7 +174,7 @@ class TestPmAddDecision:
 
 class TestPmList:
     def test_list_with_registered(self, initialized_project, tmp_path):
-        from pm_server.storage import register_project
+        from pmlens.storage import register_project
 
         # Create a temp registry
         registry_dir = tmp_path / "reg"
@@ -182,8 +182,8 @@ class TestPmList:
         register_project(initialized_project, "testproj", registry_dir)
 
         # pm_list uses the global registry; we patch it
-        with patch("pm_server.server.load_registry") as mock_reg:
-            from pm_server.models import Registry, RegistryEntry
+        with patch("pmlens.server.load_registry") as mock_reg:
+            from pmlens.models import Registry, RegistryEntry
 
             mock_reg.return_value = Registry(
                 projects=[
@@ -260,7 +260,7 @@ class TestPmDiscover:
         filelock acquires + N atomic writes). After the fix the entire diff
         is batched into one transaction with exactly one write.
         """
-        from pm_server import server as _server_mod
+        from pmlens import server as _server_mod
 
         for name in ["p1", "p2", "p3"]:
             pm = tmp_path / name / ".pm"
@@ -295,7 +295,7 @@ class TestPmDiscover:
         """
         from contextlib import contextmanager
 
-        from pm_server import server as _server_mod
+        from pmlens import server as _server_mod
 
         pm = tmp_path / "p1" / ".pm"
         pm.mkdir(parents=True)
@@ -336,7 +336,7 @@ class TestPmDiscover:
         ``newly_registered`` is non-empty. This guards against churning the
         atomic-write path on idempotent re-discoveries.
         """
-        from pm_server import server as _server_mod
+        from pmlens import server as _server_mod
 
         # First pass: register one project
         pm = tmp_path / "p1" / ".pm"
@@ -365,11 +365,11 @@ class TestPmDiscover:
 
 class TestPmCleanup:
     def test_cleanup_removes_invalid(self, tmp_path, initialized_project):
-        from pm_server.models import Registry, RegistryEntry
+        from pmlens.models import Registry, RegistryEntry
 
         with (
-            patch("pm_server.server.load_registry") as mock_reg,
-            patch("pm_server.server._save_registry"),
+            patch("pmlens.server.load_registry") as mock_reg,
+            patch("pmlens.server._save_registry"),
         ):
             mock_reg.return_value = Registry(
                 projects=[
@@ -383,17 +383,17 @@ class TestPmCleanup:
 
     def test_cleanup_detects_orphan_files(self, initialized_project):
         """pm_cleanup reports orphan project files in global ~/.pm/."""
-        import pm_server.storage
+        import pmlens.storage
 
-        global_pm = pm_server.storage.GLOBAL_PM_DIR
+        global_pm = pmlens.storage.GLOBAL_PM_DIR
         (global_pm / "tasks.yaml").write_text("tasks: []\n")
         (global_pm / "decisions.yaml").write_text("decisions: []\n")
 
-        from pm_server.models import Registry, RegistryEntry
+        from pmlens.models import Registry, RegistryEntry
 
         with (
-            patch("pm_server.server.load_registry") as mock_reg,
-            patch("pm_server.server._save_registry"),
+            patch("pmlens.server.load_registry") as mock_reg,
+            patch("pmlens.server._save_registry"),
         ):
             mock_reg.return_value = Registry(
                 projects=[
@@ -406,11 +406,11 @@ class TestPmCleanup:
 
     def test_cleanup_no_orphan_files(self, initialized_project):
         """pm_cleanup reports empty list when no orphan files exist."""
-        from pm_server.models import Registry, RegistryEntry
+        from pmlens.models import Registry, RegistryEntry
 
         with (
-            patch("pm_server.server.load_registry") as mock_reg,
-            patch("pm_server.server._save_registry"),
+            patch("pmlens.server.load_registry") as mock_reg,
+            patch("pmlens.server._save_registry"),
         ):
             mock_reg.return_value = Registry(
                 projects=[
@@ -427,8 +427,8 @@ class TestPmCleanup:
         closed for pm_discover)."""
         from contextlib import contextmanager
 
-        from pm_server import server as _server_mod
-        from pm_server.models import Registry, RegistryEntry
+        from pmlens import server as _server_mod
+        from pmlens.models import Registry, RegistryEntry
 
         events: list[str] = []
         real_tx = _server_mod._yaml_transaction
@@ -548,7 +548,7 @@ class TestPmUpdateRules:
         self, initialized_project, monkeypatch, tmp_path
     ):
         # Force fallback path: no claude binary, no codex config, no env
-        monkeypatch.setattr("pm_server.rules.shutil.which", lambda _name: None)
+        monkeypatch.setattr("pmlens.rules.shutil.which", lambda _name: None)
         monkeypatch.setenv("HOME", str(tmp_path / "fake_home"))
         (tmp_path / "fake_home").mkdir(exist_ok=True)
         monkeypatch.delenv("CLAUDECODE", raising=False)
@@ -795,7 +795,7 @@ class TestPmAddIssue:
         ``update_task`` which wrote twice, leaving a TOCTOU window between
         them. A regression to that shape would surface here as 2 writes.
         """
-        from pm_server import server as _server_mod
+        from pmlens import server as _server_mod
 
         call_count = {"n": 0}
         real_save = _server_mod._save_tasks
@@ -821,7 +821,7 @@ class TestPmAddIssue:
         in-lock fresh task list, not via a separate ``next_task_number(pm_path)``
         call that re-loads outside the lock (race window R3 in the spec).
         """
-        from pm_server import server as _server_mod
+        from pmlens import server as _server_mod
 
         call_count = {"n": 0}
         real = _server_mod.next_task_number
@@ -1113,34 +1113,34 @@ class TestPmRecall:
 
     @pytest.fixture(autouse=True)
     def _setup_project(self, tmp_project, monkeypatch):
-        from pm_server.models import Project
-        from pm_server.storage import _save_project as _save
+        from pmlens.models import Project
+        from pmlens.storage import _save_project as _save
 
         pm_path = tmp_project / ".pm"
         _save(pm_path, Project(name="testproj", display_name="Test"))
         monkeypatch.chdir(tmp_project)
 
-        import pm_server.server
+        import pmlens.server
 
-        pm_server.server._memory_stores.clear()
+        pmlens.server._memory_stores.clear()
         monkeypatch.delenv("PM_SERVER_RECALL_AMBIGUITY_WINDOW_MIN", raising=False)
 
     @staticmethod
     def _force_session(monkeypatch, session_id: str):
-        import pm_server.server
+        import pmlens.server
 
-        monkeypatch.setattr(pm_server.server, "_current_session_id", session_id)
+        monkeypatch.setattr(pmlens.server, "_current_session_id", session_id)
 
     def test_recall_default_returns_current_session_id(self, monkeypatch):
         self._force_session(monkeypatch, "sess-test-current")
-        from pm_server.server import pm_recall
+        from pmlens.server import pm_recall
 
         result = pm_recall()
         assert result["current_session_id"] == "sess-test-current"
 
     def test_recall_default_with_single_session_no_ambiguity(self, monkeypatch):
         self._force_session(monkeypatch, "sess-A")
-        from pm_server.server import pm_recall, pm_session_summary
+        from pmlens.server import pm_recall, pm_session_summary
 
         pm_session_summary(action="save", summary="Self session work")
         result = pm_recall()
@@ -1148,8 +1148,8 @@ class TestPmRecall:
         assert "last_session_candidates" not in result
 
     def test_recall_default_with_multiple_sessions_recent(self, monkeypatch):
-        from pm_server.models import SessionSummary
-        from pm_server.server import _get_memory_store, pm_recall
+        from pmlens.models import SessionSummary
+        from pmlens.server import _get_memory_store, pm_recall
 
         self._force_session(monkeypatch, "sess-A")
         store = _get_memory_store(None)
@@ -1172,8 +1172,8 @@ class TestPmRecall:
                 assert c["is_current_session"] is False
 
     def test_recall_default_with_old_other_session_outside_window(self, monkeypatch):
-        from pm_server.models import SessionSummary
-        from pm_server.server import _get_memory_store, pm_recall
+        from pmlens.models import SessionSummary
+        from pmlens.server import _get_memory_store, pm_recall
 
         self._force_session(monkeypatch, "sess-A")
         store = _get_memory_store(None)
@@ -1197,7 +1197,7 @@ class TestPmRecall:
 
     def test_recall_default_backward_compat_last_session_shape(self, monkeypatch):
         self._force_session(monkeypatch, "sess-A")
-        from pm_server.server import pm_recall, pm_session_summary
+        from pmlens.server import pm_recall, pm_session_summary
 
         pm_session_summary(action="save", summary="content", goals="g", pending="p1,p2")
         result = pm_recall()
@@ -1216,7 +1216,7 @@ class TestPmRecall:
     def test_recall_no_track_omits_track_keys(self, monkeypatch):
         """Default (no track) response stays byte-identical to pre-ADR-028."""
         self._force_session(monkeypatch, "sess-A")
-        from pm_server.server import pm_recall, pm_session_summary
+        from pmlens.server import pm_recall, pm_session_summary
 
         pm_session_summary(action="save", summary="work")
         result = pm_recall()
@@ -1224,8 +1224,8 @@ class TestPmRecall:
         assert "track_matched" not in result
 
     def test_recall_with_track_returns_that_lines_latest(self, monkeypatch):
-        from pm_server.models import SessionSummary
-        from pm_server.server import _get_memory_store, pm_recall
+        from pmlens.models import SessionSummary
+        from pmlens.server import _get_memory_store, pm_recall
 
         self._force_session(monkeypatch, "sess-paper")
         store = _get_memory_store(None)
@@ -1258,8 +1258,8 @@ class TestPmRecall:
         assert result["ambiguity_detected"] is False
 
     def test_recall_with_unmatched_track_falls_back(self, monkeypatch):
-        from pm_server.models import SessionSummary
-        from pm_server.server import _get_memory_store, pm_recall
+        from pmlens.models import SessionSummary
+        from pmlens.server import _get_memory_store, pm_recall
 
         self._force_session(monkeypatch, "sess-main")
         store = _get_memory_store(None)
@@ -1281,21 +1281,21 @@ class TestPmRecall:
         If pm_recall ever called read_git_branch, this monkeypatched explosion
         would surface — proving the read path stays git-free.
         """
-        import pm_server.server
+        import pmlens.server
 
         self._force_session(monkeypatch, "sess-A")
 
         def _boom(*_a, **_k):
             raise AssertionError("pm_recall must never detect git branch")
 
-        monkeypatch.setattr(pm_server.server, "read_git_branch", _boom)
+        monkeypatch.setattr(pmlens.server, "read_git_branch", _boom)
         # Must not raise.
-        result = pm_server.server.pm_recall(track="main")
+        result = pmlens.server.pm_recall(track="main")
         assert result["track"] == "main"
 
     def test_save_records_git_branch(self, monkeypatch, tmp_project):
         """pm_session_summary save records the branch from .git/HEAD (text)."""
-        from pm_server.server import _get_memory_store, pm_session_summary
+        from pmlens.server import _get_memory_store, pm_session_summary
 
         git_dir = tmp_project / ".git"
         git_dir.mkdir()
@@ -1318,7 +1318,7 @@ class TestPmRecall:
 
     @staticmethod
     def _save_on_branch(store, session_id, branch):
-        from pm_server.models import SessionSummary
+        from pmlens.models import SessionSummary
 
         store.save_session_summary(
             SessionSummary(
@@ -1327,7 +1327,7 @@ class TestPmRecall:
         )
 
     def test_track_logical_label_resolves_glob_to_latest(self, monkeypatch, tmp_project):
-        from pm_server.server import _get_memory_store, pm_recall
+        from pmlens.server import _get_memory_store, pm_recall
 
         self._write_tracks(tmp_project, "tracks:\n  論文: [feat/p3-*, research/*]\n")
         self._force_session(monkeypatch, "s-b")
@@ -1352,7 +1352,7 @@ class TestPmRecall:
         assert result["last_session"]["session_id"] != "s-main"
 
     def test_track_label_priority_then_raw_branch(self, monkeypatch, tmp_project):
-        from pm_server.server import _get_memory_store, pm_recall
+        from pmlens.server import _get_memory_store, pm_recall
 
         self._write_tracks(tmp_project, "tracks:\n  教材: [edu/*]\n")
         self._force_session(monkeypatch, "s-edu")
@@ -1371,7 +1371,7 @@ class TestPmRecall:
         assert by_raw["last_session"]["session_id"] == "s-feat"
 
     def test_track_backward_compat_no_mapping_file(self, monkeypatch, tmp_project):
-        from pm_server.server import _get_memory_store, pm_recall
+        from pmlens.server import _get_memory_store, pm_recall
 
         # No tracks.yaml at all → track is a raw branch.
         self._force_session(monkeypatch, "s-main")
@@ -1383,7 +1383,7 @@ class TestPmRecall:
 
     def test_track_rename_resistance_across_line(self, monkeypatch, tmp_project):
         """A line spanning an old + renamed branch still returns its latest."""
-        from pm_server.server import _get_memory_store, pm_recall
+        from pmlens.server import _get_memory_store, pm_recall
 
         self._write_tracks(tmp_project, "tracks:\n  論文: [research/*, feat/p3-*]\n")
         self._force_session(monkeypatch, "s-new")
@@ -1401,7 +1401,7 @@ class TestPmRecall:
         assert result["last_session"]["session_id"] == "s-new"
 
     def test_track_empty_string_behaves_like_no_track(self, monkeypatch, tmp_project):
-        from pm_server.server import _get_memory_store, pm_recall
+        from pmlens.server import _get_memory_store, pm_recall
 
         self._force_session(monkeypatch, "s-main")
         store = _get_memory_store(None)
@@ -1414,7 +1414,7 @@ class TestPmRecall:
             assert "track_branch" not in result
 
     def test_track_fallback_surfaces_track_branch(self, monkeypatch, tmp_project):
-        from pm_server.server import _get_memory_store, pm_recall
+        from pmlens.server import _get_memory_store, pm_recall
 
         self._force_session(monkeypatch, "s-main")
         store = _get_memory_store(None)
@@ -1426,7 +1426,7 @@ class TestPmRecall:
         assert result["track_branch"] == "main"
 
     def test_track_ambiguity_scoped_to_same_line(self, monkeypatch, tmp_project):
-        from pm_server.server import _get_memory_store, pm_recall
+        from pmlens.server import _get_memory_store, pm_recall
 
         self._force_session(monkeypatch, "s-a")
         store = _get_memory_store(None)
@@ -1443,7 +1443,7 @@ class TestPmRecall:
         assert "s-other" not in cand_ids  # scoped to the 'main' line only
 
     def test_track_malformed_tracks_yaml_warns_and_falls_back(self, monkeypatch, tmp_project):
-        from pm_server.server import _get_memory_store, pm_recall
+        from pmlens.server import _get_memory_store, pm_recall
 
         self._write_tracks(tmp_project, "tracks: [broken\n  x: {")
         self._force_session(monkeypatch, "s-main")
@@ -1458,7 +1458,7 @@ class TestPmRecall:
 
     def test_recall_with_query_no_ambiguity_field(self, monkeypatch):
         self._force_session(monkeypatch, "sess-A")
-        from pm_server.server import pm_recall, pm_remember
+        from pmlens.server import pm_recall, pm_remember
 
         pm_remember(content="searchable content")
         result = pm_recall(query="searchable")
@@ -1468,7 +1468,7 @@ class TestPmRecall:
 
     def test_recall_default_no_ambiguity_omits_candidates_field(self, monkeypatch):
         self._force_session(monkeypatch, "sess-A")
-        from pm_server.server import pm_recall, pm_session_summary
+        from pmlens.server import pm_recall, pm_session_summary
 
         pm_session_summary(action="save", summary="lone session")
         result = pm_recall()
@@ -1478,7 +1478,7 @@ class TestPmRecall:
 
     def test_recall_cross_project_includes_current_session_id(self, monkeypatch):
         self._force_session(monkeypatch, "sess-cross")
-        from pm_server.server import pm_recall, pm_remember
+        from pmlens.server import pm_recall, pm_remember
 
         pm_remember(content="cross test data")
         result = pm_recall(query="cross test", cross_project=True)
@@ -1494,13 +1494,13 @@ class TestBranchAwareLensSafety:
         never import subprocess (the git config-exec risk the design avoids)."""
         import pathlib
 
-        import pm_server.server as srv
+        import pmlens.server as srv
 
         source = pathlib.Path(srv.__file__).read_text(encoding="utf-8")
         assert "import subprocess" not in source
 
     def test_pm_recall_is_read_only_allowlisted(self):
-        import pm_server.server as srv
+        import pmlens.server as srv
 
         assert "pm_recall" in srv.RO_ALLOWLIST
         # The branch-detecting mutator stays OUT of the read-only surface.
@@ -1543,7 +1543,7 @@ class TestBuiltinTemplatesDirDiagnostics:
         ``builtin_templates_dir_missing`` warning rather than silently
         returning fewer templates.
         """
-        from pm_server import storage as _storage
+        from pmlens import storage as _storage
 
         vanished = tmp_path / "uninstalled" / "templates" / "workflows"
         monkeypatch.setattr(_storage, "BUILTIN_TEMPLATES_DIR", vanished)

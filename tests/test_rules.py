@@ -1,4 +1,4 @@
-"""Tests for pm_server.rules.
+"""Tests for pmlens.rules.
 
 PMSERV-043 smoke tests cover the legacy CLAUDE.md surface and the
 backward-compat shim. PMSERV-044 adds tests for the multi-host
@@ -16,7 +16,7 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
-from pm_server.rules import (
+from pmlens.rules import (
     BEGIN_MARKER,
     BEGIN_PATTERN,
     CLAUDEMD_TEMPLATE,
@@ -37,7 +37,7 @@ from pm_server.rules import (
 
 
 class TestRulesModule:
-    """pm_server.rules public surface (PMSERV-043)."""
+    """pmlens.rules public surface (PMSERV-043)."""
 
     def test_template_version_is_int(self):
         assert isinstance(TEMPLATE_VERSION, int)
@@ -109,19 +109,19 @@ class TestRulesModule:
 
 
 class TestBackwardCompatShim:
-    """pm_server.claudemd is a transparent re-export of pm_server.rules (PMSERV-043)."""
+    """pmlens.claudemd is a transparent re-export of pmlens.rules (PMSERV-043)."""
 
     def test_shim_re_exports_same_function_objects(self):
-        import pm_server.claudemd as old_path
-        import pm_server.rules as new_path
+        import pmlens.claudemd as old_path
+        import pmlens.rules as new_path
 
         assert old_path.ensure_claudemd is new_path.ensure_claudemd
         assert old_path.update_claudemd is new_path.update_claudemd
         assert old_path.get_claudemd_status is new_path.get_claudemd_status
 
     def test_shim_re_exports_same_constants(self):
-        import pm_server.claudemd as old_path
-        import pm_server.rules as new_path
+        import pmlens.claudemd as old_path
+        import pmlens.rules as new_path
 
         assert old_path.TEMPLATE_VERSION is new_path.TEMPLATE_VERSION
         assert old_path.CLAUDEMD_TEMPLATE is new_path.CLAUDEMD_TEMPLATE
@@ -137,14 +137,14 @@ class TestBackwardCompatShim:
 @pytest.fixture
 def no_claude_binary(monkeypatch):
     """Force ``shutil.which("claude")`` to return None inside rules.py."""
-    monkeypatch.setattr("pm_server.rules.shutil.which", lambda name: None)
+    monkeypatch.setattr("pmlens.rules.shutil.which", lambda name: None)
 
 
 @pytest.fixture
 def with_claude_binary(monkeypatch):
     """Force ``shutil.which("claude")`` to return a fake path."""
     monkeypatch.setattr(
-        "pm_server.rules.shutil.which",
+        "pmlens.rules.shutil.which",
         lambda name: "/fake/bin/claude" if name == "claude" else None,
     )
 
@@ -571,7 +571,7 @@ class TestInjectPmRules:
 
     def test_partial_failure_does_not_abort_siblings(self, tmp_path, monkeypatch):
         """Per-host failures are isolated (cross-check D1)."""
-        from pm_server import rules as rules_mod
+        from pmlens import rules as rules_mod
 
         original = rules_mod._inject_into_file
 
@@ -635,7 +635,7 @@ class TestInjectPmRules:
     def test_inject_failure_on_write_yields_failed_status(self, tmp_path, monkeypatch):
         """Atomic-write failure surfaces as ``status="failed"`` rather
         than propagating an exception. Covers rules.py:535-536."""
-        from pm_server import rules as rules_mod
+        from pmlens import rules as rules_mod
 
         # Create the existing file so we hit the 'write existing' path
         (tmp_path / "CLAUDE.md").write_text(
@@ -660,7 +660,7 @@ class TestScanRuleFileAndStatus:
     def test_get_rules_status_reflects_existing_claude_md(self, tmp_path):
         """Existing CLAUDE.md with marker hits the read+regex path.
         Covers rules.py:279-290."""
-        from pm_server.rules import get_rules_status
+        from pmlens.rules import get_rules_status
 
         (tmp_path / "CLAUDE.md").write_text(
             f"# Project\n\n<!-- pm-server:begin v={TEMPLATE_VERSION} -->\n"
@@ -677,7 +677,7 @@ class TestScanRuleFileAndStatus:
         assert status["claude_code"]["other_rule_sections"] == ["synaptic-ledger"]
 
     def test_get_rules_status_reflects_existing_agents_md(self, tmp_path):
-        from pm_server.rules import get_rules_status
+        from pmlens.rules import get_rules_status
 
         (tmp_path / "AGENTS.md").write_text(
             "# Agents\n\n<!-- pm-server:begin v=0 -->\nlegacy\n<!-- pm-server:end -->\n",
@@ -695,7 +695,7 @@ class TestAggregateOverallStatus:
     def test_empty_results_aggregates_to_skipped(self):
         """Empty results list aggregates to ``"skipped"`` (default).
         Covers rules.py:582."""
-        from pm_server.rules import _aggregate_overall_status
+        from pmlens.rules import _aggregate_overall_status
 
         assert _aggregate_overall_status([]) == "skipped"
 
@@ -707,7 +707,7 @@ class TestAggregateOverallStatus:
         installer.InstallStatus drift guard)."""
         from typing import get_args
 
-        from pm_server.rules import _INJECT_STATUS_PRIORITY
+        from pmlens.rules import _INJECT_STATUS_PRIORITY
 
         assert set(_INJECT_STATUS_PRIORITY) == set(get_args(InjectStatus))
         assert len(_INJECT_STATUS_PRIORITY) == len(get_args(InjectStatus))  # no dupes
@@ -716,7 +716,7 @@ class TestAggregateOverallStatus:
 class TestCliUpdateRules:
     """``pm-server update-rules`` CLI subcommand (PMSERV-044 Step 4).
 
-    Patches ``pm_server.rules.inject_pm_rules`` to exercise only the CLI
+    Patches ``pmlens.rules.inject_pm_rules`` to exercise only the CLI
     surface (option parsing, output rendering, exit code). Functional
     behaviour is covered by ``TestInjectPmRules``. Cross-check R6 is
     enforced by ``test_dry_run_tag_appears_exactly_once``.
@@ -769,7 +769,7 @@ class TestCliUpdateRules:
     def test_default_target_auto_propagates(self, monkeypatch, tmp_path):
         from click.testing import CliRunner
 
-        from pm_server.__main__ import cli
+        from pmlens.__main__ import cli
 
         # CLI walks up from cwd to find .pm/. Make tmp_path a real project root.
         (tmp_path / ".pm").mkdir()
@@ -783,7 +783,7 @@ class TestCliUpdateRules:
             captured["dry_run"] = dry_run
             return self._ok_summary()
 
-        monkeypatch.setattr("pm_server.rules.inject_pm_rules", fake_inject)
+        monkeypatch.setattr("pmlens.rules.inject_pm_rules", fake_inject)
         result = CliRunner().invoke(cli, ["update-rules"])
 
         assert result.exit_code == 0
@@ -793,7 +793,7 @@ class TestCliUpdateRules:
     def test_target_codex_dispatch(self, monkeypatch, tmp_path):
         from click.testing import CliRunner
 
-        from pm_server.__main__ import cli
+        from pmlens.__main__ import cli
 
         (tmp_path / ".pm").mkdir()
         (tmp_path / ".pm" / "project.yaml").write_text("name: t\n")
@@ -815,7 +815,7 @@ class TestCliUpdateRules:
                 overall_status="created",
             )
 
-        monkeypatch.setattr("pm_server.rules.inject_pm_rules", fake_inject)
+        monkeypatch.setattr("pmlens.rules.inject_pm_rules", fake_inject)
         result = CliRunner().invoke(cli, ["update-rules", "--target", "codex"])
 
         assert result.exit_code == 0
@@ -827,7 +827,7 @@ class TestCliUpdateRules:
         never embedded in ``InjectResult.message``."""
         from click.testing import CliRunner
 
-        from pm_server.__main__ import cli
+        from pmlens.__main__ import cli
 
         (tmp_path / ".pm").mkdir()
         (tmp_path / ".pm" / "project.yaml").write_text("name: t\n")
@@ -839,7 +839,7 @@ class TestCliUpdateRules:
             captured["dry_run"] = dry_run
             return self._ok_summary(dry_run=True)
 
-        monkeypatch.setattr("pm_server.rules.inject_pm_rules", fake_inject)
+        monkeypatch.setattr("pmlens.rules.inject_pm_rules", fake_inject)
         result = CliRunner().invoke(cli, ["update-rules", "--target", "claude-code", "--dry-run"])
 
         assert result.exit_code == 0
@@ -851,7 +851,7 @@ class TestCliUpdateRules:
     def test_fallback_emits_warning_line(self, monkeypatch, tmp_path):
         from click.testing import CliRunner
 
-        from pm_server.__main__ import cli
+        from pmlens.__main__ import cli
 
         (tmp_path / ".pm").mkdir()
         (tmp_path / ".pm" / "project.yaml").write_text("name: t\n")
@@ -860,7 +860,7 @@ class TestCliUpdateRules:
         def fake_inject(root, *, target="auto", dry_run=False):
             return self._ok_summary(source="fallback")
 
-        monkeypatch.setattr("pm_server.rules.inject_pm_rules", fake_inject)
+        monkeypatch.setattr("pmlens.rules.inject_pm_rules", fake_inject)
         result = CliRunner().invoke(cli, ["update-rules"])
 
         assert result.exit_code == 0
@@ -871,7 +871,7 @@ class TestCliUpdateRules:
     def test_failed_status_yields_exit_code_1(self, monkeypatch, tmp_path):
         from click.testing import CliRunner
 
-        from pm_server.__main__ import cli
+        from pmlens.__main__ import cli
 
         (tmp_path / ".pm").mkdir()
         (tmp_path / ".pm" / "project.yaml").write_text("name: t\n")
@@ -891,7 +891,7 @@ class TestCliUpdateRules:
                 overall_status="failed",
             )
 
-        monkeypatch.setattr("pm_server.rules.inject_pm_rules", fake_inject)
+        monkeypatch.setattr("pmlens.rules.inject_pm_rules", fake_inject)
         result = CliRunner().invoke(cli, ["update-rules", "--target", "claude-code"])
 
         assert result.exit_code == 1
@@ -904,7 +904,7 @@ class TestCliUpdateRules:
 
         from click.testing import CliRunner
 
-        from pm_server.__main__ import cli
+        from pmlens.__main__ import cli
 
         (tmp_path / ".pm").mkdir()
         (tmp_path / ".pm" / "project.yaml").write_text("name: t\n")
@@ -928,7 +928,7 @@ class TestCliUpdateRules:
                 overall_status="updated",
             )
 
-        monkeypatch.setattr("pm_server.rules.inject_pm_rules", fake_inject)
+        monkeypatch.setattr("pmlens.rules.inject_pm_rules", fake_inject)
         result = CliRunner().invoke(cli, ["update-rules", "--target", "codex"])
 
         assert result.exit_code == 0

@@ -49,15 +49,15 @@ class TestManifestShape:
         )
 
     def test_init_version_matches_pyproject(self):
-        # PMSERV-106 follow-up: src/pm_server/__init__.py:__version__ is what
+        # PMSERV-106 follow-up: src/pmlens/__init__.py:__version__ is what
         # `pm-server --version` prints to users — silently drifting from
         # pyproject (as it did between 0.6.2 and 0.8.0) is a release-quality
         # bug, even if functionally cosmetic.
         import re
 
-        init_text = (REPO_ROOT / "src" / "pm_server" / "__init__.py").read_text(encoding="utf-8")
+        init_text = (REPO_ROOT / "src" / "pmlens" / "__init__.py").read_text(encoding="utf-8")
         match = re.search(r'__version__\s*=\s*"([^"]+)"', init_text)
-        assert match is not None, "src/pm_server/__init__.py is missing __version__"
+        assert match is not None, "src/pmlens/__init__.py is missing __version__"
         assert match.group(1) == _load_pyproject_version(), (
             f"__init__.py __version__ ({match.group(1)!r}) drifted from "
             f"pyproject.toml ({_load_pyproject_version()!r}); bump in lockstep"
@@ -99,20 +99,20 @@ class TestManifestShape:
 
     def test_mcp_config_uses_module_invocation_not_script_path(self):
         # PMSERV-106 follow-up: a direct script invocation (`python
-        # src/pm_server/__main__.py`) loses the package context — Python sets
+        # src/pmlens/__main__.py`) loses the package context — Python sets
         # __package__ to None so `from . import __version__` dies with
         # `attempted relative import with no known parent package`. The correct
-        # form is `python -m pm_server` which establishes pm_server as the
+        # form is `python -m pmlens` which establishes pmlens as the
         # importing package.
         args = _load_manifest()["server"]["mcp_config"]["args"]
-        assert "-m" in args, "must invoke as a module (`python -m pm_server`)"
-        assert "pm_server" in args
+        assert "-m" in args, "must invoke as a module (`python -m pmlens`)"
+        assert "pmlens" in args
         assert "serve" in args, "the `serve` subcommand starts the MCP stdio server"
         # Negative guard: a raw .py path in args means we've regressed to the
         # broken script-execution form.
         for arg in args:
             assert not arg.endswith("__main__.py"), (
-                f"direct script path {arg!r} in args — use `-m pm_server` instead"
+                f"direct script path {arg!r} in args — use `-m pmlens` instead"
             )
 
     def test_pm_lens_env_set(self):
@@ -168,7 +168,7 @@ class TestBuildScriptValidation:
             "version": "9.9.9",
             "server": {
                 "type": "uv",
-                "entry_point": "src/pm_server/__main__.py",
+                "entry_point": "src/pmlens/__main__.py",
                 "mcp_config": {
                     "command": "uv",
                     "args": [
@@ -177,7 +177,7 @@ class TestBuildScriptValidation:
                         "${__dirname}",
                         "python",
                         "-m",
-                        "pm_server",
+                        "pmlens",
                         "serve",
                     ],
                     "env": {"PM_LENS": "1", "PM_DESKTOP_WRITE": "1"},
@@ -214,7 +214,7 @@ class TestBuildScriptValidation:
 
     def test_entry_point_pointing_at_missing_file_rejected(self, validate):
         bad = self._good_manifest()
-        bad["server"]["entry_point"] = "src/pm_server/does_not_exist.py"
+        bad["server"]["entry_point"] = "src/pmlens/does_not_exist.py"
         with pytest.raises(SystemExit, match="does not exist"):
             validate(bad, "9.9.9")
 
@@ -226,7 +226,7 @@ class TestBuildScriptValidation:
 
     def test_mcp_config_args_missing_dirname_rejected(self, validate):
         bad = self._good_manifest()
-        bad["server"]["mcp_config"]["args"] = ["run", "python", "-m", "pm_server", "serve"]
+        bad["server"]["mcp_config"]["args"] = ["run", "python", "-m", "pmlens", "serve"]
         with pytest.raises(SystemExit, match=r"\$\{__dirname\}"):
             validate(bad, "9.9.9")
 
@@ -238,10 +238,10 @@ class TestBuildScriptValidation:
             "run",
             "--directory",
             "${__dirname}",
-            "src/pm_server/__main__.py",
+            "src/pmlens/__main__.py",
             "serve",
         ]
-        with pytest.raises(SystemExit, match="python -m pm_server"):
+        with pytest.raises(SystemExit, match="python -m pmlens"):
             validate(bad, "9.9.9")
 
     def test_mcp_config_args_missing_serve_subcommand_rejected(self, validate):
@@ -252,7 +252,7 @@ class TestBuildScriptValidation:
             "${__dirname}",
             "python",
             "-m",
-            "pm_server",
+            "pmlens",
         ]
         with pytest.raises(SystemExit, match="serve"):
             validate(bad, "9.9.9")
@@ -314,10 +314,10 @@ class TestBundleBuild:
 
         # Python source must be bundled (the v0.4 uv contract — the host runs
         # `uv run --directory ${__dirname} <entry>` against in-bundle files).
-        assert "src/pm_server/__main__.py" in names
-        assert "src/pm_server/server.py" in names
-        assert "src/pm_server/__init__.py" in names
-        assert "src/pm_server/outbox.py" in names  # Phase 2 / ADR-019
+        assert "src/pmlens/__main__.py" in names
+        assert "src/pmlens/server.py" in names
+        assert "src/pmlens/__init__.py" in names
+        assert "src/pmlens/outbox.py" in names  # Phase 2 / ADR-019
 
     def test_bundle_excludes_caches_and_bytecode(self, tmp_path, monkeypatch):
         sys.path.insert(0, str(REPO_ROOT / "scripts"))

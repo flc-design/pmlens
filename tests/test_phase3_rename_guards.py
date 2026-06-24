@@ -41,7 +41,7 @@ class TestMarkerSlugInvariant:
     source-file grep count that is the step-6 CI gate baseline."""
 
     def test_markers_use_pm_server_slug_not_pmlens(self):
-        from pm_server.rules import BEGIN_MARKER, BEGIN_PATTERN, END_MARKER
+        from pmlens.rules import BEGIN_MARKER, BEGIN_PATTERN, END_MARKER
 
         assert "pm-server:begin" in BEGIN_MARKER
         assert "pmlens:" not in BEGIN_MARKER
@@ -54,7 +54,7 @@ class TestMarkerSlugInvariant:
         # CI grep-gate baseline: ``grep -c 'pm-server:begin' rules.py`` >= 3
         # (BEGIN_MARKER, BEGIN_PATTERN, CLAUDEMD_TEMPLATE). A global sed that
         # renamed the slug would drop this below 3 and turn red here.
-        import pm_server.rules as rules_mod
+        import pmlens.rules as rules_mod
 
         source = Path(rules_mod.__file__).read_text(encoding="utf-8")
         hits = sum(1 for line in source.splitlines() if "pm-server:begin" in line)

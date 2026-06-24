@@ -4,7 +4,7 @@ import datetime as _dt
 
 import pytest
 
-from pm_server.models import (
+from pmlens.models import (
     DailyLogEntry,
     LogCategory,
     Milestone,
@@ -17,7 +17,7 @@ from pm_server.models import (
     TaskNotFoundError,
     TaskStatus,
 )
-from pm_server.storage import (
+from pmlens.storage import (
     _save_milestones,
     _save_project,
     _save_registry,
@@ -360,7 +360,7 @@ class TestYamlTransactionLocking:
         original_bytes = original_path.read_bytes()
 
         # Force os.replace to fail (simulating crash during atomic rename)
-        from pm_server import utils as _utils
+        from pmlens import utils as _utils
 
         original_replace = _utils.os.replace
 
@@ -383,14 +383,14 @@ class TestBuiltinTemplatesDirStatus:
     """
 
     def test_returns_dict_with_expected_keys(self):
-        from pm_server.storage import get_builtin_templates_dir_status
+        from pmlens.storage import get_builtin_templates_dir_status
 
         status = get_builtin_templates_dir_status()
         assert set(status.keys()) == {"path", "exists", "template_count", "stale"}
 
     def test_healthy_install_reports_existing_dir(self):
         """In a normal install, the builtin templates dir exists with >= 1 yaml."""
-        from pm_server.storage import get_builtin_templates_dir_status
+        from pmlens.storage import get_builtin_templates_dir_status
 
         status = get_builtin_templates_dir_status()
         assert status["exists"] is True
@@ -407,7 +407,7 @@ class TestBuiltinTemplatesDirStatus:
         import). Helper must surface ``stale=True`` instead of silently
         returning template_count=0 with no signal.
         """
-        from pm_server import storage as _storage
+        from pmlens import storage as _storage
 
         vanished = tmp_path / "uninstalled" / "templates" / "workflows"
         monkeypatch.setattr(_storage, "BUILTIN_TEMPLATES_DIR", vanished)

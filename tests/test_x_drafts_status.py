@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pm_server.server as srv
+import pmlens.server as srv
 
 
 def _make_project(tmp_path: Path, name: str = "statxproj") -> Path:

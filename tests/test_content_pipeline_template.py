@@ -11,10 +11,10 @@ from pathlib import Path
 
 import yaml
 
-import pm_server
-import pm_server.server as srv
+import pmlens
+import pmlens.server as srv
 
-_TEMPLATE = Path(pm_server.__file__).parent / "templates" / "workflows" / "content-pipeline.yaml"
+_TEMPLATE = Path(pmlens.__file__).parent / "templates" / "workflows" / "content-pipeline.yaml"
 
 
 def _make_project(tmp_path: Path, name: str = "tplproj") -> Path:

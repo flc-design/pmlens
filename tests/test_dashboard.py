@@ -4,11 +4,11 @@ from unittest.mock import patch
 
 import pytest
 
-from pm_server.dashboard import (
+from pmlens.dashboard import (
     render_portfolio_dashboard,
     render_project_dashboard,
 )
-from pm_server.models import (
+from pmlens.models import (
     KnowledgeCategory,
     KnowledgeRecord,
     Registry,
@@ -18,7 +18,7 @@ from pm_server.models import (
     WorkflowStep,
     WorkflowStepStatus,
 )
-from pm_server.storage import (
+from pmlens.storage import (
     _save_knowledge,
     _save_project,
     _save_tasks,
@@ -163,14 +163,14 @@ class TestProjectDashboardWorkflow:
 
 class TestPortfolioDashboard:
     def test_html_empty(self):
-        with patch("pm_server.dashboard.load_registry") as mock_reg:
+        with patch("pmlens.dashboard.load_registry") as mock_reg:
             mock_reg.return_value = Registry()
             html = render_portfolio_dashboard(format="html")
             assert "<!DOCTYPE html>" in html
             assert "pm_init" in html
 
     def test_text_empty(self):
-        with patch("pm_server.dashboard.load_registry") as mock_reg:
+        with patch("pmlens.dashboard.load_registry") as mock_reg:
             mock_reg.return_value = Registry()
             text = render_portfolio_dashboard(format="text")
             assert "Portfolio" in text
@@ -181,7 +181,7 @@ class TestPortfolioDashboard:
         _save_project(pm_path, sample_project)
         _save_tasks(pm_path, sample_tasks)
 
-        with patch("pm_server.dashboard.load_registry") as mock_reg:
+        with patch("pmlens.dashboard.load_registry") as mock_reg:
             mock_reg.return_value = Registry(
                 projects=[RegistryEntry(path=str(tmp_path), name="testproj")]
             )
@@ -211,7 +211,7 @@ class TestPortfolioDashboard:
         ]
         _save_knowledge(pm_path, records)
 
-        with patch("pm_server.dashboard.load_registry") as mock_reg:
+        with patch("pmlens.dashboard.load_registry") as mock_reg:
             mock_reg.return_value = Registry(
                 projects=[RegistryEntry(path=str(tmp_path), name="testproj")]
             )
@@ -237,7 +237,7 @@ class TestPortfolioDashboard:
         )
         _save_workflows(pm_path, [wf])
 
-        with patch("pm_server.dashboard.load_registry") as mock_reg:
+        with patch("pmlens.dashboard.load_registry") as mock_reg:
             mock_reg.return_value = Registry(
                 projects=[RegistryEntry(path=str(tmp_path), name="testproj")]
             )

@@ -93,13 +93,13 @@ def test_outbox_remember_does_not_mutate_main_memory_dbs(tmp_path: Path) -> None
     project_mtime_before = project_db.stat().st_mtime_ns
     global_mtime_before = global_db.stat().st_mtime_ns
 
-    # 3. Subprocess: import pm_server.server under PM_LENS=1 + PM_DESKTOP_WRITE=1
+    # 3. Subprocess: import pmlens.server under PM_LENS=1 + PM_DESKTOP_WRITE=1
     #    and call pm_outbox_remember. The decorator gating reads env at import.
     script = textwrap.dedent("""
         import json
         import sys
 
-        import pm_server.server as srv
+        import pmlens.server as srv
 
         # Sanity: both flags engaged in the child.
         assert srv.PM_LENS_ENABLED is True, "PM_LENS not picked up in subprocess"
@@ -185,7 +185,7 @@ def test_outbox_log_does_not_mutate_main_memory_dbs(tmp_path: Path) -> None:
         import json
         import sys
 
-        import pm_server.server as srv
+        import pmlens.server as srv
 
         result = srv.pm_outbox_log(
             entry="lens invariant log",
@@ -238,7 +238,7 @@ _X_DRAFT_TOOLS = ("pm_draft_x", "pm_redact_draft", "pm_reject_draft", "pm_x_draf
 def test_x_draft_tools_registered_in_claude_code_mode() -> None:
     """Sanity (PM_LENS=0, the normal test process): all four x_drafts tools
     ARE registered, so the Lens=1 hidden assertion below is meaningful."""
-    import pm_server.server as srv
+    import pmlens.server as srv
 
     assert srv.PM_LENS_ENABLED is False
     for name in _X_DRAFT_TOOLS:
@@ -250,7 +250,7 @@ def test_x_draft_tools_hidden_under_lens(tmp_path: Path) -> None:
     are mutators not in any allowlist, so the @_tool() gate returns the bare
     function and never adds them to REGISTERED_TOOLS."""
     script = textwrap.dedent("""
-        import pm_server.server as srv
+        import pmlens.server as srv
 
         assert srv.PM_LENS_ENABLED is True, "PM_LENS not picked up in subprocess"
         hidden = [t for t in (

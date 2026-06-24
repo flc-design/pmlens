@@ -2,7 +2,7 @@
 
 import pytest
 
-from pm_server.claudemd import (
+from pmlens.claudemd import (
     TEMPLATE_VERSION,
     ensure_claudemd,
     get_claudemd_status,
@@ -230,38 +230,38 @@ class TestIdempotency:
 
 
 class TestShimIdentity:
-    """Verify ``pm_server.claudemd`` is a transparent re-export shim of ``pm_server.rules``.
+    """Verify ``pmlens.claudemd`` is a transparent re-export shim of ``pmlens.rules``.
 
     PMSERV-043 (commit fcce596) split claudemd.py into rules.py + a re-export
-    shim. v0.4.x callers using ``from pm_server.claudemd import X`` MUST see
-    the same object as ``pm_server.rules.X`` — verifiable via ``is`` identity.
+    shim. v0.4.x callers using ``from pmlens.claudemd import X`` MUST see
+    the same object as ``pmlens.rules.X`` — verifiable via ``is`` identity.
     Regression guard added by PMSERV-044 plan v2 (cross-check R7) so that
     upcoming refactors (inject_pm_rules etc.) cannot accidentally rebind a
     shim symbol to a wrapper function and silently break v0.4.x imports.
     """
 
     def test_ensure_claudemd_is_identical(self):
-        from pm_server import claudemd, rules
+        from pmlens import claudemd, rules
 
         assert claudemd.ensure_claudemd is rules.ensure_claudemd
 
     def test_update_claudemd_is_identical(self):
-        from pm_server import claudemd, rules
+        from pmlens import claudemd, rules
 
         assert claudemd.update_claudemd is rules.update_claudemd
 
     def test_get_claudemd_status_is_identical(self):
-        from pm_server import claudemd, rules
+        from pmlens import claudemd, rules
 
         assert claudemd.get_claudemd_status is rules.get_claudemd_status
 
     def test_template_version_is_identical(self):
-        from pm_server import claudemd, rules
+        from pmlens import claudemd, rules
 
         assert claudemd.TEMPLATE_VERSION is rules.TEMPLATE_VERSION
 
     def test_marker_constants_are_identical(self):
-        from pm_server import claudemd, rules
+        from pmlens import claudemd, rules
 
         assert claudemd.BEGIN_MARKER is rules.BEGIN_MARKER
         assert claudemd.END_MARKER is rules.END_MARKER

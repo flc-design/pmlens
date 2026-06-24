@@ -5,7 +5,7 @@ for Claude Code; ``AGENTS.md`` for Codex CLI). This module is the
 general-purpose foundation for multi-host rule injection introduced by
 ADR-008 and elaborated in PMSERV-044.
 
-For backward compatibility, ``pm_server.claudemd`` re-exports every
+For backward compatibility, ``pmlens.claudemd`` re-exports every
 v0.4.x-vintage symbol below; existing callers continue to work
 unchanged.
 """

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from pm_server.memory import MemoryStore
-from pm_server.models import Memory, MemoryType
+from pmlens.memory import MemoryStore
+from pmlens.models import Memory, MemoryType
 
 # ─── MemoryStore.get_stats ────────────────────────────
 
@@ -135,8 +135,8 @@ class TestMemoryCleanup:
 
 class TestServerToolMemoryStats:
     def _setup_project(self, tmp_path, monkeypatch):
-        from pm_server.models import Project
-        from pm_server.storage import _save_project
+        from pmlens.models import Project
+        from pmlens.storage import _save_project
 
         pm_path = tmp_path / ".pm"
         pm_path.mkdir(exist_ok=True)
@@ -145,13 +145,13 @@ class TestServerToolMemoryStats:
         _save_project(pm_path, project)
         monkeypatch.chdir(tmp_path)
 
-        import pm_server.server
+        import pmlens.server
 
-        pm_server.server._memory_stores.clear()
+        pmlens.server._memory_stores.clear()
 
     def test_stats_returns_db_size(self, tmp_path, monkeypatch):
         self._setup_project(tmp_path, monkeypatch)
-        from pm_server.server import pm_memory_stats, pm_remember
+        from pmlens.server import pm_memory_stats, pm_remember
 
         pm_remember(content="Test memory for stats")
         result = pm_memory_stats()
@@ -161,7 +161,7 @@ class TestServerToolMemoryStats:
 
     def test_stats_type_breakdown(self, tmp_path, monkeypatch):
         self._setup_project(tmp_path, monkeypatch)
-        from pm_server.server import pm_memory_stats, pm_remember
+        from pmlens.server import pm_memory_stats, pm_remember
 
         pm_remember(content="Observation 1", type="observation")
         pm_remember(content="Insight 1", type="insight")
@@ -175,8 +175,8 @@ class TestServerToolMemoryStats:
 
 class TestServerToolMemoryCleanup:
     def _setup_project(self, tmp_path, monkeypatch):
-        from pm_server.models import Project
-        from pm_server.storage import _save_project
+        from pmlens.models import Project
+        from pmlens.storage import _save_project
 
         pm_path = tmp_path / ".pm"
         pm_path.mkdir(exist_ok=True)
@@ -185,13 +185,13 @@ class TestServerToolMemoryCleanup:
         _save_project(pm_path, project)
         monkeypatch.chdir(tmp_path)
 
-        import pm_server.server
+        import pmlens.server
 
-        pm_server.server._memory_stores.clear()
+        pmlens.server._memory_stores.clear()
 
     def test_cleanup_default_dry_run(self, tmp_path, monkeypatch):
         self._setup_project(tmp_path, monkeypatch)
-        from pm_server.server import pm_memory_cleanup, pm_remember
+        from pmlens.server import pm_memory_cleanup, pm_remember
 
         for i in range(5):
             pm_remember(content=f"Memory {i}")
@@ -202,7 +202,7 @@ class TestServerToolMemoryCleanup:
 
     def test_cleanup_actual_delete(self, tmp_path, monkeypatch):
         self._setup_project(tmp_path, monkeypatch)
-        from pm_server.server import pm_memory_cleanup, pm_memory_stats, pm_remember
+        from pmlens.server import pm_memory_cleanup, pm_memory_stats, pm_remember
 
         for i in range(5):
             pm_remember(content=f"Memory {i}")
@@ -219,7 +219,7 @@ class TestSessionSummaryUpsert:
     """UPSERT preserves created_at, refreshes updated_at on re-save."""
 
     def test_save_session_summary_preserves_created_at_on_resave(self, memory_store: MemoryStore):
-        from pm_server.models import SessionSummary
+        from pmlens.models import SessionSummary
 
         memory_store.save_session_summary(
             SessionSummary(session_id="sess-A", summary="first", project="p")
@@ -243,7 +243,7 @@ class TestSessionSummaryUpsert:
         assert after.summary == "second"
 
     def test_save_session_summary_updates_updated_at_on_resave(self, memory_store: MemoryStore):
-        from pm_server.models import SessionSummary
+        from pmlens.models import SessionSummary
 
         memory_store.save_session_summary(
             SessionSummary(session_id="sess-B", summary="first", project="p")
@@ -272,7 +272,7 @@ class TestListSummariesWithin:
     """list_summaries_within filters by updated_at (UTC)."""
 
     def test_list_summaries_within_window_filters_by_updated_at(self, memory_store: MemoryStore):
-        from pm_server.models import SessionSummary
+        from pmlens.models import SessionSummary
 
         memory_store.save_session_summary(
             SessionSummary(session_id="sess-recent", summary="recent", project="p")
@@ -308,8 +308,8 @@ class TestSchemaMigration:
     def test_existing_db_without_updated_at_column_migrates_correctly(self, tmp_path):
         import sqlite3
 
-        from pm_server.memory import MemoryStore
-        from pm_server.models import SessionSummary
+        from pmlens.memory import MemoryStore
+        from pmlens.models import SessionSummary
 
         # Build a legacy-shaped DB (no updated_at column) by hand
         db_path = tmp_path / "legacy.db"
@@ -370,8 +370,8 @@ class TestSchemaMigration:
         and branch-aware recall falls back gracefully for pre-feature rows."""
         import sqlite3
 
-        from pm_server.memory import MemoryStore
-        from pm_server.models import SessionSummary
+        from pmlens.memory import MemoryStore
+        from pmlens.models import SessionSummary
 
         # Build a pre-branch DB by hand (has updated_at but no branch column).
         db_path = tmp_path / "legacy.db"

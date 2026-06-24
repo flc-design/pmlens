@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from pm_server.memory import (
+from pmlens.memory import (
     _BUSY_TIMEOUT_MS,
     MemoryStore,
     _apply_pragmas,
@@ -18,7 +18,7 @@ from pm_server.memory import (
     _str_to_tags,
     _tags_to_str,
 )
-from pm_server.models import Memory, MemoryType, SessionSummary
+from pmlens.models import Memory, MemoryType, SessionSummary
 
 # ─── Tag conversion helpers ────────────────────────────
 
@@ -693,7 +693,7 @@ class TestBranchAwareSummaries:
         the overall-latest fallback (regression guard for the RO Lens path)."""
         import sqlite3
 
-        from pm_server.memory import MemoryStore
+        from pmlens.memory import MemoryStore
 
         db_path = tmp_path / "legacy.db"
         conn = sqlite3.connect(str(db_path))
@@ -746,8 +746,8 @@ class TestServerToolIntegration:
     @pytest.fixture(autouse=True)
     def _setup_project(self, tmp_project: Path, monkeypatch):
         """Set up a project with project.yaml for server tool calls."""
-        from pm_server.models import Project
-        from pm_server.storage import _save_project
+        from pmlens.models import Project
+        from pmlens.storage import _save_project
 
         pm_path = tmp_project / ".pm"
         project = Project(name="testproj", display_name="Test")
@@ -755,12 +755,12 @@ class TestServerToolIntegration:
         monkeypatch.chdir(tmp_project)
 
         # Clear cached memory stores between tests
-        import pm_server.server
+        import pmlens.server
 
-        pm_server.server._memory_stores.clear()
+        pmlens.server._memory_stores.clear()
 
     def test_remember_and_recall(self):
-        from pm_server.server import pm_recall, pm_remember
+        from pmlens.server import pm_recall, pm_remember
 
         result = pm_remember(content="JWT tokens expire in 15 minutes", type="insight")
         assert result["status"] == "saved"
@@ -771,7 +771,7 @@ class TestServerToolIntegration:
         assert any("JWT" in r["content"] for r in recall_result["results"])
 
     def test_recall_default_no_args(self):
-        from pm_server.server import pm_recall, pm_remember
+        from pmlens.server import pm_recall, pm_remember
 
         pm_remember(content="Some observation")
         result = pm_recall()
@@ -780,7 +780,7 @@ class TestServerToolIntegration:
         assert len(result["recent_memories"]) >= 1
 
     def test_recall_default_with_type_filter(self):
-        from pm_server.server import pm_recall, pm_remember
+        from pmlens.server import pm_recall, pm_remember
 
         pm_remember(content="An observation", type="observation")
         pm_remember(content="A lesson learned", type="lesson")
@@ -791,7 +791,7 @@ class TestServerToolIntegration:
         assert len(result["recent_memories"]) == 1
 
     def test_recall_by_task_id(self):
-        from pm_server.server import pm_recall, pm_remember
+        from pmlens.server import pm_recall, pm_remember
 
         pm_remember(content="Task note", task_id="TEST-001")
         result = pm_recall(task_id="TEST-001")
@@ -799,13 +799,13 @@ class TestServerToolIntegration:
         assert result["results"][0]["task_id"] == "TEST-001"
 
     def test_recall_cross_project_requires_query(self):
-        from pm_server.server import pm_recall
+        from pmlens.server import pm_recall
 
         result = pm_recall(cross_project=True)
         assert result["status"] == "error"
 
     def test_recall_cross_project_with_query(self):
-        from pm_server.server import pm_recall, pm_remember
+        from pmlens.server import pm_recall, pm_remember
 
         pm_remember(content="Cross project test data")
         result = pm_recall(query="Cross project", cross_project=True)
@@ -813,7 +813,7 @@ class TestServerToolIntegration:
         assert "results" in result
 
     def test_session_summary_save_get(self):
-        from pm_server.server import pm_session_summary
+        from pmlens.server import pm_session_summary
 
         save_result = pm_session_summary(
             action="save",
@@ -828,26 +828,26 @@ class TestServerToolIntegration:
         assert get_result["pending"] == ["Code review", "Deploy"]
 
     def test_session_summary_list(self):
-        from pm_server.server import pm_session_summary
+        from pmlens.server import pm_session_summary
 
         pm_session_summary(action="save", summary="Session 1")
         result = pm_session_summary(action="list")
         assert result["count"] >= 1
 
     def test_session_summary_save_requires_summary(self):
-        from pm_server.server import pm_session_summary
+        from pmlens.server import pm_session_summary
 
         result = pm_session_summary(action="save")
         assert result["status"] == "error"
 
     def test_session_summary_get_empty(self):
-        from pm_server.server import pm_session_summary
+        from pmlens.server import pm_session_summary
 
         result = pm_session_summary(action="get")
         assert result["status"] == "empty"
 
     def test_session_summary_invalid_action(self):
-        from pm_server.server import pm_session_summary
+        from pmlens.server import pm_session_summary
 
         result = pm_session_summary(action="invalid")
         assert result["status"] == "error"
@@ -916,7 +916,7 @@ class TestSqlitePragmas:
 
 def _worker_check_pragmas(db_path_str: str, result_path: str) -> None:
     """Open a fresh MemoryStore in a child process and report the 3 pragmas."""
-    from pm_server.memory import MemoryStore
+    from pmlens.memory import MemoryStore
 
     store = MemoryStore(Path(db_path_str), global_db_path=None)
     journal = store._conn.execute("PRAGMA journal_mode").fetchone()[0]
@@ -930,8 +930,8 @@ def _worker_write_n_memories(
     db_path_str: str, project: str, prefix: str, count: int, ready_path: str
 ) -> None:
     """Write `count` memories rapidly, then touch the ready file."""
-    from pm_server.memory import MemoryStore
-    from pm_server.models import Memory, MemoryType
+    from pmlens.memory import MemoryStore
+    from pmlens.models import Memory, MemoryType
 
     store = MemoryStore(Path(db_path_str), global_db_path=None)
     for i in range(count):

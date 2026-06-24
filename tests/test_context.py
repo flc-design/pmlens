@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pm_server.memory import MemoryStore
-from pm_server.models import Memory, Project, SessionSummary
-from pm_server.storage import _save_project
+from pmlens.memory import MemoryStore
+from pmlens.models import Memory, Project, SessionSummary
+from pmlens.storage import _save_project
 
 # ─── Global sync ───────────────────────────────────────
 
@@ -112,13 +112,13 @@ class TestPmMemorySearch:
         _save_project(pm_path, project)
         monkeypatch.chdir(tmp_path)
 
-        import pm_server.server
+        import pmlens.server
 
-        pm_server.server._memory_stores.clear()
+        pmlens.server._memory_stores.clear()
 
     def test_search_by_query(self, tmp_path, monkeypatch):
         self._setup_project(tmp_path, monkeypatch)
-        from pm_server.server import pm_memory_search, pm_remember
+        from pmlens.server import pm_memory_search, pm_remember
 
         pm_remember(content="JWT authentication flow", tags="auth,jwt")
         pm_remember(content="Database migration script", tags="database")
@@ -128,7 +128,7 @@ class TestPmMemorySearch:
 
     def test_search_with_tag_filter(self, tmp_path, monkeypatch):
         self._setup_project(tmp_path, monkeypatch)
-        from pm_server.server import pm_memory_search, pm_remember
+        from pmlens.server import pm_memory_search, pm_remember
 
         pm_remember(content="JWT token handling", tags="auth,jwt")
         pm_remember(content="Session cookie approach", tags="auth,cookie")
@@ -138,7 +138,7 @@ class TestPmMemorySearch:
 
     def test_search_with_task_filter(self, tmp_path, monkeypatch):
         self._setup_project(tmp_path, monkeypatch)
-        from pm_server.server import pm_memory_search, pm_remember
+        from pmlens.server import pm_memory_search, pm_remember
 
         pm_remember(content="Task-linked memory", task_id="TEST-001")
         pm_remember(content="Other memory")
@@ -152,7 +152,7 @@ class TestPmMemorySearch:
 
 class TestInjectContext:
     def test_inject_with_no_project(self, capsys):
-        from pm_server.context import inject_context
+        from pmlens.context import inject_context
 
         # No .pm/ directory — should silently do nothing
         inject_context(project_path=Path("/tmp/nonexistent"))
@@ -160,7 +160,7 @@ class TestInjectContext:
         assert captured.out == ""
 
     def test_inject_with_no_memories(self, tmp_path, capsys):
-        from pm_server.context import inject_context
+        from pmlens.context import inject_context
 
         pm_path = tmp_path / ".pm"
         pm_path.mkdir()
@@ -174,7 +174,7 @@ class TestInjectContext:
         assert captured.out == ""
 
     def test_inject_with_memories(self, tmp_path, capsys):
-        from pm_server.context import inject_context
+        from pmlens.context import inject_context
 
         pm_path = tmp_path / ".pm"
         pm_path.mkdir()

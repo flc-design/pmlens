@@ -20,7 +20,7 @@ import importlib
 
 import pytest
 
-import pm_server.server
+import pmlens.server
 
 # ─── 既知の mutator 集合 (Lens 排除対象) ──────────────────
 # memory:134 + B-1 (pm_knowledge を multi-action mutator として扱う) より。
@@ -66,9 +66,9 @@ def _reload_server(env_overrides: dict[str, str | None]) -> None:
         else:
             os.environ[key] = value
     # I-3: モジュール cache クリア (RO/RW 切替で stale store が再利用されない)
-    pm_server.server._memory_stores.clear()
-    pm_server.server.REGISTERED_TOOLS.clear()
-    importlib.reload(pm_server.server)
+    pmlens.server._memory_stores.clear()
+    pmlens.server.REGISTERED_TOOLS.clear()
+    importlib.reload(pmlens.server)
 
 
 @pytest.fixture
@@ -76,7 +76,7 @@ def lens_server(monkeypatch):
     """PM_LENS=1 を有効化して server を reload する."""
     monkeypatch.setenv("PM_LENS", "1")
     _reload_server({"PM_LENS": "1"})
-    yield pm_server.server
+    yield pmlens.server
     # teardown: PM_LENS を外して元の状態に戻す
     monkeypatch.delenv("PM_LENS", raising=False)
     _reload_server({"PM_LENS": None})
@@ -87,7 +87,7 @@ def normal_server(monkeypatch):
     """PM_LENS 無効化を保証して server を reload する."""
     monkeypatch.delenv("PM_LENS", raising=False)
     _reload_server({"PM_LENS": None})
-    yield pm_server.server
+    yield pmlens.server
 
 
 # ─── R1: Lens モードで mutator が登録されない ────────────
@@ -232,8 +232,8 @@ def test_lens_excludes_subprocess_invoking_tools(lens_server):
 
 def _seed_project_db(project_root):
     """Create a project .pm/memory.db with one memory, then close cleanly."""
-    from pm_server.memory import MemoryStore
-    from pm_server.models import Memory, MemoryType
+    from pmlens.memory import MemoryStore
+    from pmlens.models import Memory, MemoryType
 
     pm_dir = project_root / ".pm"
     pm_dir.mkdir(parents=True, exist_ok=True)
@@ -469,7 +469,7 @@ def desktop_write_server(monkeypatch):
     monkeypatch.setenv("PM_LENS", "1")
     monkeypatch.setenv("PM_DESKTOP_WRITE", "1")
     _reload_server({"PM_LENS": "1", "PM_DESKTOP_WRITE": "1"})
-    yield pm_server.server
+    yield pmlens.server
     monkeypatch.delenv("PM_LENS", raising=False)
     monkeypatch.delenv("PM_DESKTOP_WRITE", raising=False)
     _reload_server({"PM_LENS": None, "PM_DESKTOP_WRITE": None})
@@ -511,10 +511,10 @@ def test_normal_mode_with_desktop_write_is_noop(monkeypatch):
     _reload_server({"PM_LENS": None, "PM_DESKTOP_WRITE": "1"})
     try:
         expected = MUTATOR_TOOLS | _OUTBOX_WRITE_TOOLS
-        missing = expected - pm_server.server.REGISTERED_TOOLS
+        missing = expected - pmlens.server.REGISTERED_TOOLS
         assert missing == set(), f"tools missing in normal+desktop-write mode: {missing}"
-        assert pm_server.server.PM_LENS_ENABLED is False
-        assert pm_server.server.PM_DESKTOP_WRITE_ENABLED is True
+        assert pmlens.server.PM_LENS_ENABLED is False
+        assert pmlens.server.PM_DESKTOP_WRITE_ENABLED is True
     finally:
         monkeypatch.delenv("PM_DESKTOP_WRITE", raising=False)
         _reload_server({"PM_LENS": None, "PM_DESKTOP_WRITE": None})

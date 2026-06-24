@@ -25,7 +25,7 @@ _VALID_STATUSES: frozenset[str] = frozenset({"pending", "merged", "rejected"})
 def default_outbox_db_path() -> Path:
     """Resolve ~/.pm/desktop/desktop.db dynamically (ADR-019).
 
-    Looked up via the ``pm_server.storage`` module so test fixtures that
+    Looked up via the ``pmlens.storage`` module so test fixtures that
     monkeypatch ``GLOBAL_PM_DIR`` are honored at call time (mirrors the
     ``server.py`` GLOBAL_PM_DIR double-patch pattern in conftest.py).
     """

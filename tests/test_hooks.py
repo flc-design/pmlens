@@ -8,15 +8,15 @@ from unittest.mock import patch
 
 import pytest
 
-from pm_server.hooks import (
+from pmlens.hooks import (
     _build_commit_reminder,
     get_hooks_status,
     handle_post_tool_use,
     install_hooks,
     uninstall_hooks,
 )
-from pm_server.models import Phase, PhaseStatus, Priority, Project, ProjectStatus, Task, TaskStatus
-from pm_server.storage import _save_project, _save_tasks
+from pmlens.models import Phase, PhaseStatus, Priority, Project, ProjectStatus, Task, TaskStatus
+from pmlens.storage import _save_project, _save_tasks
 
 # ─── Fixtures ─────────────────────────────────────
 
@@ -69,13 +69,13 @@ def pm_project(tmp_path: Path) -> Path:
 
 class TestGetHooksStatus:
     def test_no_settings_file(self, settings_dir: Path):
-        with patch("pm_server.hooks._settings_path", return_value=settings_dir / "settings.json"):
+        with patch("pmlens.hooks._settings_path", return_value=settings_dir / "settings.json"):
             status = get_hooks_status()
             assert status["installed"] is False
 
     def test_empty_settings(self, settings_dir: Path):
         (settings_dir / "settings.json").write_text("{}")
-        with patch("pm_server.hooks._settings_path", return_value=settings_dir / "settings.json"):
+        with patch("pmlens.hooks._settings_path", return_value=settings_dir / "settings.json"):
             status = get_hooks_status()
             assert status["installed"] is False
 
@@ -91,14 +91,14 @@ class TestGetHooksStatus:
             }
         }
         (settings_dir / "settings.json").write_text(json.dumps(settings))
-        with patch("pm_server.hooks._settings_path", return_value=settings_dir / "settings.json"):
+        with patch("pmlens.hooks._settings_path", return_value=settings_dir / "settings.json"):
             status = get_hooks_status()
             assert status["installed"] is True
 
 
 class TestInstallHooks:
     def test_install_fresh(self, settings_dir: Path):
-        with patch("pm_server.hooks._settings_path", return_value=settings_dir / "settings.json"):
+        with patch("pmlens.hooks._settings_path", return_value=settings_dir / "settings.json"):
             msg = install_hooks()
             assert "installed" in msg
 
@@ -109,7 +109,7 @@ class TestInstallHooks:
             assert hooks[0]["matcher"] == "Bash"
 
     def test_install_idempotent(self, settings_dir: Path):
-        with patch("pm_server.hooks._settings_path", return_value=settings_dir / "settings.json"):
+        with patch("pmlens.hooks._settings_path", return_value=settings_dir / "settings.json"):
             install_hooks()
             msg = install_hooks()
             assert "skipped" in msg
@@ -132,7 +132,7 @@ class TestInstallHooks:
         }
         (settings_dir / "settings.json").write_text(json.dumps(existing))
 
-        with patch("pm_server.hooks._settings_path", return_value=settings_dir / "settings.json"):
+        with patch("pmlens.hooks._settings_path", return_value=settings_dir / "settings.json"):
             install_hooks()
 
             settings = json.loads((settings_dir / "settings.json").read_text())
@@ -144,14 +144,14 @@ class TestInstallHooks:
 
     def test_install_creates_settings_file(self, settings_dir: Path):
         settings_path = settings_dir / "new_dir" / "settings.json"
-        with patch("pm_server.hooks._settings_path", return_value=settings_path):
+        with patch("pmlens.hooks._settings_path", return_value=settings_path):
             install_hooks()
             assert settings_path.exists()
 
 
 class TestUninstallHooks:
     def test_uninstall_removes_pm_hooks(self, settings_dir: Path):
-        with patch("pm_server.hooks._settings_path", return_value=settings_dir / "settings.json"):
+        with patch("pmlens.hooks._settings_path", return_value=settings_dir / "settings.json"):
             install_hooks()
             msg = uninstall_hooks()
             assert "removed" in msg
@@ -174,7 +174,7 @@ class TestUninstallHooks:
         }
         (settings_dir / "settings.json").write_text(json.dumps(settings))
 
-        with patch("pm_server.hooks._settings_path", return_value=settings_dir / "settings.json"):
+        with patch("pmlens.hooks._settings_path", return_value=settings_dir / "settings.json"):
             uninstall_hooks()
 
             result = json.loads((settings_dir / "settings.json").read_text())
@@ -184,7 +184,7 @@ class TestUninstallHooks:
 
     def test_uninstall_no_hooks(self, settings_dir: Path):
         (settings_dir / "settings.json").write_text("{}")
-        with patch("pm_server.hooks._settings_path", return_value=settings_dir / "settings.json"):
+        with patch("pmlens.hooks._settings_path", return_value=settings_dir / "settings.json"):
             msg = uninstall_hooks()
             assert "skipped" in msg
 

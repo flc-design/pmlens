@@ -17,7 +17,7 @@ import datetime as _dt
 import pytest
 import yaml
 
-from pm_server.models import (
+from pmlens.models import (
     PmServerError,
     Workflow,
     WorkflowNotFoundError,
@@ -26,7 +26,7 @@ from pm_server.models import (
     WorkflowStepStatus,
     WorkflowTemplate,
 )
-from pm_server.storage import (
+from pmlens.storage import (
     _save_workflows,
     add_workflow,
     list_workflow_templates,
@@ -35,7 +35,7 @@ from pm_server.storage import (
     next_workflow_number,
     update_workflow,
 )
-from pm_server.workflow import (
+from pmlens.workflow import (
     abandon_workflow,
     advance_step,
     get_active_workflow,
@@ -849,7 +849,7 @@ class TestWorkflowMcpTools:
     """Test server.py MCP tool wrappers (import-level verification)."""
 
     def test_tool_imports(self):
-        from pm_server.server import (
+        from pmlens.server import (
             pm_workflow_abandon,
             pm_workflow_advance,
             pm_workflow_list,

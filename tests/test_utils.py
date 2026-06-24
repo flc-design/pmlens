@@ -10,8 +10,8 @@ from pathlib import Path
 
 import pytest
 
-from pm_server.models import ProjectNotFoundError
-from pm_server.utils import (
+from pmlens.models import ProjectNotFoundError
+from pmlens.utils import (
     _KNOWN_HOSTS,
     TARGET_CHOICES,
     _atomic_write_text,
@@ -427,7 +427,7 @@ class TestGetUtilsFingerprint:
 
     def test_stale_detected_when_disk_diverges(self, tmp_path, monkeypatch):
         """Simulate a source edit by pointing the helper at a modified file."""
-        from pm_server import utils as _utils
+        from pmlens import utils as _utils
 
         # Write a file that the helper will read instead of the real utils.py
         fake_path = tmp_path / "utils.py"
@@ -444,7 +444,7 @@ class TestGetUtilsFingerprint:
 
     def test_unreadable_disk_returns_unreadable_marker(self, monkeypatch):
         """If the source file vanishes (unlikely but defensive), surface it."""
-        from pm_server import utils as _utils
+        from pmlens import utils as _utils
 
         monkeypatch.setattr(_utils, "__file__", "/nonexistent/path/utils.py")
         fp = get_utils_fingerprint()

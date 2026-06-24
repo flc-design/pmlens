@@ -33,7 +33,8 @@ dependencies = [
 dev = ["pytest", "pytest-cov", "ruff", "pip-tools"]
 
 [project.scripts]
-pm-server = "pm_server.__main__:cli"
+pmlens = "pmlens.__main__:cli"
+pm-server = "pmlens.__main__:cli"
 
 [project.urls]
 Homepage = "https://github.com/flc-design/pmlens"
@@ -41,10 +42,11 @@ Repository = "https://github.com/flc-design/pmlens"
 Issues = "https://github.com/flc-design/pmlens/issues"
 
 [tool.hatch.build.targets.wheel]
-# The distribution is "pmlens" but the import package stays "pm_server" until
-# Phase-3 (ADR-032). hatchling's project-name auto-discovery looks for a "pmlens"
-# directory and fails, so point the wheel explicitly at the real package.
-packages = ["src/pm_server"]
+# Phase-3 (PMSERV-137 / ADR-034) renamed the import package to "pmlens"; the old
+# "pm_server" name survives as a thin sys.modules alias shim for backward-compatible
+# imports. Ship both so `import pmlens` and the legacy `import pm_server` both
+# resolve from the wheel. The explicit src paths bypass hatchling's name discovery.
+packages = ["src/pmlens", "src/pm_server"]
 
 [tool.ruff]
 target-version = "py311"
@@ -61,7 +63,7 @@ markers = [
 ]
 
 [tool.coverage.run]
-source = ["src/pm_server"]
+source = ["src/pmlens"]
 branch = true
 
 [tool.coverage.report]

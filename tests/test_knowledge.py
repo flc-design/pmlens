@@ -14,21 +14,21 @@ import datetime as _dt
 
 import pytest
 
-from pm_server.models import (
+from pmlens.models import (
     ConfidenceLevel,
     KnowledgeCategory,
     KnowledgeNotFoundError,
     KnowledgeRecord,
     KnowledgeStatus,
 )
-from pm_server.storage import (
+from pmlens.storage import (
     _save_knowledge,
     add_knowledge,
     load_knowledge,
     next_knowledge_number,
     update_knowledge,
 )
-from pm_server.workflow import start_workflow, workflow_status
+from pmlens.workflow import start_workflow, workflow_status
 
 # ─── Model Tests ────────────────────────────────────
 
@@ -391,7 +391,7 @@ class TestKnowledgeMcpTools:
     """Test that MCP tools are importable and callable."""
 
     def test_tool_imports(self):
-        from pm_server.server import pm_knowledge, pm_record
+        from pmlens.server import pm_knowledge, pm_record
 
         assert callable(pm_record)
         assert callable(pm_knowledge)

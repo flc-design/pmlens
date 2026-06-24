@@ -7,9 +7,9 @@ from pathlib import Path
 
 import pytest
 
-import pm_server.server
-import pm_server.storage
-from pm_server.models import (
+import pmlens.server
+import pmlens.storage
+from pmlens.models import (
     Consequences,
     Decision,
     Phase,
@@ -32,26 +32,26 @@ def isolated_registry(tmp_path, monkeypatch):
     """
     fake_global_pm = tmp_path / "fake_global_pm"
     fake_global_pm.mkdir()
-    monkeypatch.setattr(pm_server.storage, "GLOBAL_PM_DIR", fake_global_pm)
+    monkeypatch.setattr(pmlens.storage, "GLOBAL_PM_DIR", fake_global_pm)
     # PMSERV-066: server.py also imports GLOBAL_PM_DIR at module-import time
     # (server.py:from .storage import GLOBAL_PM_DIR), so the storage-side
     # monkeypatch alone leaves the server-side binding pointing at the real
     # ~/.pm/. Patch both to keep all GLOBAL_PM_DIR consumers in lock-step.
-    monkeypatch.setattr(pm_server.server, "GLOBAL_PM_DIR", fake_global_pm)
+    monkeypatch.setattr(pmlens.server, "GLOBAL_PM_DIR", fake_global_pm)
     # ADR-019 / WF-028: clear the module-level outbox factory so each test
     # starts with a fresh DesktopOutboxStore. Otherwise the cached store
     # from a previous test points at a tmp_path that pytest has deleted,
     # and any test that calls pm_status (which probes outbox_pending) gets
     # a stale handle. The factory's first call after this fixture re-binds
     # to the current monkeypatched GLOBAL_PM_DIR via default_outbox_db_path().
-    from pm_server.outbox import clear_outbox_store
+    from pmlens.outbox import clear_outbox_store
 
     clear_outbox_store()
     # PMSERV-113 / PMSERV-114: same rationale for the per-project x_drafts
     # factory — clear the db_path-keyed cache so a store bound to a now-deleted
     # tmp_path does not leak into the next test (e.g. via pm_status probing
     # x_drafts_pending). The factory re-binds on next use.
-    from pm_server.x_draft_store import clear_x_draft_store
+    from pmlens.x_draft_store import clear_x_draft_store
 
     clear_x_draft_store()
 
@@ -147,7 +147,7 @@ def memory_store(tmp_path: Path):
 
     Global sync is pointed at a temp directory to avoid touching ~/.pm/.
     """
-    from pm_server.memory import MemoryStore
+    from pmlens.memory import MemoryStore
 
     db_path = tmp_path / "test_memory.db"
     global_path = tmp_path / "global_pm" / "memory.db"
@@ -220,7 +220,7 @@ def legacy_user_env(tmp_path, monkeypatch) -> LegacyUserEnv:
     Step 1 only asserts the fixture is well-formed; steps 3-6 drive the actual
     ``migrate-from-pm-server`` against it.
     """
-    from pm_server.rules import BEGIN_MARKER, END_MARKER, TEMPLATE_VERSION
+    from pmlens.rules import BEGIN_MARKER, END_MARKER, TEMPLATE_VERSION
 
     fake_home = tmp_path / "legacy_home"
     (fake_home / ".claude").mkdir(parents=True)

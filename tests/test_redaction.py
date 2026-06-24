@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from pm_server.redaction import load_redaction_config, redact
+from pmlens.redaction import load_redaction_config, redact
 
 # Secret-shaped fixtures are ASSEMBLED at runtime so the literal forms never
 # appear in source text — otherwise GitHub secret scanning flags them on push
@@ -274,7 +274,7 @@ def test_load_redaction_config_scrub_internal_ids_true(tmp_path: Path) -> None:
 def test_redaction_config_template_is_loadable_yaml() -> None:
     import yaml
 
-    from pm_server.redaction import redaction_config_template
+    from pmlens.redaction import redaction_config_template
 
     parsed = yaml.safe_load(redaction_config_template())
     assert parsed == {"allow": [], "deny": [], "scrub_internal_ids": False}

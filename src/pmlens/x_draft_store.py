@@ -19,7 +19,7 @@ matter:
   cross-check must-fix #1). The human copy-pastes from the queue, so the queue
   must never carry the unscrubbed concentrate.
 
-Cloned from :class:`pm_server.outbox.DesktopOutboxStore`, but with a
+Cloned from :class:`pmlens.outbox.DesktopOutboxStore`, but with a
 **db_path-keyed factory** (mirroring ``server._memory_stores``) instead of the
 outbox's single-slot module global, because a process may touch several
 projects' stores (cross-check must-fix #2).

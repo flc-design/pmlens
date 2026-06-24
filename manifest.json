@@ -25,7 +25,7 @@
   ],
   "server": {
     "type": "uv",
-    "entry_point": "src/pm_server/__main__.py",
+    "entry_point": "src/pmlens/__main__.py",
     "mcp_config": {
       "command": "uv",
       "args": [
@@ -34,7 +34,7 @@
         "${__dirname}",
         "python",
         "-m",
-        "pm_server",
+        "pmlens",
         "serve"
       ],
       "env": {

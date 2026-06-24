@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from pm_server import outbox as _outbox
-from pm_server.outbox import (
+from pmlens import outbox as _outbox
+from pmlens.outbox import (
     DesktopOutboxStore,
     clear_outbox_store,
     default_outbox_db_path,
@@ -330,7 +330,7 @@ def _make_project(tmp_path: Path, name: str = "proj") -> Path:
 
 def test_pm_outbox_remember_invalid_type_returns_error(tmp_path: Path) -> None:
     """Tool boundary: invalid type returns a structured error (not raises)."""
-    import pm_server.server as srv
+    import pmlens.server as srv
 
     res = srv.pm_outbox_remember(content="x", type="bogus")
     assert res["status"] == "error"
@@ -338,7 +338,7 @@ def test_pm_outbox_remember_invalid_type_returns_error(tmp_path: Path) -> None:
 
 
 def test_pm_outbox_log_invalid_category_returns_error(tmp_path: Path) -> None:
-    import pm_server.server as srv
+    import pmlens.server as srv
 
     res = srv.pm_outbox_log(entry="x", category="bogus")
     assert res["status"] == "error"
@@ -346,7 +346,7 @@ def test_pm_outbox_log_invalid_category_returns_error(tmp_path: Path) -> None:
 
 
 def test_pm_outbox_pending_invalid_pagination_returns_error(tmp_path: Path) -> None:
-    import pm_server.server as srv
+    import pmlens.server as srv
 
     res = srv.pm_outbox_pending(limit=-1)
     assert res["status"] == "error"
@@ -354,7 +354,7 @@ def test_pm_outbox_pending_invalid_pagination_returns_error(tmp_path: Path) -> N
 
 
 def test_pm_outbox_reject_requires_reason(tmp_path: Path) -> None:
-    import pm_server.server as srv
+    import pmlens.server as srv
 
     res = srv.pm_outbox_reject(ids=[1], reason="")
     assert res["status"] == "error"
@@ -364,7 +364,7 @@ def test_pm_outbox_reject_requires_reason(tmp_path: Path) -> None:
 def test_pm_outbox_merge_routes_memory_and_log_to_target(tmp_path: Path) -> None:
     """End-to-end tool: pm_outbox_remember (memory) + pm_outbox_log (log) →
     pm_outbox_merge promotes both into the right targets."""
-    import pm_server.server as srv
+    import pmlens.server as srv
 
     proj = _make_project(tmp_path)
     mem_res = srv.pm_outbox_remember(content="from tool", type="memory", source_project=str(proj))
@@ -403,7 +403,7 @@ def test_pm_outbox_merge_routes_memory_and_log_to_target(tmp_path: Path) -> None
 
 def test_pm_outbox_merge_idempotent_skip_already_processed(tmp_path: Path) -> None:
     """Re-merging an already-merged id surfaces in skipped[], not merged[]."""
-    import pm_server.server as srv
+    import pmlens.server as srv
 
     proj = _make_project(tmp_path)
     rid = srv.pm_outbox_remember(content="once", type="memory", source_project=str(proj))[
@@ -420,7 +420,7 @@ def test_pm_outbox_merge_idempotent_skip_already_processed(tmp_path: Path) -> No
 def test_pm_outbox_merge_no_target_project_yields_warning(tmp_path: Path) -> None:
     """Outbox entries without source_project and without target_project arg
     cannot be merged — must surface in warnings[] (not raise)."""
-    import pm_server.server as srv
+    import pmlens.server as srv
 
     rid = srv.pm_outbox_remember(content="no target", type="memory")["outbox_id"]
     res = srv.pm_outbox_merge(ids=[rid])
@@ -431,7 +431,7 @@ def test_pm_outbox_merge_no_target_project_yields_warning(tmp_path: Path) -> Non
 def test_pm_status_diagnostics_includes_outbox_pending(tmp_path: Path) -> None:
     """pm_status.diagnostics.outbox_pending surfaces in Claude Code mode and
     triggers a next_pm_actions hint when N > 0."""
-    import pm_server.server as srv
+    import pmlens.server as srv
 
     proj = _make_project(tmp_path, name="statproj")
     # Inject two pending entries via the desktop writer.
@@ -449,7 +449,7 @@ def test_pm_status_diagnostics_includes_outbox_pending(tmp_path: Path) -> None:
 def test_pm_status_diagnostics_outbox_zero_omits_hint(tmp_path: Path) -> None:
     """When outbox_pending == 0, the next_pm_actions hint must NOT appear so
     pm_status stays uncluttered."""
-    import pm_server.server as srv
+    import pmlens.server as srv
 
     proj = _make_project(tmp_path, name="emptystatproj")
     status = srv.pm_status(project_path=str(proj))

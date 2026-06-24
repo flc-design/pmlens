@@ -2,9 +2,9 @@
 
 import datetime as _dt
 
-from pm_server.models import Phase, PhaseStatus, Project, Task, TaskStatus
-from pm_server.storage import _save_project, _save_tasks
-from pm_server.velocity import calculate_velocity, detect_risks
+from pmlens.models import Phase, PhaseStatus, Project, Task, TaskStatus
+from pmlens.storage import _save_project, _save_tasks
+from pmlens.velocity import calculate_velocity, detect_risks
 
 
 class TestCalculateVelocity:

@@ -23,8 +23,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pm_server.server as srv
-from pm_server.redaction import redact
+import pmlens.server as srv
+from pmlens.redaction import redact
 
 # ─── Golden input (assembled at runtime — no literal secret forms) ───────────
 

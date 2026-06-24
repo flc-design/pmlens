@@ -10,7 +10,7 @@ launch time. That means the bundle MUST include:
 
   * ``manifest.json``       — points at ``server.entry_point``
   * ``pyproject.toml``      — declares runtime dependencies
-  * ``src/pm_server/`` …    — the actual Python package (no ``__pycache__``)
+  * ``src/pmlens/`` …    — the actual Python package (no ``__pycache__``)
   * ``.mcpbignore``         — exclusion rules
   * ``README.md`` / ``LICENSE`` — user-facing metadata
 
@@ -34,7 +34,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 MANIFEST_PATH = REPO_ROOT / "manifest.json"
 PYPROJECT_PATH = REPO_ROOT / "pyproject.toml"
 MCPBIGNORE_PATH = REPO_ROOT / ".mcpbignore"
-PACKAGE_SRC = REPO_ROOT / "src" / "pm_server"
+PACKAGE_SRC = REPO_ROOT / "src" / "pmlens"
 DIST_DIR = REPO_ROOT / "dist"
 
 ALLOWED_PLATFORMS = {"darwin", "linux", "win32"}
@@ -110,10 +110,10 @@ def validate(manifest: dict, pyproject_version: str) -> None:
             "server.mcp_config.args must include '${__dirname}' so the host "
             f"resolves the entry script relative to the install dir (got {args!r})"
         )
-    if not ("-m" in args and "pm_server" in args):
+    if not ("-m" in args and "pmlens" in args):
         errors.append(
-            "server.mcp_config.args must invoke the package via `python -m pm_server` "
-            "(NOT `python src/pm_server/__main__.py`). Direct script execution loses "
+            "server.mcp_config.args must invoke the package via `python -m pmlens` "
+            "(NOT `python src/pmlens/__main__.py`). Direct script execution loses "
             "the package context and dies on `from . import __version__` with "
             f"`attempted relative import with no known parent package` (got {args!r})"
         )
@@ -153,7 +153,7 @@ def validate(manifest: dict, pyproject_version: str) -> None:
 
 
 def _iter_package_sources(package_root: Path):
-    """Yield each shipped file under ``src/pm_server/`` (skips caches/bytecode)."""
+    """Yield each shipped file under ``src/pmlens/`` (skips caches/bytecode)."""
     for path in sorted(package_root.rglob("*")):
         if path.is_dir():
             continue

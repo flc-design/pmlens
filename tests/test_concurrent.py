@@ -19,9 +19,9 @@ from pathlib import Path
 
 import pytest
 
-from pm_server import storage
-from pm_server.models import Task
-from pm_server.storage import (
+from pmlens import storage
+from pmlens.models import Task
+from pmlens.storage import (
     _LOCK_TIMEOUT_ENV,
     DEFAULT_LOCK_TIMEOUT_S,
     _resolve_lock_timeout,
@@ -48,7 +48,7 @@ def _worker_add_tasks(pm_path_str: str, prefix: str, count: int) -> None:
 
 def _worker_holds_lock_then_writes(pm_path_str: str, hold_seconds: float, ready_path: str) -> None:
     """Acquire the tasks lock, signal ready, hold for ``hold_seconds``."""
-    from pm_server.storage import _yaml_transaction
+    from pmlens.storage import _yaml_transaction
 
     pm_path = Path(pm_path_str)
     with _yaml_transaction(pm_path, "tasks.yaml"):
@@ -98,8 +98,8 @@ class TestConcurrentMutations:
 
     def test_lock_blocks_concurrent_writer(self, cm_pm_path):
         """Second process should fail with PmServerError when first holds lock."""
-        from pm_server.models import PmServerError
-        from pm_server.storage import _yaml_transaction
+        from pmlens.models import PmServerError
+        from pmlens.storage import _yaml_transaction
 
         ctx = mp.get_context("spawn")
         ready_file = cm_pm_path / "ready.txt"

@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from pm_server.memory import MemoryStore
-from pm_server.models import (
+from pmlens.memory import MemoryStore
+from pmlens.models import (
     Memory,
     MemoryType,
     Phase,
@@ -19,8 +19,8 @@ from pm_server.models import (
     Task,
     TaskStatus,
 )
-from pm_server.recall import ContextBuilder, _estimate_tokens, _truncate_to_tokens
-from pm_server.storage import _save_project, _save_tasks
+from pmlens.recall import ContextBuilder, _estimate_tokens, _truncate_to_tokens
+from pmlens.storage import _save_project, _save_tasks
 
 # ─── Token estimation helpers ──────────────────────────
 
@@ -258,7 +258,7 @@ class TestClaudeMdV3:
     """Verify template evolution: Memory Layer + checkpoint + issue + warnings[] relay."""
 
     def test_template_version(self):
-        from pm_server.claudemd import TEMPLATE_VERSION
+        from pmlens.claudemd import TEMPLATE_VERSION
 
         # v11: PM Lens rebrand of the rule-section heading (PMSERV-136 / ADR-032);
         # v10: branch-aware recall rule (PMSERV-125 / ADR-028); v9 was the
@@ -267,58 +267,58 @@ class TestClaudeMdV3:
         assert TEMPLATE_VERSION == 11
 
     def test_template_has_pm_recall(self):
-        from pm_server.claudemd import CLAUDEMD_TEMPLATE
+        from pmlens.claudemd import CLAUDEMD_TEMPLATE
 
         assert "pm_recall" in CLAUDEMD_TEMPLATE
 
     def test_template_covers_severity_and_warnings(self):
         """v7 must guide Claude on severity selection and warnings[] relay."""
-        from pm_server.claudemd import CLAUDEMD_TEMPLATE
+        from pmlens.claudemd import CLAUDEMD_TEMPLATE
 
         assert "severity=" in CLAUDEMD_TEMPLATE or 'severity="' in CLAUDEMD_TEMPLATE
         assert "warnings[]" in CLAUDEMD_TEMPLATE
         assert "remediation" in CLAUDEMD_TEMPLATE
 
     def test_template_has_pm_remember(self):
-        from pm_server.claudemd import CLAUDEMD_TEMPLATE
+        from pmlens.claudemd import CLAUDEMD_TEMPLATE
 
         assert "pm_remember" in CLAUDEMD_TEMPLATE
 
     def test_template_has_checkpoint_section(self):
-        from pm_server.claudemd import CLAUDEMD_TEMPLATE
+        from pmlens.claudemd import CLAUDEMD_TEMPLATE
 
         assert "コンテキスト保全" in CLAUDEMD_TEMPLATE
         assert "Compaction" in CLAUDEMD_TEMPLATE
 
     def test_template_has_pm_session_summary(self):
-        from pm_server.claudemd import CLAUDEMD_TEMPLATE
+        from pmlens.claudemd import CLAUDEMD_TEMPLATE
 
         assert "pm_session_summary" in CLAUDEMD_TEMPLATE
 
     def test_template_has_memory_section(self):
-        from pm_server.claudemd import CLAUDEMD_TEMPLATE
+        from pmlens.claudemd import CLAUDEMD_TEMPLATE
 
         assert "作業中に重要な発見・判断があった時" in CLAUDEMD_TEMPLATE
 
     def test_template_has_pm_add_issue(self):
-        from pm_server.claudemd import CLAUDEMD_TEMPLATE
+        from pmlens.claudemd import CLAUDEMD_TEMPLATE
 
         assert "pm_add_issue" in CLAUDEMD_TEMPLATE
 
     def test_template_has_issue_workflow_section(self):
-        from pm_server.claudemd import CLAUDEMD_TEMPLATE
+        from pmlens.claudemd import CLAUDEMD_TEMPLATE
 
         assert "タスク完了確認中にイシュー" in CLAUDEMD_TEMPLATE
 
     def test_template_has_other_rule_sections_instruction(self):
-        from pm_server.claudemd import CLAUDEMD_TEMPLATE
+        from pmlens.claudemd import CLAUDEMD_TEMPLATE
 
         assert "other_rule_sections" in CLAUDEMD_TEMPLATE
 
     def test_template_has_memory_routing_section(self):
         # PMSERV-111 / ADR-023 (v8): pm_remember=SSoT vs Claude Code auto
         # memory role split, with an explicit no-dual-write rule.
-        from pm_server.claudemd import CLAUDEMD_TEMPLATE
+        from pmlens.claudemd import CLAUDEMD_TEMPLATE
 
         assert "記憶の二重化を避ける" in CLAUDEMD_TEMPLATE
         assert "auto memory" in CLAUDEMD_TEMPLATE

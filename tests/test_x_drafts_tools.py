@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pm_server.server as srv
+import pmlens.server as srv
 
 # Assembled at runtime so the literal never appears in source (GitHub secret
 # scanning flags secret-shaped literals; this is FAKE test data).

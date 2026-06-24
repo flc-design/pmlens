@@ -1,6 +1,6 @@
 """End-to-end CLI smoke tests (PMSERV-056).
 
-These tests invoke `python -m pm_server <subcmd>` as a subprocess and
+These tests invoke `python -m pmlens <subcmd>` as a subprocess and
 assert structural UX properties of the rendered output. They are the
 PMSERV-039 regression guard: independent unit and CLI tests passed
 while the real CLI emitted a duplicated `[dry-run]` tag in the wild
@@ -26,9 +26,9 @@ pytestmark = pytest.mark.smoke
 
 
 def _run_cli(*args: str, timeout: float = 30.0) -> subprocess.CompletedProcess[str]:
-    """Invoke `python -m pm_server <args>` and capture stdout/stderr."""
+    """Invoke `python -m pmlens <args>` and capture stdout/stderr."""
     return subprocess.run(
-        [sys.executable, "-m", "pm_server", *args],
+        [sys.executable, "-m", "pmlens", *args],
         capture_output=True,
         text=True,
         timeout=timeout,
@@ -112,3 +112,23 @@ class TestCliSanity:
         assert result.returncode == 0, f"stderr={result.stderr!r}"
         assert "--dry-run" in result.stdout
         assert "--target" in result.stdout
+
+
+class TestPmServerShimSmoke:
+    """PMSERV-137 / ADR-034: the legacy ``pm_server`` import alias must keep
+    ``python -m pm_server`` resolving to pmlens during the compat window. This
+    is the ONE smoke test deliberately kept on the OLD module name (every other
+    invocation uses ``-m pmlens``); it proves the ``sys.modules`` shim in
+    ``src/pm_server/__init__.py`` forwards module execution to pmlens."""
+
+    def test_dash_m_pm_server_alias_still_resolves(self):
+        result = subprocess.run(
+            [sys.executable, "-m", "pm_server", "--help"],
+            capture_output=True,
+            text=True,
+            timeout=30.0,
+        )
+        assert result.returncode == 0, f"`-m pm_server` shim failed: {result.stderr!r}"
+        # Same CLI surface as `-m pmlens` — the alias forwards to the real package.
+        assert "install" in result.stdout
+        assert "uninstall" in result.stdout

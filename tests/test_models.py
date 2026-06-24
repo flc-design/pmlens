@@ -2,7 +2,7 @@
 
 import datetime as _dt
 
-from pm_server.models import (
+from pmlens.models import (
     DailyLog,
     DailyLogEntry,
     Decision,

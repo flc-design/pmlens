@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from pm_server.x_draft_store import (
+from pmlens.x_draft_store import (
     XDraftStore,
     clear_x_draft_store,
     default_x_draft_db_path,

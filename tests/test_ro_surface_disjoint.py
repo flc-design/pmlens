@@ -2,7 +2,7 @@
 statically *disjoint* from git branch detection and ``subprocess`` shell-out.
 
 ADR-028 / PMSERV-125. Branch-aware recall rests on a hard invariant: branch
-*detection* (:func:`pm_server.discovery.read_git_branch`, which reads
+*detection* (:func:`pmlens.discovery.read_git_branch`, which reads
 ``.git/HEAD``) happens only on the WRITE path (``pm_session_summary``), and the
 read-only surface never shells out (``subprocess``). The suite already has two
 *simple* guards for this:
@@ -43,10 +43,10 @@ import ast
 import textwrap
 from pathlib import Path
 
-import pm_server
-import pm_server.server as srv
+import pmlens
+import pmlens.server as srv
 
-_PKG_DIR = Path(pm_server.__file__).parent
+_PKG_DIR = Path(pmlens.__file__).parent
 
 # Sinks the read-only surface must never reach.
 _GIT_DETECT_FN = "read_git_branch"  # reads .git/HEAD — write-path only

@@ -3,7 +3,7 @@
 import json
 from pathlib import Path
 
-from pm_server.discovery import (
+from pmlens.discovery import (
     detect_project_info,
     discover_projects,
     read_git_branch,
