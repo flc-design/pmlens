@@ -1,6 +1,8 @@
 """Shared fixtures for PM Lens tests."""
 
 import datetime as _dt
+import json
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -180,3 +182,114 @@ def clean_host_env(monkeypatch):
     """
     for var in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"):
         monkeypatch.delenv(var, raising=False)
+
+
+# ─── PMSERV-137 Phase-3 rename migration: legacy-user environment ──────────
+#
+# Scaffolding for the pm_server → pmlens identity-rename migration tests
+# (ADR-034 / ADR-032). Builds a realistic *pre-Phase-3* user environment so the
+# future ``pmlens migrate-from-pm-server`` updater can be tested end-to-end:
+# a CLAUDE.md carrying the (invariant) marker block, a settings.json with the
+# manual post-commit hook plus the three auto-approve perms that a naive key
+# flip would silently break, and a Codex config.toml whose user-authored
+# ``tools.*`` sub-tables the re-key must preserve byte-for-byte. Opt-in (NOT
+# autouse), so it never perturbs the existing suite.
+
+
+@dataclass(frozen=True)
+class LegacyUserEnv:
+    """Paths + canonical expectations for a pre-rename user (see fixture)."""
+
+    home: Path
+    project_root: Path
+    claude_md: Path
+    settings_json: Path
+    codex_config: Path
+    perm_entries: tuple[str, ...]
+    hook_command: str
+    codex_tool_subtables: tuple[str, ...]
+
+
+@pytest.fixture
+def legacy_user_env(tmp_path, monkeypatch) -> LegacyUserEnv:
+    """A pre-Phase-3 'legacy user' still on the old pm-server identity.
+
+    Returns a :class:`LegacyUserEnv` describing the four surfaces the rename
+    migration must touch without data loss, and points ``$HOME`` / ``Path.home``
+    at a tmp fake home so settings.json and the Codex config resolve there.
+    Step 1 only asserts the fixture is well-formed; steps 3-6 drive the actual
+    ``migrate-from-pm-server`` against it.
+    """
+    from pm_server.rules import BEGIN_MARKER, END_MARKER, TEMPLATE_VERSION
+
+    fake_home = tmp_path / "legacy_home"
+    (fake_home / ".claude").mkdir(parents=True)
+    (fake_home / ".codex").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+
+    # 1. project CLAUDE.md with the INVARIANT marker block — the rename must
+    #    upgrade it in place via the marker, never append a duplicate block.
+    project_root = tmp_path / "legacy_project"
+    project_root.mkdir()
+    marker_block = (
+        f"{BEGIN_MARKER.format(version=TEMPLATE_VERSION)}\n"
+        "## PM Lens 自動行動ルール（必ず従うこと）\n"
+        f"{END_MARKER}"
+    )
+    claude_md = project_root / "CLAUDE.md"
+    claude_md.write_text(f"# Legacy project notes\n\n{marker_block}\n", encoding="utf-8")
+
+    # 2. settings.json: manual post-commit hook + the 3 auto-approve perms that a
+    #    key flip would silently revert to prompting (the SILENT-breakage face).
+    perm_entries = (
+        "mcp__pm-server__pm_add_task",
+        "mcp__pm-server__pm_update_task",
+        "mcp__pm-server__pm_remember",
+    )
+    hook_command = "pm-server hook post-tool-use"
+    settings_json = fake_home / ".claude" / "settings.json"
+    settings_json.write_text(
+        json.dumps(
+            {
+                "permissions": {"allow": list(perm_entries)},
+                "hooks": {
+                    "PostToolUse": [
+                        {
+                            "matcher": "Bash",
+                            "hooks": [{"type": "command", "command": hook_command}],
+                        }
+                    ]
+                },
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    # 3. Codex config.toml: user-authored tools.* sub-tables that the re-key must
+    #    deep-copy from [mcp_servers.pm-server] to [mcp_servers.pmlens] intact.
+    codex_tool_subtables = ("pm_init", "pm_status")
+    codex_config = fake_home / ".codex" / "config.toml"
+    codex_config.write_text(
+        "[mcp_servers.pm-server]\n"
+        'command = "/old/path/to/pm-server"\n'
+        'args = ["serve"]\n'
+        "startup_timeout_sec = 30\n\n"
+        "[mcp_servers.pm-server.tools.pm_init]\n"
+        'approval_mode = "approve"\n\n'
+        "[mcp_servers.pm-server.tools.pm_status]\n"
+        'approval_mode = "approve"\n',
+        encoding="utf-8",
+    )
+
+    return LegacyUserEnv(
+        home=fake_home,
+        project_root=project_root,
+        claude_md=claude_md,
+        settings_json=settings_json,
+        codex_config=codex_config,
+        perm_entries=perm_entries,
+        hook_command=hook_command,
+        codex_tool_subtables=codex_tool_subtables,
+    )
