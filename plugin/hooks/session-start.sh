@@ -54,8 +54,18 @@ dup_warning=""
 mcp_timeout=""
 if command -v timeout >/dev/null 2>&1; then mcp_timeout="timeout 3"
 elif command -v gtimeout >/dev/null 2>&1; then mcp_timeout="gtimeout 3"; fi
-if command -v claude >/dev/null 2>&1 && $mcp_timeout claude mcp get pm-server >/dev/null 2>&1; then
-  dup_warning="WARNING: pm-server is also registered manually (claude mcp). This plugin bundles its own pm-server MCP; tool names are NOT namespaced by server, so you now have duplicate pm_* tools. Run 'claude mcp remove pm-server' to drop the manual registration and rely on the plugin."
+# Dual-recognition (PMSERV-137): a manual registration may live under the new
+# `pmlens` key or the legacy `pm-server` key — probe BOTH and report the match.
+dup_key=""
+if command -v claude >/dev/null 2>&1; then
+  if $mcp_timeout claude mcp get pmlens >/dev/null 2>&1; then
+    dup_key="pmlens"
+  elif $mcp_timeout claude mcp get pm-server >/dev/null 2>&1; then
+    dup_key="pm-server"
+  fi
+fi
+if [ -n "$dup_key" ]; then
+  dup_warning="WARNING: $dup_key is also registered manually (claude mcp). This plugin bundles its own PM Lens MCP; tool names are NOT namespaced by server, so you now have duplicate pm_* tools. Run 'claude mcp remove $dup_key' to drop the manual registration and rely on the plugin."
 fi
 
 # --- 3. branch surface (PMSERV-124 / ADR-028) --------------------------------

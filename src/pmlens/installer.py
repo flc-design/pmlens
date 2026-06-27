@@ -167,7 +167,7 @@ class InstallSummary:
 def install_claude_code(*, dry_run: bool = False) -> InstallResult:
     """Register pm-server as a Claude Code MCP server (user scope).
 
-    Idempotent: if ``claude mcp get pm-server`` already succeeds, the
+    Idempotent: if ``claude mcp get pmlens`` already succeeds, the
     call short-circuits with ``status="already_registered"``.
 
     Args:
@@ -203,7 +203,7 @@ def install_claude_code(*, dry_run: bool = False) -> InstallResult:
         )
 
     result = subprocess.run(
-        [claude_path, "mcp", "get", "pm-server"],
+        [claude_path, "mcp", "get", "pmlens"],
         capture_output=True,
         text=True,
         timeout=10,
@@ -247,7 +247,7 @@ def install_claude_code(*, dry_run: bool = False) -> InstallResult:
         # server registers the outbox-write tools. Mirrors the PM_LENS
         # propagation contract; harmless under PM_LENS=0 (no-op gating).
         add_cmd.extend(["--env", "PM_DESKTOP_WRITE=1"])
-    add_cmd.extend(["pm-server", "--", pm_server_path, "serve"])
+    add_cmd.extend(["pmlens", "--", pm_server_path, "serve"])
 
     result = subprocess.run(
         add_cmd,
@@ -278,7 +278,7 @@ def install_claude_code(*, dry_run: bool = False) -> InstallResult:
 def uninstall_claude_code(*, dry_run: bool = False) -> InstallResult:
     """Remove pm-server from Claude Code MCP servers (user scope).
 
-    Performs a pre-check via ``claude mcp get pm-server`` so the
+    Performs a pre-check via ``claude mcp get pmlens`` so the
     "not registered" case yields ``status="skipped"`` instead of being
     folded into ``status="failed"`` (which is reserved for actual
     removal errors). This makes the live and dry-run paths share a
@@ -301,7 +301,7 @@ def uninstall_claude_code(*, dry_run: bool = False) -> InstallResult:
         )
 
     pre_check = subprocess.run(
-        [claude_path, "mcp", "get", "pm-server"],
+        [claude_path, "mcp", "get", "pmlens"],
         capture_output=True,
         text=True,
         timeout=10,
@@ -323,7 +323,7 @@ def uninstall_claude_code(*, dry_run: bool = False) -> InstallResult:
         )
 
     result = subprocess.run(
-        [claude_path, "mcp", "remove", "pm-server", "--scope", "user"],
+        [claude_path, "mcp", "remove", "pmlens", "--scope", "user"],
         capture_output=True,
         text=True,
         timeout=10,
@@ -389,7 +389,7 @@ def install_codex(*, dry_run: bool = False) -> InstallResult:
           non-Codex installations).
         - Resolve: absolute pm-server path via :func:`_resolve_pm_server_path`.
         - Backup: timestamped copy under ``~/.codex/config.toml.bak.<ts>``.
-        - Update: field-level edits to ``[mcp_servers.pm-server]`` so any
+        - Update: field-level edits to ``[mcp_servers.pmlens]`` so any
           user-defined sub-tables (such as per-tool ``approval_mode``
           customizations) and surrounding comments are preserved.
         - Atomic write: tempfile + os.replace.
@@ -426,8 +426,8 @@ def install_codex(*, dry_run: bool = False) -> InstallResult:
     # PM_LENS/PM_DESKTOP_WRITE env presence — no mutation, no backup needed.
     # PMSERV-087 + PMSERV-100: we compare both env flags, so flipping either
     # one across reinstalls re-registers cleanly without stale env left over.
-    if "mcp_servers" in doc and "pm-server" in doc["mcp_servers"]:
-        existing = doc["mcp_servers"]["pm-server"]
+    if "mcp_servers" in doc and "pmlens" in doc["mcp_servers"]:
+        existing = doc["mcp_servers"]["pmlens"]
         existing_command = existing.get("command")
         existing_env = existing.get("env") or {}
         existing_has_lens = str(existing_env.get("PM_LENS", "")) == "1"
@@ -449,7 +449,7 @@ def install_codex(*, dry_run: bool = False) -> InstallResult:
     if dry_run:
         # Predict the outcome without creating a backup or writing anything.
         suffix = " in Lens (read-only) mode" if lens_mode else ""
-        if "mcp_servers" not in doc or "pm-server" not in doc.get("mcp_servers", {}):
+        if "mcp_servers" not in doc or "pmlens" not in doc.get("mcp_servers", {}):
             message = (
                 f"would register PM Lens in Codex (user scope){suffix}. "
                 "Would back up to ~/.codex/config.toml.bak.<ts> before write."
@@ -473,7 +473,7 @@ def install_codex(*, dry_run: bool = False) -> InstallResult:
 
     if "mcp_servers" not in doc:
         doc["mcp_servers"] = tomlkit.table()
-    if "pm-server" not in doc["mcp_servers"]:
+    if "pmlens" not in doc["mcp_servers"]:
         section = tomlkit.table()
         section["command"] = str(pm_server_path)
         section["args"] = ["serve"]
@@ -485,14 +485,14 @@ def install_codex(*, dry_run: bool = False) -> InstallResult:
             if desktop_write_mode:
                 env_table["PM_DESKTOP_WRITE"] = "1"
             section["env"] = env_table
-        doc["mcp_servers"]["pm-server"] = section
+        doc["mcp_servers"]["pmlens"] = section
         suffix = " in Lens (read-only) mode" if lens_mode else ""
         message = (
             f"PM Lens registered in Codex (user scope){suffix}. "
             f"Backup at {backup_path}. Restart Codex to activate."
         )
     else:
-        section = doc["mcp_servers"]["pm-server"]
+        section = doc["mcp_servers"]["pmlens"]
         section["command"] = str(pm_server_path)
         section["args"] = ["serve"]
         if "startup_timeout_sec" not in section:
@@ -542,7 +542,7 @@ def uninstall_codex(*, dry_run: bool = False) -> InstallResult:
 
     Removes only the top-level fields (``command``, ``args``,
     ``startup_timeout_sec``). If the user has customized sub-tables
-    such as ``[mcp_servers.pm-server.tools.pm_init]``, the parent
+    such as ``[mcp_servers.pmlens.tools.pm_init]``, the parent
     section is preserved with a notice in the result message —
     those customizations are left untouched and require manual
     cleanup if no longer wanted.
@@ -567,18 +567,18 @@ def uninstall_codex(*, dry_run: bool = False) -> InstallResult:
 
     doc = tomlkit.parse(config_path.read_text(encoding="utf-8"))
 
-    if "mcp_servers" not in doc or "pm-server" not in doc["mcp_servers"]:
+    if "mcp_servers" not in doc or "pmlens" not in doc["mcp_servers"]:
         return InstallResult(
             target="codex",
             status="skipped",
-            message="pm-server not registered in Codex",
+            message="PM Lens not registered in Codex",
             is_dry_run=dry_run,
         )
 
     if dry_run:
         # Predict whether the section would be fully removed or only
         # top-level fields stripped (sub-tables preserved).
-        section = doc["mcp_servers"]["pm-server"]
+        section = doc["mcp_servers"]["pmlens"]
         managed = ("command", "args", "startup_timeout_sec")
         residual_keys = [k for k in section.keys() if k not in managed]
         if not residual_keys:
@@ -602,13 +602,13 @@ def uninstall_codex(*, dry_run: bool = False) -> InstallResult:
 
     backup_path = _backup_codex_config(config_path)
 
-    section = doc["mcp_servers"]["pm-server"]
+    section = doc["mcp_servers"]["pmlens"]
     for key in ("command", "args", "startup_timeout_sec"):
         if key in section:
             del section[key]
 
     if not section:
-        del doc["mcp_servers"]["pm-server"]
+        del doc["mcp_servers"]["pmlens"]
         if not doc["mcp_servers"]:
             del doc["mcp_servers"]
         message = f"PM Lens unregistered from Codex. Backup at {backup_path}."

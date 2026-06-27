@@ -86,7 +86,7 @@ from .x_draft_store import (
     normalize_source_refs,
 )
 
-mcp = FastMCP("pm-server")
+mcp = FastMCP("pmlens")
 
 
 # ─── Lens Mode (PMSERV-079, WF-025) ──────────────────

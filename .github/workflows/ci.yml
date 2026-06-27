@@ -36,3 +36,29 @@ jobs:
 
       - name: Run tests with coverage
         run: pytest --cov
+
+  identity-guard:
+    # PMSERV-137 / ADR-034 step 6: an INDEPENDENT mechanical gate for the
+    # pm-server -> pmlens identity flip. Kept SEPARATE from the pytest guards —
+    # a guard living in the same commit/file as the value it asserts cannot
+    # protect that commit — so the rename can never silently regress.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+
+      - name: Phase-3 identity grep gate
+        run: |
+          set -euo pipefail
+          # 1. The legacy FastMCP server name must be gone everywhere in src/.
+          if grep -rn 'FastMCP("pm-server")' src/; then
+            echo "::error::legacy FastMCP(\"pm-server\") still present — identity flip incomplete"
+            exit 1
+          fi
+          # 2. The new identity must be present.
+          grep -q 'FastMCP("pmlens")' src/pmlens/server.py
+          # 3. The CLAUDE.md/AGENTS.md marker slug must STAY 'pm-server:begin'
+          #    (ADR-032 invariant: renaming it strands existing user blocks).
+          count="$(grep -c 'pm-server:begin' src/pmlens/rules.py)"
+          test "$count" -ge 3
+          echo "identity gate OK: FastMCP(\"pmlens\") present, no legacy name, marker slug intact (${count} lines)"

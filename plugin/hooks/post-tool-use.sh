@@ -39,13 +39,14 @@ esac
 
 # --- 2. double-fire guard: defer if the manual settings.json hook is present ---
 # The manual install writes a PostToolUse hook whose command contains
-# "pm-server hook" (hooks.py: marker "pm-server" + "hook"). If we see it, let it
-# fire alone. Resolve the global settings path the same way Claude Code does:
-# CLAUDE_CONFIG_DIR overrides ~/.claude.
+# "pmlens hook" (new identity) or the legacy "pm-server hook" (hooks.py markers
+# "pmlens"/"pm-server" + "hook"). Dual-recognition (PMSERV-137): match EITHER so
+# we defer to a manual hook installed under either identity. Resolve the global
+# settings path the same way Claude Code does: CLAUDE_CONFIG_DIR overrides ~/.claude.
 settings_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 settings="$settings_dir/settings.json"
-if [ -f "$settings" ] && grep -q 'pm-server hook' "$settings" 2>/dev/null; then
-  exit 0   # manual `pm-server hook post-tool-use` will fire — do not double up
+if [ -f "$settings" ] && grep -Eq 'pm-server hook|pmlens hook' "$settings" 2>/dev/null; then
+  exit 0   # a manual `pm-server hook`/`pmlens hook` post-tool-use will fire — do not double up
 fi
 
 # --- 3. directive -------------------------------------------------------------

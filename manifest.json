@@ -1,6 +1,6 @@
 {
   "manifest_version": "0.4",
-  "name": "pm-server",
+  "name": "pmlens",
   "display_name": "PM Lens (Read-only)",
   "version": "0.11.0",
   "description": "Read-only project-management Lens for Claude Desktop/Cowork. Surfaces tasks, blockers, memory, and dashboards from a project's .pm/ store; writes are structurally disabled.",

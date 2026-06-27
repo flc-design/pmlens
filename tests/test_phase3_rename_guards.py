@@ -96,21 +96,23 @@ class TestWrapperMetapackageInvariant:
             )
 
 
-class TestPluginGuardBaseline:
-    """Baseline (single-recognition) plugin guard state, GREEN today. Step 6
-    widens these to DUAL-recognize the new ``pmlens hook`` command and the
-    ``pmlens`` MCP key; pinning the current strings makes that change a visible,
-    intentional diff instead of a silent drift."""
+class TestPluginGuardDualRecognition:
+    """Post-step-6 plugin guards DUAL-recognize both identities (PMSERV-137 /
+    ADR-034). The legacy ``pm-server hook`` command and ``pm-server`` MCP key
+    must STILL be recognized — a mid-rename user with the old manual hook must
+    not be double-fired or stranded — AND the new ``pmlens`` identity must be
+    recognized too. Asserting both pins the dual-recognition contract; dropping
+    either side is then a loud, intentional diff."""
 
-    def test_post_tool_use_double_fire_guard_matches_pm_server_hook(self):
+    def test_post_tool_use_double_fire_guard_recognizes_both_hook_commands(self):
         script = (PLUGIN_HOOKS / "post-tool-use.sh").read_text(encoding="utf-8")
-        # Today the double-fire guard only recognizes the legacy manual hook.
-        assert "pm-server hook" in script
+        assert "pm-server hook" in script  # legacy manual hook still deferred to
+        assert "pmlens hook" in script  # new-identity manual hook also deferred to
 
-    def test_session_start_probes_pm_server_mcp_key(self):
+    def test_session_start_probes_both_mcp_keys(self):
         script = (PLUGIN_HOOKS / "session-start.sh").read_text(encoding="utf-8")
-        # Today the duplicate-MCP probe only checks the legacy registration key.
-        assert "claude mcp get pm-server" in script
+        assert "claude mcp get pm-server" in script  # legacy key still probed
+        assert "claude mcp get pmlens" in script  # new key probed
 
 
 class TestLegacyUserEnvFixture:

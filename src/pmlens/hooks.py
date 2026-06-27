@@ -12,11 +12,16 @@ import shutil
 import sys
 from pathlib import Path
 
-# Hook command that Claude Code will call
-_HOOK_COMMAND_PREFIX = "pm-server hook"
+# Hook command that Claude Code will call. New installs emit the ``pmlens``
+# binary; the legacy ``pm-server hook`` form is still RECOGNIZED on detection
+# and removal via ``_PM_HOOK_MARKERS`` (dual-recognition, PMSERV-137 / ADR-034).
+_HOOK_COMMAND_PREFIX = "pmlens hook"
 
-# Markers to identify pm-server hooks in settings.json
-_PM_HOOK_MARKER = "pm-server"
+# Markers that identify a PM Lens hook in settings.json. Dual-recognition:
+# legacy installs wrote ``pm-server hook ...``; the post-rename identity writes
+# ``pmlens hook ...``. Detection/removal must match BOTH so an upgrade-in-place
+# (or the migrate updater) never strands a half-renamed hook.
+_PM_HOOK_MARKERS = ("pm-server", "pmlens")
 
 
 def _settings_path() -> Path:
@@ -44,8 +49,13 @@ def _save_settings(path: Path, settings: dict) -> None:
 
 
 def _pm_server_command() -> str:
-    """Return the full path to pm-server, or bare name as fallback."""
-    return shutil.which("pm-server") or "pm-server"
+    """Return the full path to the PM Lens binary, or a bare name fallback.
+
+    Prefers the new ``pmlens`` console script and falls back to the legacy
+    ``pm-server`` binary while the rename is mid-flight (the wrapper still
+    ships it), so a fresh hook install resolves on machines that only have the
+    old binary on PATH (PMSERV-137)."""
+    return shutil.which("pmlens") or shutil.which("pm-server") or "pmlens"
 
 
 def _build_hook_config() -> dict:
@@ -69,10 +79,10 @@ def _build_hook_config() -> dict:
 
 
 def _is_pm_hook(hook_group: dict) -> bool:
-    """Check if a hook group belongs to pm-server."""
+    """Check if a hook group belongs to PM Lens (legacy or new identity)."""
     for hook in hook_group.get("hooks", []):
         cmd = hook.get("command", "")
-        if _PM_HOOK_MARKER in cmd and "hook" in cmd:
+        if any(marker in cmd for marker in _PM_HOOK_MARKERS) and "hook" in cmd:
             return True
     return False
 

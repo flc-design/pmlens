@@ -168,13 +168,16 @@ class TestUninstallMcp:
 
 class TestMigrateFromPmAgent:
     def test_migrate_from_pm_agent(self, tmp_path, monkeypatch, recwarn):
-        """migrate コマンドが旧 pm-agent を解除して pm-server を登録する。"""
+        """migrate コマンドが旧 pm-agent を解除して新アイデンティティ pmlens を登録する。"""
         calls = []
 
         def mock_run(cmd, **kwargs):
             calls.append(cmd)
-            result = subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
-            return result
+            # `claude mcp get pmlens` must report NOT-registered (rc=1) so the
+            # install proceeds to `add`; otherwise it short-circuits at
+            # already_registered and never registers (PMSERV-137 key flip).
+            rc = 1 if ("get" in cmd and "pmlens" in cmd) else 0
+            return subprocess.CompletedProcess(cmd, rc, stdout="", stderr="")
 
         monkeypatch.setattr(subprocess, "run", mock_run)
         monkeypatch.setattr(
@@ -194,8 +197,8 @@ class TestMigrateFromPmAgent:
 
         # remove pm-agent が呼ばれたこと
         assert any("pm-agent" in str(c) for c in calls)
-        # add pm-server が呼ばれたこと
-        assert any("pm-server" in str(c) for c in calls)
+        # 新アイデンティティ pmlens を登録する `add` が発火したこと（バイナリは pm-server のまま）
+        assert any("add" in c and "pmlens" in c for c in calls)
         # PMSERV-055: migrate must call the non-deprecated per-host function
         # (install_claude_code), not the install_mcp() wrapper — so no
         # DeprecationWarning should escape from the migration path.
@@ -483,7 +486,7 @@ class TestInstallOrchestrator:
         """dry_run is propagated by the uninstall orchestrator (PMSERV-039)."""
 
         codex_content = textwrap.dedent("""
-            [mcp_servers.pm-server]
+            [mcp_servers.pmlens]
             command = "/usr/bin/pm-server"
             args = ["serve"]
             startup_timeout_sec = 30
@@ -709,7 +712,7 @@ class TestInstallCodexLensMode:
         assert "Lens" in r.message
 
         doc = tomlkit.parse(fake_codex_config.read_text(encoding="utf-8"))
-        section = doc["mcp_servers"]["pm-server"]
+        section = doc["mcp_servers"]["pmlens"]
         assert "env" in section
         assert str(section["env"]["PM_LENS"]) == "1"
 
@@ -727,7 +730,7 @@ class TestInstallCodexLensMode:
         assert r.lens_mode is False
 
         doc = tomlkit.parse(fake_codex_config.read_text(encoding="utf-8"))
-        section = doc["mcp_servers"]["pm-server"]
+        section = doc["mcp_servers"]["pmlens"]
         assert "env" not in section
 
     def test_already_registered_when_lens_env_matches(
@@ -739,7 +742,7 @@ class TestInstallCodexLensMode:
         fake_codex_config.write_text(
             textwrap.dedent(
                 f"""
-                [mcp_servers.pm-server]
+                [mcp_servers.pmlens]
                 command = "{pm_server_path}"
                 args = ["serve"]
                 startup_timeout_sec = 30
@@ -764,7 +767,7 @@ class TestInstallCodexLensMode:
         fake_codex_config.write_text(
             textwrap.dedent(
                 f"""
-                [mcp_servers.pm-server]
+                [mcp_servers.pmlens]
                 command = "{pm_server_path}"
                 args = ["serve"]
                 startup_timeout_sec = 30
@@ -778,7 +781,7 @@ class TestInstallCodexLensMode:
         assert r.lens_mode is True
 
         doc = tomlkit.parse(fake_codex_config.read_text(encoding="utf-8"))
-        section = doc["mcp_servers"]["pm-server"]
+        section = doc["mcp_servers"]["pmlens"]
         assert str(section["env"]["PM_LENS"]) == "1"
 
     def test_reinstall_flips_lens_to_rw_by_removing_env(
@@ -792,7 +795,7 @@ class TestInstallCodexLensMode:
         fake_codex_config.write_text(
             textwrap.dedent(
                 f"""
-                [mcp_servers.pm-server]
+                [mcp_servers.pmlens]
                 command = "{pm_server_path}"
                 args = ["serve"]
                 startup_timeout_sec = 30
@@ -807,7 +810,7 @@ class TestInstallCodexLensMode:
         assert r.lens_mode is False
 
         doc = tomlkit.parse(fake_codex_config.read_text(encoding="utf-8"))
-        section = doc["mcp_servers"]["pm-server"]
+        section = doc["mcp_servers"]["pmlens"]
         # Empty env table is collapsed
         assert "env" not in section
 
@@ -900,9 +903,9 @@ class TestInstallCodex:
         assert "Codex" in result.message
         assert result.backup_path is not None
         doc = tomlkit.parse(fake_codex_config.read_text())
-        assert str(doc["mcp_servers"]["pm-server"]["command"]) == str(pm_path)
-        assert list(doc["mcp_servers"]["pm-server"]["args"]) == ["serve"]
-        assert doc["mcp_servers"]["pm-server"]["startup_timeout_sec"] == 30
+        assert str(doc["mcp_servers"]["pmlens"]["command"]) == str(pm_path)
+        assert list(doc["mcp_servers"]["pmlens"]["args"]) == ["serve"]
+        assert doc["mcp_servers"]["pmlens"]["startup_timeout_sec"] == 30
         assert "filesystem" in doc["mcp_servers"]
 
     def test_already_registered_when_command_matches(
@@ -912,7 +915,7 @@ class TestInstallCodex:
         fake_codex_config.write_text(
             textwrap.dedent(
                 f"""\
-                [mcp_servers.pm-server]
+                [mcp_servers.pmlens]
                 command = "{pm_path}"
                 args = ["serve"]
                 startup_timeout_sec = 30
@@ -933,7 +936,7 @@ class TestInstallCodex:
         fake_codex_config.write_text(
             textwrap.dedent(
                 """\
-                [mcp_servers.pm-server]
+                [mcp_servers.pmlens]
                 command = "/old/path/to/pm-server"
                 args = ["serve"]
                 startup_timeout_sec = 30
@@ -944,22 +947,22 @@ class TestInstallCodex:
         result = install_codex()
         assert result.status == "installed"
         doc = tomlkit.parse(fake_codex_config.read_text())
-        assert str(doc["mcp_servers"]["pm-server"]["command"]) == str(pm_path)
+        assert str(doc["mcp_servers"]["pmlens"]["command"]) == str(pm_path)
 
     def test_preserves_subtables(self, fake_codex_config, tmp_path, monkeypatch):
         self._make_pm_server_resolvable(tmp_path, monkeypatch)
         fake_codex_config.write_text(
             textwrap.dedent(
                 """\
-                [mcp_servers.pm-server]
+                [mcp_servers.pmlens]
                 command = "/old/path/to/pm-server"
                 args = ["serve"]
                 startup_timeout_sec = 30
 
-                [mcp_servers.pm-server.tools.pm_init]
+                [mcp_servers.pmlens.tools.pm_init]
                 approval_mode = "approve"
 
-                [mcp_servers.pm-server.tools.pm_status]
+                [mcp_servers.pmlens.tools.pm_status]
                 approval_mode = "approve"
                 """
             )
@@ -968,8 +971,8 @@ class TestInstallCodex:
         result = install_codex()
         assert result.status == "installed"
         doc = tomlkit.parse(fake_codex_config.read_text())
-        assert doc["mcp_servers"]["pm-server"]["tools"]["pm_init"]["approval_mode"] == "approve"
-        assert doc["mcp_servers"]["pm-server"]["tools"]["pm_status"]["approval_mode"] == "approve"
+        assert doc["mcp_servers"]["pmlens"]["tools"]["pm_init"]["approval_mode"] == "approve"
+        assert doc["mcp_servers"]["pmlens"]["tools"]["pm_status"]["approval_mode"] == "approve"
 
     def test_preserves_comments_and_other_sections(self, fake_codex_config, tmp_path, monkeypatch):
         self._make_pm_server_resolvable(tmp_path, monkeypatch)
@@ -982,7 +985,7 @@ class TestInstallCodex:
                 args = ["-y", "@modelcontextprotocol/server-filesystem"]
 
                 # PM Lens section comment
-                [mcp_servers.pm-server]
+                [mcp_servers.pmlens]
                 command = "/old/pm-server"
                 args = ["serve"]
                 startup_timeout_sec = 30
@@ -1013,7 +1016,7 @@ class TestInstallCodex:
         tmp_file = fake_codex_config.with_name(fake_codex_config.name + ".tmp")
         assert not tmp_file.exists()
         doc = tomlkit.parse(fake_codex_config.read_text())
-        assert "pm-server" in doc["mcp_servers"]
+        assert "pmlens" in doc["mcp_servers"]
 
     def test_install_codex_twice_second_returns_already_registered(
         self, fake_codex_config, tmp_path, monkeypatch
@@ -1078,8 +1081,8 @@ class TestInstallCodex:
         assert result.status == "installed"
         doc = tomlkit.parse(fake_codex_config.read_text())
         assert "mcp_servers" in doc
-        assert "pm-server" in doc["mcp_servers"]
-        assert str(doc["mcp_servers"]["pm-server"]["command"]) == str(pm_path)
+        assert "pmlens" in doc["mcp_servers"]
+        assert str(doc["mcp_servers"]["pmlens"]["command"]) == str(pm_path)
         assert str(doc["model"]) == "gpt-4o"
 
     def test_install_codex_existing_section_without_startup_timeout(
@@ -1090,7 +1093,7 @@ class TestInstallCodex:
         fake_codex_config.write_text(
             textwrap.dedent(
                 """\
-                [mcp_servers.pm-server]
+                [mcp_servers.pmlens]
                 command = "/old/pm-server"
                 args = ["serve"]
                 """
@@ -1100,7 +1103,7 @@ class TestInstallCodex:
         result = install_codex()
         assert result.status == "installed"
         doc = tomlkit.parse(fake_codex_config.read_text())
-        assert doc["mcp_servers"]["pm-server"]["startup_timeout_sec"] == 30
+        assert doc["mcp_servers"]["pmlens"]["startup_timeout_sec"] == 30
 
     def test_dry_run_does_not_create_backup_or_write_file(
         self, tmp_path, monkeypatch, fake_codex_config
@@ -1131,7 +1134,7 @@ class TestInstallCodex:
         fake_codex_config.write_text(
             textwrap.dedent(
                 f"""\
-                [mcp_servers.pm-server]
+                [mcp_servers.pmlens]
                 command = "{pm_server_path}"
                 args = ["serve"]
                 startup_timeout_sec = 30
@@ -1154,7 +1157,7 @@ class TestInstallCodex:
         fake_codex_config.write_text(
             textwrap.dedent(
                 """\
-                [mcp_servers.pm-server]
+                [mcp_servers.pmlens]
                 command = "/old/pm-server"
                 args = ["serve"]
                 startup_timeout_sec = 30
@@ -1198,7 +1201,7 @@ class TestUninstallCodex:
         fake_codex_config.write_text(
             textwrap.dedent(
                 """\
-                [mcp_servers.pm-server]
+                [mcp_servers.pmlens]
                 command = "/some/pm-server"
                 args = ["serve"]
                 startup_timeout_sec = 30
@@ -1210,18 +1213,18 @@ class TestUninstallCodex:
         assert result.backup_path is not None
         doc = tomlkit.parse(fake_codex_config.read_text())
         if "mcp_servers" in doc:
-            assert "pm-server" not in doc["mcp_servers"]
+            assert "pmlens" not in doc["mcp_servers"]
 
     def test_preserves_subtables_with_warning(self, fake_codex_config):
         fake_codex_config.write_text(
             textwrap.dedent(
                 """\
-                [mcp_servers.pm-server]
+                [mcp_servers.pmlens]
                 command = "/some/pm-server"
                 args = ["serve"]
                 startup_timeout_sec = 30
 
-                [mcp_servers.pm-server.tools.pm_init]
+                [mcp_servers.pmlens.tools.pm_init]
                 approval_mode = "approve"
                 """
             )
@@ -1230,7 +1233,7 @@ class TestUninstallCodex:
         assert result.status == "uninstalled"
         assert "preserved" in result.message.lower() or "manually" in result.message.lower()
         doc = tomlkit.parse(fake_codex_config.read_text())
-        section = doc["mcp_servers"]["pm-server"]
+        section = doc["mcp_servers"]["pmlens"]
         assert "command" not in section
         assert "args" not in section
         assert "startup_timeout_sec" not in section
@@ -1240,7 +1243,7 @@ class TestUninstallCodex:
         fake_codex_config.write_text(
             textwrap.dedent(
                 """\
-                [mcp_servers.pm-server]
+                [mcp_servers.pmlens]
                 command = "/some/pm-server"
                 args = ["serve"]
                 """
@@ -1250,14 +1253,14 @@ class TestUninstallCodex:
         assert result.backup_path is not None
         backup = Path(result.backup_path)
         assert backup.exists()
-        assert "pm-server" in backup.read_text()
+        assert "pmlens" in backup.read_text()
 
     def test_uninstall_codex_twice_second_returns_skipped(self, fake_codex_config):
         """Second uninstall_codex skips when pm-server not registered (PMSERV-040)."""
         fake_codex_config.write_text(
             textwrap.dedent(
                 """\
-                [mcp_servers.pm-server]
+                [mcp_servers.pmlens]
                 command = "/some/pm-server"
                 args = ["serve"]
                 """
@@ -1278,7 +1281,7 @@ class TestUninstallCodex:
             textwrap.dedent(
                 """\
                 # Top-of-file comment
-                [mcp_servers.pm-server]
+                [mcp_servers.pmlens]
                 command = "/some/pm-server"
                 args = ["serve"]
                 """
@@ -1299,7 +1302,7 @@ class TestUninstallCodex:
                 command = "npx"
                 args = ["-y", "@modelcontextprotocol/server-filesystem"]
 
-                [mcp_servers.pm-server]
+                [mcp_servers.pmlens]
                 command = "/some/pm-server"
                 args = ["serve"]
                 """
@@ -1315,7 +1318,7 @@ class TestUninstallCodex:
         """dry-run uninstall skips _backup_codex_config and _atomic_write_toml (PMSERV-039)."""
         original_content = textwrap.dedent(
             """\
-            [mcp_servers.pm-server]
+            [mcp_servers.pmlens]
             command = "/usr/bin/pm-server"
             args = ["serve"]
             startup_timeout_sec = 30
@@ -1339,12 +1342,12 @@ class TestUninstallCodex:
         """dry-run hits the sub-tables-preserved branch with the right message (PMSERV-039)."""
         original_content = textwrap.dedent(
             """\
-            [mcp_servers.pm-server]
+            [mcp_servers.pmlens]
             command = "/usr/bin/pm-server"
             args = ["serve"]
             startup_timeout_sec = 30
 
-            [mcp_servers.pm-server.tools.pm_init]
+            [mcp_servers.pmlens.tools.pm_init]
             approval_mode = "never"
             """
         )
@@ -1380,18 +1383,18 @@ class TestCodexLifecycle:
         r1 = install_codex()
         assert r1.status == "installed"
         doc = tomlkit.parse(fake_codex_config.read_text())
-        assert "pm-server" in doc["mcp_servers"]
+        assert "pmlens" in doc["mcp_servers"]
 
         r2 = uninstall_codex()
         assert r2.status == "uninstalled"
         doc = tomlkit.parse(fake_codex_config.read_text())
-        assert "pm-server" not in doc.get("mcp_servers", {})
+        assert "pmlens" not in doc.get("mcp_servers", {})
         assert "filesystem" in doc.get("mcp_servers", {})
 
         r3 = install_codex()
         assert r3.status == "installed"
         doc = tomlkit.parse(fake_codex_config.read_text())
-        assert str(doc["mcp_servers"]["pm-server"]["command"]) == str(pm_path)
+        assert str(doc["mcp_servers"]["pmlens"]["command"]) == str(pm_path)
         assert "filesystem" in doc["mcp_servers"]
 
         backups = list(fake_codex_config.parent.glob("config.toml.bak.*"))
@@ -1706,7 +1709,7 @@ class TestInstallCodexDesktopWritePropagation:
         so the spawned server starts in the requested mode (no stale env)."""
         # Seed an existing registration that already has PM_DESKTOP_WRITE=1.
         seed = (
-            "[mcp_servers.pm-server]\n"
+            "[mcp_servers.pmlens]\n"
             f'command = "{tmp_path / "pm-server"}"\n'
             'args = ["serve"]\n'
             "startup_timeout_sec = 30\n"

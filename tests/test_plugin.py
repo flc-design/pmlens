@@ -217,7 +217,7 @@ class TestPluginVersionSync:
 
     def test_mcp_uvx_pin_matches_pyproject(self):
         ver = _pyproject_version()
-        pin = _load(PLUGIN_MCP)["mcpServers"]["pm-server"]["args"][0]
+        pin = _load(PLUGIN_MCP)["mcpServers"]["pmlens"]["args"][0]
         m = re.fullmatch(r"pm-server@(.+)", pin)
         assert m is not None, f"plugin/.mcp.json uvx pin malformed: {pin!r}"
         assert m.group(1) == ver, (
