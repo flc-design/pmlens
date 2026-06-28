@@ -4,9 +4,10 @@ This document tracks the rebrand from "PM Server" to **PM Lens** (`pmlens`),
 split into three phases. It is the source-of-truth runbook; every Phase-2 commit
 cites it.
 
-> Last refreshed: 2026-06-22, against **live code** (8-agent recon, verdict
-> `ready_with_fixes`). Earlier revisions (2026-06-19) carried stale line numbers
-> and counts — superseded below.
+> Last refreshed: 2026-06-28 — Phase-2 marked DONE (`pmlens` 0.11.0 live) and
+> Phase-3 steps 1-6 landed; Status + Phase-3 section updated to live state. Prior
+> refresh 2026-06-22 ran an 8-agent recon against live code (verdict
+> `ready_with_fixes`); the 2026-06-19 revisions carried stale line numbers/counts.
 
 ---
 
@@ -21,8 +22,14 @@ cites it.
   (flc-design account) so the name cannot be squatted. Pinned at `0.0.1`
   (`packaging/pmlens-reservation/`) — below `0.11.0` so the real release shadows
   it. See **ADR-031**.
-- **Phase-2 (distribution rename + display layer) — PLANNED (PMSERV-136).** This document.
-- **Phase-3 (identity rename) — DEFERRED (PMSERV-137).** See **ADR-032**.
+- **Phase-2 (distribution rename + display layer) — DONE (PMSERV-136).** `pmlens`
+  0.11.0 is published to PyPI; `pm-server` is now a zero-module compat wrapper
+  depending on `pmlens>=0.11.0`. This document is its runbook.
+- **Phase-3 (identity rename) — IN PROGRESS (PMSERV-137 / ADR-034).** The
+  load-bearing identifier flip (import name, FastMCP name, the MCP registration
+  keys, manifest/plugin keys) is implemented on branch
+  `feat/pmserv-137-phase3-rename` (steps 1-6, unpublished); the `0.12.0` publish
+  is gated (step 7). See the **Phase-3** section below.
 
 ---
 
@@ -175,22 +182,63 @@ its test assertions to avoid a split-brain state.
 
 ---
 
-## Phase-3 (deferred) — identity rename · PMSERV-137 / ADR-032
+## Phase-3 — identity rename · PMSERV-137 / ADR-034
 
-After `pmlens` 0.11.0 is live. Flips the load-bearing identifiers, so it ships
-**with** a user-facing re-registration runbook and `mcp__pm-server__*` →
-`mcp__pmlens__*` compatibility detection:
+Flips the load-bearing identifiers. Built on a reversible step ladder so the
+breaking flip lands only at the end, and ships **with** a user-facing
+re-registration runbook (`pmlens migrate-from-pm-server`) plus an
+`mcp__pm-server__*` → `mcp__pmlens__*` compatibility migration.
 
-- **Import package** `pm_server` → `pmlens`: rename the `src/` folder, ~39 import
-  sites, and the self-registration path.
-- **MCP registration key** `pm-server` → `pmlens`: `installer.py` ~14 sites
-  (205/249/303/325/428/429/451/475/487/494/569/580/604/610) + the Codex
-  registration table key.
-- **FastMCP name** (`server.py:89`), **manifest** `entry_point`/`args`,
-  **console_scripts** `pm-server`.
-- **Tests:** `test_installer.py` (~15 sites), `test_plugin.py:220`,
-  `test_manifest.py` module-name checks (~108-109).
-- The marker slug stays invariant throughout.
+**Done** (branch `feat/pmserv-137-phase3-rename`, unpublished, 1075 tests green):
+
+- **Step 1 — guard tests** (`ab2f5fa`): marker-slug negative invariants, the
+  wrapper-metapackage invariant, a plugin dual-recognition baseline, and the
+  `legacy_user_env` fixture.
+- **Step 2 — import rename `pm_server` → `pmlens`** (`f7d3ce6`): `git mv
+  src/pm_server → src/pmlens` + 378 word-boundary substitutions, plus a
+  `sys.modules` alias shim at the old path so `import pm_server` and
+  `python -m pm_server` keep working. Non-breaking.
+- **Step 3 — `migrate-from-pm-server` updater + awareness probe** (`c90028c`):
+  re-registers Claude Code + Codex under the `pmlens` key, deep-copies the Codex
+  table preserving user sub-tables, and *additively* rewrites the
+  `mcp__pm-server__*` → `mcp__pmlens__*` settings perms. A read-only awareness
+  probe (no subprocess; ADR-028) surfaces a migration banner once the identity is
+  flipped while legacy config is still present.
+- **Step 6 — identity flip** (`8f7beab`): `FastMCP("pm-server")` →
+  `FastMCP("pmlens")`; the 14 MCP registration-key sites in `installer.py`
+  (Claude add/get/remove + the Codex table); the `.mcpb` manifest top-level
+  `name`; the plugin `.mcp.json` registration key. Hooks and the plugin shell
+  scripts gained **dual-recognition** (both `pm-server` and `pmlens` are matched)
+  so a mid-rename user is never stranded. Guarded by a positive identity test +
+  an independent CI grep gate.
+
+The **binary name** (`pm-server` console script), the **`_OLD_MCP_KEY`** migrate
+machinery, and the **marker slug** (`pm-server:begin`) stay `pm-server`
+throughout — kept deliberately for backward compatibility and the ADR-032 marker
+invariant.
+
+> **Non-breaking until migrate:** flipping the FastMCP name does **not** change
+> the tool namespace Claude Code shows — that is keyed off the *registration
+> key*, which stays `pm-server` in a user's config until they run
+> `pmlens migrate-from-pm-server`. The `mcp__pm-server__*` → `mcp__pmlens__*`
+> flip happens on migrate, not on upgrade.
+
+**Remaining — ⛔ gated, partly irreversible (step 7):**
+
+1. Version bump `0.11.0` → `0.12.0` across every lockstep surface (pyproject,
+   wrapper, plugin `.mcp.json` pin, `plugin.json`, marketplace
+   `metadata.version`, README pins, `manifest.json`) —
+   `test_plugin.py::TestPluginVersionSync` enforces this.
+2. **Publish `pmlens` 0.12.0** (IRREVERSIBLE) so the flipped identity reaches users.
+3. Repoint the wrapper dependency floor → `pmlens>=0.12.0`; flip the plugin uvx
+   pin → `0.12.0`.
+4. Cosmetic sweep: `prog_name`, `plugin.json` / `marketplace.json` plugin name,
+   `docs/*` + README identity prose, `manifest.json` description prose.
+5. User runs `pmlens migrate-from-pm-server` and reinstalls the host tool.
+   **Rehearse it in the isolated Docker sandbox first** (`make dev-sandbox`,
+   ADR-036) so the global-config writes are validated against a disposable HOME.
+
+The marker slug stays invariant throughout.
 
 ---
 
