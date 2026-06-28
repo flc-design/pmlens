@@ -4,11 +4,68 @@
 
 ### Changed
 
-- Rebrand product display name to "PM Lens" (pmlens): updated product display name across README/docs, the GitHub repository name, and the .mcpb/plugin display surfaces (display layer only).
+- **Phase-3 identity rename `pm_server` → `pmlens` (PMSERV-137, ADR-034)** — the
+  load-bearing identifier flip, built on a reversible step ladder and shipping
+  (at 0.12.0) with a user-facing re-registration runbook. Done so far on
+  `feat/pmserv-137-phase3-rename` (unpublished): the import package renamed
+  `pm_server` → `pmlens` with a `sys.modules` alias shim (so `import pm_server` /
+  `python -m pm_server` keep working); the live MCP identity flipped
+  (`FastMCP("pmlens")`, the 14 MCP registration-key sites, the `.mcpb` manifest
+  `name`, the plugin `.mcp.json` key); a `pmlens migrate-from-pm-server` updater
+  (Claude Code + Codex re-key, additive `mcp__pm-server__*` → `mcp__pmlens__*`
+  permission rewrite) with a read-only cutover awareness banner; and
+  dual-recognition in the hooks + plugin shell scripts so a mid-rename user is
+  never stranded.
+- The binary name (`pm-server` console script), the migrate machinery's legacy
+  key, and the CLAUDE.md marker slug (`pm-server:begin`) deliberately stay
+  `pm-server` (backward compatibility / the ADR-032 marker invariant).
+
+### Added
+
+- **Containerized development environment (PMSERV-140, ADR-036)** — `.devcontainer/`
+  + a `Makefile` (`make dev-build/test/lint/shell/sandbox/clean`) run development
+  inside a Docker container with a disposable HOME, so pmlens's installer/hooks/
+  migrate code (which mutates `~/.claude`, `~/.codex`, `~/.pm`) can be exercised
+  without touching the host. A `Docker Development` workflow template and a
+  `docker-dev` skill guide the flow. The host keeps a stable pip/pipx `pmlens` as
+  its "tool"; the container is the "development" half.
 
 ### Notes
 
-- The PyPI distribution name (`pm-server`), MCP registration key, Python import name (`pm_server`), local folder name, all GitHub/PyPI URLs, and in-code display strings (~60) remain unchanged for backward compatibility and will migrate together at publish time (Phase-2).
+- **Non-breaking until migrate:** flipping the FastMCP name does not change the
+  tool namespace Claude Code shows — that is keyed off the registration key,
+  which stays `pm-server` in a user's config until they run
+  `pmlens migrate-from-pm-server`. The `mcp__pm-server__*` → `mcp__pmlens__*`
+  flip happens on migrate, not on upgrade.
+- The `0.12.0` publish that makes this reach users is gated and tracked in
+  `docs/MIGRATION.md` (Phase-3, step 7).
+
+## [0.11.0] - 2026-06-22
+
+The **PM Lens rebrand**, phases 1–2: the product is now "PM Lens" and its PyPI
+distribution is **`pmlens`**, with `pm-server` retained as a thin compatibility
+wrapper. The load-bearing identifiers (Python import name, MCP registration key,
+FastMCP name, marker slug) are intentionally unchanged here and flip later in
+Phase-3.
+
+### Changed
+
+- **Phase-1 — display layer (PMSERV-134)**: product display name "PM Server" →
+  "PM Lens" across README/docs and the `.mcpb`/plugin display surfaces; the
+  GitHub repository renamed to `flc-design/pmlens`; all GitHub/PyPI URLs updated.
+- **Phase-2 — distribution rename (PMSERV-136, ADR-031/032)**: the PyPI
+  distribution renamed `pm-server` → **`pmlens`**; `pm-server` becomes a
+  zero-module metapackage depending on `pmlens` (so `pip install pm-server` /
+  `uvx pm-server` keep resolving via the dependency). In-code display strings
+  flipped to "PM Lens" (~87 sites). Version bumped `0.10.0` → `0.11.0` across
+  every drift-guarded surface (pyproject, manifest, `plugin.json`, marketplace,
+  the plugin uvx pin, README pins). The Python import name stays `pm_server` and
+  the MCP registration key stays `pm-server` (both deferred to Phase-3).
+
+### Security
+
+- **Patched vulnerable transitive dependencies (PMSERV-135)**: bumped flagged
+  transitive deps to their fixed versions.
 
 ## [0.10.0] - 2026-06-10
 
