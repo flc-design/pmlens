@@ -1,0 +1,38 @@
+# Keep the build context small and prevent host secrets/state from leaking into
+# the image (PMSERV-140 / ADR-036).
+
+# Platform-specific virtualenv — MUST be rebuilt in the container, never copied.
+.venv/
+venv/
+
+# VCS + build artifacts
+.git/
+.gitignore
+dist/
+build/
+*.egg-info/
+*.mcpb
+
+# Python caches / test + lint state
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Local pm-server data store (never bake project state into the image)
+.pm/
+
+# Secrets / local env — defense in depth (these should never be here anyway)
+.env
+.env.*
+*.pem
+*.key
+id_rsa*
+
+# OS / editor cruft
+.DS_Store
+.idea/
+.vscode/

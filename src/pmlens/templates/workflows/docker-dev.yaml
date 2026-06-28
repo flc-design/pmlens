@@ -1,0 +1,91 @@
+# PM Lens — Docker Development Workflow Template (PMSERV-140 / ADR-036)
+# Sandbox → Change → Test → Exercise side-effects → Verify isolation → Promote
+#
+# pmlens's installer/hooks/migrate MUTATE host global config (~/.claude,
+# ~/.codex, ~/.pm). This workflow drives development inside an isolated Docker
+# container whose HOME is disposable, so those side-effects are exercised
+# against a throwaway HOME and never the host's. The host keeps a stable
+# pip/pipx pmlens as its "tool"; this is the "development" half (ADR-036).
+
+name: Docker Development
+description: >
+  Isolated container dev loop for changes that touch pmlens's global side-effects
+  (installer.py, hooks.py, migrate_*). Build the sandbox, change code, test in the
+  container, exercise install/migrate/hooks against the DISPOSABLE container HOME,
+  verify the host config was untouched, then promote. Use this instead of the plain
+  Development workflow whenever a change can write to ~/.claude / ~/.codex / ~/.pm.
+
+steps:
+  - id: ensure_sandbox
+    name: Ensure Dev Sandbox
+    description: >
+      Build/refresh the isolated dev container so the change is developed against a
+      disposable HOME. Run `make dev-build` (after Dockerfile changes) and confirm
+      `make dev-test` can start. The container HOME (/home/pmdev) is a named volume —
+      never the host's. Never bind-mount host ~/.claude / ~/.codex / ~/.ssh.
+    skill_hint: docker-dev
+    agent_hint: Use the pmlens-docker-dev sub-agent to build and validate the sandbox.
+    produces:
+      - dev_sandbox
+
+  - id: change
+    name: Implement Change
+    description: >
+      Implement the code change in the bind-mounted source. Edits are reflected live
+      in the container (editable install). Keep changes scoped to the task; follow the
+      project's style and security rules (safe_load, no shell=True, path resolve).
+    consumes:
+      - dev_sandbox
+    produces:
+      - change
+
+  - id: test_isolated
+    name: Test In Container
+    description: >
+      Run the suite inside the isolated container with `make dev-test` (and
+      `make dev-lint`). Loop back to Implement on failures. Because the container HOME
+      is disposable, tests that touch global config cannot corrupt the host.
+    agent_hint: Use a debug sub-agent for hard-to-diagnose failures; re-run make dev-test.
+    loop: true
+    loop_group: dev
+    consumes:
+      - change
+    produces:
+      - green_tests
+
+  - id: exercise_side_effects
+    name: Exercise Global Side-Effects
+    description: >
+      The point of this workflow: in `make dev-shell`, run the real side-effecting
+      paths — `pmlens install` / `migrate-from-pm-server` / hook install — against the
+      DISPOSABLE container HOME. Inspect the generated ~/.claude/settings.json,
+      ~/.codex/config.toml, ~/.pm/. This is the "dry-run → live" step that is unsafe to
+      run on the host.
+    skill_hint: docker-dev
+    agent_hint: Use the pmlens-docker-dev sub-agent to run install/migrate and report the diff.
+    consumes:
+      - green_tests
+    produces:
+      - side_effect_report
+
+  - id: verify_isolation
+    name: Verify Host Untouched
+    description: >
+      Confirm the host's real ~/.claude / ~/.codex / ~/.pm were NOT modified by any of
+      the above (the whole safety claim). Then decide whether to promote. Gate on user
+      approval before any host-affecting follow-up (e.g. updating the host's stable tool).
+    gate: user_approval
+    consumes:
+      - side_effect_report
+    produces:
+      - isolation_verdict
+
+  - id: promote
+    name: Promote
+    description: >
+      Commit the change atomically (tests green, lint clean). If the change must reach
+      the host's stable pmlens tool, do it deliberately via pip/pipx upgrade — separate
+      from this dev container. Record what was learned with pm_remember / pm_log.
+    tool_hint: pm_log
+    consumes:
+      - isolation_verdict

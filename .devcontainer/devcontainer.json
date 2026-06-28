@@ -1,0 +1,17 @@
+{
+  "name": "pmlens-dev",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": ".."
+  },
+  "workspaceFolder": "/workspaces/pmlens",
+  "remoteUser": "pmdev",
+  "//": "HOME is a named volume → the installer/hooks write a DISPOSABLE ~/.claude, ~/.codex, ~/.pm here, never the host's (PMSERV-140 / ADR-036).",
+  "mounts": [
+    "source=pmlens-dev-home,target=/home/pmdev,type=volume"
+  ],
+  "postCreateCommand": "uv venv $VIRTUAL_ENV && uv pip install -e '.[dev]'",
+  "remoteEnv": {
+    "PM_DEV_CONTAINER": "1"
+  }
+}
