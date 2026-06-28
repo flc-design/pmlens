@@ -35,12 +35,16 @@ htmlcov/
 Thumbs.db
 
 # Claude Code (local dev config). Ignore .claude/* by default, but TRACK the
-# safety-enabling dev artifacts that ship with the project — currently the
-# .claude/agents/ definitions that drive isolated/safe development (ADR-036).
-# (`.claude/*` + a negation, not `.claude/`, because a fully-excluded parent dir
+# safety-/consistency-enabling dev artifacts that ship with the project (ADR-037):
+#   - .claude/agents/        — agents that drive isolated/safe development (ADR-036)
+#   - .claude/settings.json  — portable, safe dev-permission defaults (NO machine
+#                              paths / secrets; verify that before tracking edits)
+# Personal/machine-specific config stays ignored: settings.local.json, commands/.
+# (`.claude/*` + negations, not `.claude/`, because a fully-excluded parent dir
 #  cannot have its children re-included.)
 .claude/*
 !.claude/agents/
+!.claude/settings.json
 CLAUDE.md
 CLAUDE.md.bak.*
 
