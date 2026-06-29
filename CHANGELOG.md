@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-06-29
+
 ### Changed
 
 - **Phase-3 identity rename `pm_server` → `pmlens` (PMSERV-137, ADR-034)** — the
