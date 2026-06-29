@@ -594,13 +594,34 @@ Data layer (operated on through pmlens serve):
 
 ---
 
+## Migrating from pm-server
+
+If you installed this project under its previous name, **PM Server** (`pm-server`):
+
+Nothing breaks — `pip install pm-server` / `uvx pm-server` keep working (the
+`pm-server` distribution is now a thin wrapper that depends on `pmlens`). To
+move to the new identity:
+
+```bash
+pip install -U pmlens          # or: pipx install pmlens
+pmlens migrate-from-pm-server  # re-register the MCP server + migrate settings
+# Restart Claude Code
+```
+
+`migrate-from-pm-server` will:
+- Re-register the MCP server `pm-server` → `pmlens` (Claude Code + Codex)
+- Rewrite `mcp__pm-server__*` → `mcp__pmlens__*` permissions (additive)
+- Write timestamped backups of every file it edits
+
+Your `.pm/` data is **unchanged**. See `docs/MIGRATION.md` for details.
+
 ## Migrating from pm-agent
 
 If you were using the earlier `pm-agent` package:
 
 ```bash
 pip uninstall pm-agent
-pip install pm-server
+pip install -U pmlens
 pmlens migrate          # Switches MCP registration from pm-agent to pmlens
 # Restart Claude Code
 ```
