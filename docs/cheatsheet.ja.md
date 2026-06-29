@@ -1,7 +1,7 @@
 # PM Lens チートシート
 
 > Claude Code + Codex CLI 用プロジェクト管理 MCP Server — **42 ツール**
-> Version 0.10.0 | Python 3.11+ | PyPI: `pm-server`
+> Version 0.12.0 | Python 3.11+ | PyPI: `pmlens`
 
 ---
 
@@ -9,7 +9,7 @@
 
 ```bash
 pip install pm-server
-pm-server install          # Claude Code に MCP サーバーを登録
+pmlens install          # Claude Code に MCP サーバーを登録
 ```
 
 Claude Code セッション:
@@ -350,10 +350,10 @@ Claude:   → pm_recall()       最新の記憶とセッション要約を復元
 
 ### ソース編集後の再起動 (editable install のみ)
 
-`pip install -e .` で pm-server を入れた状態でセッション中にソースを
+`pip install -e .` で PM Lens を入れた状態でセッション中にソースを
 編集した場合、MCP ホスト (Claude Code または Codex CLI) を再起動して
 パッケージを再読込みすること。Python は長期プロセス内でモジュールを
-キャッシュするため、**遅延 import** されるモジュール (例: `pm_server.rules`)
+キャッシュするため、**遅延 import** されるモジュール (例: `pmlens.rules`)
 は初回 import 時に古いキャッシュを参照し、他モジュールがディスク上で
 新しくても整合性が崩れる。
 
@@ -379,15 +379,15 @@ pm_status()["diagnostics"]["utils_fingerprint"]
 ## CLI コマンド
 
 ```bash
-pm-server install              # MCP サーバー登録
-pm-server uninstall            # MCP サーバー削除
-pm-server serve                # MCP サーバー起動（stdio）
-pm-server status               # プロジェクト状況表示
-pm-server discover [path]      # プロジェクト検出・登録
-pm-server update-rules         # CLAUDE.md / AGENTS.md ルール更新（multi-host）
-pm-server update-rules -t auto --dry-run  # 検知された host をプレビュー
-pm-server update-rules --all   # 登録された全プロジェクトに適用
-pm-server update-claudemd      # レガシー: update-rules -t claude-code と等価
+pmlens install              # MCP サーバー登録
+pmlens uninstall            # MCP サーバー削除
+pmlens serve                # MCP サーバー起動（stdio）
+pmlens status               # プロジェクト状況表示
+pmlens discover [path]      # プロジェクト検出・登録
+pmlens update-rules         # CLAUDE.md / AGENTS.md ルール更新（multi-host）
+pmlens update-rules -t auto --dry-run  # 検知された host をプレビュー
+pmlens update-rules --all   # 登録された全プロジェクトに適用
+pmlens update-claudemd      # レガシー: update-rules -t claude-code と等価
 pm-server hook post-tool-use   # PostToolUse フックハンドラ
 ```
 

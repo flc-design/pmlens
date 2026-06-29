@@ -124,7 +124,7 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
 <header class="hero">
   <h1>PM Lens — Workflow Guide</h1>
   <div class="subtitle">Workflow Engine の仕組み・5 builtin templates・カスタム workflow の作り方</div>
-  <div class="meta">バージョン 0.10.0 (2026-06-15) · 関連: <a href="architecture.html">Architecture</a> · <a href="user-guide.html">User Guide</a></div>
+  <div class="meta">バージョン 0.12.0 (2026-06-15) · 関連: <a href="architecture.html">Architecture</a> · <a href="user-guide.html">User Guide</a></div>
 </header>
 
 <div class="layout">
@@ -148,8 +148,8 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
 <main>
 
 <section class="card" id="concept">
-  <h2>1. Workflow とは — pm-server の「思考の段取り」を構造化する</h2>
-  <p>pm-server の workflow は <strong>「ステップ列の状態マシン」</strong>。
+  <h2>1. Workflow とは — PM Lens の「思考の段取り」を構造化する</h2>
+  <p>PM Lens の workflow は <strong>「ステップ列の状態マシン」</strong>。
      ある作業 (機能開発・調査・リサーチ) を「順を追って進めるべき step の列」として
      YAML テンプレートで定義し、各 step では Claude に対して
      「ここでは <code>pm_add_decision</code> を使え」「ここでは sub-agent を起動しろ」
@@ -175,11 +175,11 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
   <h3>1.2 アーキテクチャ上の役割分担</h3>
   <table>
     <tr><th>レイヤ</th><th>責務</th></tr>
-    <tr><td><strong>pm-server (workflow engine)</strong></td><td>状態マシン — どの step が active か追跡</td></tr>
+    <tr><td><strong>PM Lens (workflow engine)</strong></td><td>状態マシン — どの step が active か追跡</td></tr>
     <tr><td><strong>Skills / Sub-agents</strong></td><td>実行 — Claude が step の hint を読んで起動</td></tr>
     <tr><td><strong>CLAUDE.md auto-rules</strong></td><td>orchestration — 上記 2 つを繋ぐ behavior</td></tr>
   </table>
-  <p class="muted">pm-server 自身は <em>何もしない</em>。step の hint と progress を返すだけ。
+  <p class="muted">PM Lens 自身は <em>何もしない</em>。step の hint と progress を返すだけ。
      実際の作業 (sub-agent 起動・ADR 作成等) は全部 Claude が行う。
      この「engine と executor の分離」が workflow を <em>柔軟かつ強力</em>にする鍵。</p>
 </section>
@@ -342,7 +342,7 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
 
 <section class="card" id="builtin">
   <h2>5. Builtin Templates 詳解</h2>
-  <p>v0.10.0 に組み込まれる 5 つのテンプレート。
+  <p>v0.12.0 に組み込まれる 5 つのテンプレート。
      <code>pm_workflow_templates</code> で一覧、<code>pm_workflow_start(template="...")</code> で起動。</p>
 
   <h3>5.1 <code>development</code> (9 steps) — 機能開発の正攻法</h3>
@@ -437,7 +437,7 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
      <code>redact</code> (<code>pm_redact_draft</code> による Layer-1 決定論スクラブ → redact 済みフィールドに
      <code>/secret-scan</code> と <code>/privacy-check</code> の Layer-2) →
      <code>review</code> (<code>pm_x_drafts_pending</code> で redact 済み下書きを人間に提示)。</p>
-  <p><strong>安全モデル:</strong> pm-server は X 認証情報を持たず、ネットワーク送信・投稿を一切行わない
+  <p><strong>安全モデル:</strong> PM Lens は X 認証情報を持たず、ネットワーク送信・投稿を一切行わない
      — 「自動投稿しない」は gate ではなく<em>構造的保証</em>。redaction が唯一の安全層で、人間が redact 済み
      下書きをレビューしてシステムの外で<strong>手動投稿</strong>する。workflow engine は gate を強制しないため、
      どの step も「enforced approval gate」を主張しない (ADR-024)。</p>
@@ -845,14 +845,14 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
   <ul>
     <li>架構の workflow 図 → <a href="architecture.html#workflow">Architecture Section 5</a></li>
     <li>workflow と日常運用 → <a href="user-guide.html#session">User Guide Section 4</a></li>
-    <li>workflow テンプレ source → <code>src/pm_server/templates/workflows/*.yaml</code></li>
-    <li>engine source → <code>src/pm_server/workflow.py</code></li>
-    <li>model schema → <code>src/pm_server/models.py</code> (WorkflowStep / WorkflowTemplate)</li>
+    <li>workflow テンプレ source → <code>src/pmlens/templates/workflows/*.yaml</code></li>
+    <li>engine source → <code>src/pmlens/workflow.py</code></li>
+    <li>model schema → <code>src/pmlens/models.py</code> (WorkflowStep / WorkflowTemplate)</li>
   </ul>
 </section>
 
 <footer style="text-align: center; color: var(--muted); font-size: 12px; margin: 24px 0;">
-  PM Lens v0.10.0 · Workflow Guide · 2026-06-15
+  PM Lens v0.12.0 · Workflow Guide · 2026-06-15
 </footer>
 
 </main>

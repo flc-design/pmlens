@@ -1,7 +1,7 @@
 # PM Lens Cheatsheet
 
 > **42 MCP tools** for Claude Code + Codex CLI project management.
-> Version 0.10.0 | Python 3.11+ | PyPI: `pm-server`
+> Version 0.12.0 | Python 3.11+ | PyPI: `pmlens`
 
 ---
 
@@ -9,7 +9,7 @@
 
 ```bash
 pip install pm-server
-pm-server install          # Register MCP server in Claude Code
+pmlens install          # Register MCP server in Claude Code
 ```
 
 Claude Code session:
@@ -349,10 +349,10 @@ Claude: → pm_recall()           Restore latest memories and session summary
 
 ### Restart on source edit (editable installs only)
 
-If you installed pm-server with `pip install -e .` and edited the source
+If you installed PM Lens with `pip install -e .` and edited the source
 mid-session, restart your MCP host (Claude Code or Codex CLI) to reload
 the package — Python caches modules in long-running processes and
-**lazy-imported** modules (e.g. `pm_server.rules`) will hit the stale
+**lazy-imported** modules (e.g. `pmlens.rules`) will hit the stale
 cache when first imported, even if other modules are fresh on disk.
 
 `pm_status()` now exposes a fingerprint to make this easy to spot:
@@ -377,15 +377,15 @@ See PMSERV-060 for the originating incident.
 ## CLI Commands
 
 ```bash
-pm-server install              # Register MCP server
-pm-server uninstall            # Remove MCP server
-pm-server serve                # Start MCP server (stdio)
-pm-server status               # Show project status
-pm-server discover [path]      # Find and register projects
-pm-server update-rules         # Update CLAUDE.md / AGENTS.md rules (multi-host)
-pm-server update-rules -t auto --dry-run  # Preview detected hosts
-pm-server update-rules --all   # Apply to every registered project
-pm-server update-claudemd      # Legacy: equivalent to update-rules -t claude-code
+pmlens install              # Register MCP server
+pmlens uninstall            # Remove MCP server
+pmlens serve                # Start MCP server (stdio)
+pmlens status               # Show project status
+pmlens discover [path]      # Find and register projects
+pmlens update-rules         # Update CLAUDE.md / AGENTS.md rules (multi-host)
+pmlens update-rules -t auto --dry-run  # Preview detected hosts
+pmlens update-rules --all   # Apply to every registered project
+pmlens update-claudemd      # Legacy: equivalent to update-rules -t claude-code
 pm-server hook post-tool-use   # PostToolUse hook handler
 ```
 

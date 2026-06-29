@@ -182,7 +182,7 @@ def install_claude_code(*, dry_run: bool = False) -> InstallResult:
     """
     lens_mode = _lens_mode_active()
     desktop_write_mode = _desktop_write_mode_active()
-    pm_server_path = shutil.which("pm-server")
+    pm_server_path = shutil.which("pmlens") or shutil.which("pm-server")
     if pm_server_path is None:
         return InstallResult(
             target="claude-code",
@@ -346,21 +346,27 @@ def uninstall_claude_code(*, dry_run: bool = False) -> InstallResult:
 
 
 def _resolve_pm_server_path() -> Path:
-    """Resolve the absolute pm-server binary path for sandbox-safe registration.
+    """Resolve the absolute server binary path for sandbox-safe registration.
 
-    Codex sandboxes restrict PATH inheritance, so a bare ``pm-server``
-    name does not resolve. The canonical location is the binary in the
-    same directory as the running Python interpreter (works for pip /
-    pipx / pyenv / venv installations). Falls back to ``shutil.which``
-    only if the canonical location is missing.
+    Prefers the ``pmlens`` binary (the canonical body identity) and falls
+    back to the legacy ``pm-server`` name for mid-flight installs. Codex
+    sandboxes restrict PATH inheritance, so a bare name does not resolve:
+    the canonical location is the binary in the same directory as the
+    running Python interpreter (works for pip / pipx / pyenv / venv
+    installations). Falls back to ``shutil.which`` only if the canonical
+    location is missing.
 
     Raises:
-        FileNotFoundError: if pm-server cannot be located.
+        FileNotFoundError: if neither pmlens nor pm-server can be located.
     """
-    candidate = Path(sys.executable).resolve().parent / "pm-server"
-    if candidate.exists():
-        return candidate
-    fallback = shutil.which("pm-server")
+    # PMSERV-137 A4: prefer the ``pmlens`` binary (the canonical body identity
+    # the user installs via pipx at cutover); keep ``pm-server`` as the
+    # mid-flight fallback so registration still resolves before the switch-over.
+    for _name in ("pmlens", "pm-server"):
+        candidate = Path(sys.executable).resolve().parent / _name
+        if candidate.exists():
+            return candidate
+    fallback = shutil.which("pmlens") or shutil.which("pm-server")
     if fallback:
         return Path(fallback).resolve()
     raise FileNotFoundError("pm-server binary not found")
@@ -867,7 +873,7 @@ def migrate_claude_code(*, dry_run: bool = False) -> InstallResult:
             is_dry_run=True,
         )
 
-    pm_server_path = shutil.which("pm-server")
+    pm_server_path = shutil.which("pmlens") or shutil.which("pm-server")
     if pm_server_path is None:
         return InstallResult(
             target="claude-code",

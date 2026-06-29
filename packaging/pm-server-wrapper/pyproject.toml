@@ -2,12 +2,12 @@
 #
 # The project is now distributed as `pmlens`. This `pm-server` distribution has
 # NO code of its own — it is a metapackage that depends on `pmlens`, so existing
-# `pip install pm-server` / `uvx pm-server` / plugin `pm-server@0.11.0` keep
+# `pip install pm-server` / `uvx pm-server` / plugin `pm-server@0.12.0` keep
 # resolving. `pmlens` carries the actual module and the `pm-server` console
 # script, so the wrapper must NOT declare a console_scripts entry (would collide).
 #
-# Version 0.11.0 matches pmlens/pyproject so the committed plugin pin
-# `uvx pm-server@0.11.0` resolves to this wrapper. The last *real* pm-server build
+# Version 0.12.0 matches pmlens/pyproject so the committed plugin pin
+# `uvx pm-server@0.12.0` resolves to this wrapper. The last *real* pm-server build
 # stays available as `pm-server==0.10.0`. See docs/MIGRATION.md / ADR-031 / ADR-032.
 [build-system]
 requires = ["setuptools>=68", "wheel"]
@@ -15,14 +15,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pm-server"
-version = "0.11.0"
+version = "0.12.0"
 description = "Compatibility shim — PM Server is now PM Lens. Installs the 'pmlens' package."
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
 authors = [{ name = "Shinichi Nakazato" }]
 maintainers = [{ name = "FLC design Co., Ltd." }]
-dependencies = ["pmlens>=0.11.0"]
+dependencies = ["pmlens>=0.12.0"]
 keywords = ["pm-server", "pmlens", "pm-lens", "compatibility-shim", "rename"]
 classifiers = [
     "Development Status :: 7 - Inactive",

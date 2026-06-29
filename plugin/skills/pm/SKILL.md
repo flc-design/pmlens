@@ -1,7 +1,7 @@
 ---
 name: pm
 description: >
-  プロジェクト管理 MCP Server (pm-server)。タスク追跡、進捗可視化、ブロッカー検知、
+  プロジェクト管理 MCP Server (PM Lens)。タスク追跡、進捗可視化、ブロッカー検知、
   ADR記録、全プロジェクト横断ダッシュボードを提供する。
   「進捗」「タスク」「ブロッカー」「次にやること」「ダッシュボード」
   「ADR」「意思決定」「PM」「プロジェクト状態」「作業開始」「作業完了」
@@ -11,7 +11,7 @@ description: >
 
 # PM Lens Skill (plugin-homed)
 
-> This skill is the **plugin-homed** copy of pm-server's behavioural rules.
+> This skill is the **plugin-homed** copy of PM Lens's behavioural rules.
 > The manually-registered MCP setup drives these rules via `CLAUDE.md`, but
 > plugins cannot ship a `CLAUDE.md`. The session-start ritual is additionally
 > injected deterministically by the plugin's `SessionStart` hook; this skill

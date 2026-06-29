@@ -223,22 +223,37 @@ invariant.
 > `pmlens migrate-from-pm-server`. The `mcp__pm-server__*` → `mcp__pmlens__*`
 > flip happens on migrate, not on upgrade.
 
-**Remaining — ⛔ gated, partly irreversible (step 7):**
+**Step 7 — Phase A done on `feat/pmserv-137-phase3-rename` (reversible, unpublished):**
 
-1. Version bump `0.11.0` → `0.12.0` across every lockstep surface (pyproject,
-   wrapper, plugin `.mcp.json` pin, `plugin.json`, marketplace
-   `metadata.version`, README pins, `manifest.json`) —
-   `test_plugin.py::TestPluginVersionSync` enforces this.
-2. **Publish `pmlens` 0.12.0** (IRREVERSIBLE) so the flipped identity reaches users.
-3. Repoint the wrapper dependency floor → `pmlens>=0.12.0`; flip the plugin uvx
-   pin → `0.12.0`.
-4. Cosmetic sweep: `prog_name`, `plugin.json` / `marketplace.json` plugin name,
-   `docs/*` + README identity prose, `manifest.json` description prose.
-5. User runs `pmlens migrate-from-pm-server` and reinstalls the host tool.
+1. ✅ Version bump `0.11.0` → `0.12.0` across every lockstep surface (pyproject,
+   `__init__.py`, wrapper, plugin `.mcp.json` pin, `plugin.json`, marketplace
+   `metadata.version`, README pins, `manifest.json`) — enforced by
+   `test_plugin.py::TestPluginVersionSync` + `test_manifest.py`.
+2. ✅ Wrapper dependency floor → `pmlens>=0.12.0`; plugin uvx pin →
+   `pm-server@0.12.0` (the dist **name** stays `pm-server`; only the version moves).
+3. ✅ `prog_name` → `pmlens`; identity prose 刷新 across `README*` / `docs/*.md` /
+   `docs/*.html` / cheatsheets / skills under the 3-term rule (`pm-server` = the
+   retained install handle, `pmlens` = body identity, "PM Lens" = display name).
+4. ✅ **A4 — install/migrate binary resolver repointed** to
+   `shutil.which("pmlens") or shutil.which("pm-server")` (the Claude install +
+   migrate paths and the Codex `_resolve_pm_server_path` neighbor loop) so the
+   migrated `pmlens` registration execs the *pmlens* binary the user installs via
+   pipx at cutover, with `pm-server` retained as the mid-flight fallback. Proven
+   by `test_migrate_to_pmlens.py` (asserts the `--`-delimited binary is `pmlens`).
+
+**Step 7 — remaining (⛔ gated / irreversible — Phase B & C):**
+
+5. **Publish `pmlens` 0.12.0** (IRREVERSIBLE), then re-publish the `pm-server`
+   wrapper at 0.12.0 so `uvx pm-server@0.12.0` resolves to the new body.
+6. User runs `pmlens migrate-from-pm-server` and reinstalls the host tool.
    **Rehearse it in the isolated Docker sandbox first** (`make dev-sandbox`,
    ADR-036) so the global-config writes are validated against a disposable HOME.
 
-The marker slug stays invariant throughout.
+**Deferred to cutover (not flipped in Phase A):** the `plugin.json` /
+`marketplace.json` plugin **`name`** stays `pm-server` — it is the
+`/plugin install pm-server@flc-design` handle, and renaming it mid-flight would
+strand existing installs. Flip it together with the publish/cutover. The marker
+slug stays invariant throughout.
 
 ---
 
@@ -270,8 +285,8 @@ Claude Desktop:
    python scripts/build_mcpb.py
    ```
 
-   Today this produces `dist/pm-server-0.10.0.mcpb`. After Phase-2 Steps 2 & 5 it
-   becomes `dist/pmlens-0.11.0.mcpb`.
+   On `feat/pmserv-137-phase3-rename` this produces `dist/pmlens-0.12.0.mcpb`
+   (manifest `name` = `pmlens`, version `0.12.0`).
 
 2. **Reinstall in Claude Desktop.** Open **Settings → Extensions**, remove the
    existing extension, and install the freshly built `.mcpb`.

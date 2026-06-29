@@ -197,7 +197,8 @@ class TestMigrateFromPmAgent:
 
         # remove pm-agent が呼ばれたこと
         assert any("pm-agent" in str(c) for c in calls)
-        # 新アイデンティティ pmlens を登録する `add` が発火したこと（バイナリは pm-server のまま）
+        # 新アイデンティティ pmlens を登録する `add` が発火したこと
+        # （PMSERV-137 A4 後は which("pmlens") が解決するためバイナリも pmlens）
         assert any("add" in c and "pmlens" in c for c in calls)
         # PMSERV-055: migrate must call the non-deprecated per-host function
         # (install_claude_code), not the install_mcp() wrapper — so no

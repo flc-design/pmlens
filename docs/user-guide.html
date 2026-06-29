@@ -109,7 +109,7 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
 <header class="hero">
   <h1>PM Lens — User Guide</h1>
   <div class="subtitle">CLI コマンド・LLM セッション中の UX Tips・進捗管理のベストプラクティス</div>
-  <div class="meta">バージョン 0.10.0 (2026-06-15) · 関連: <a href="architecture.html">Architecture</a> · <a href="workflow-guide.html">Workflow Guide</a> · <a href="cheatsheet.ja.md">Cheatsheet (ja)</a></div>
+  <div class="meta">バージョン 0.12.0 (2026-06-15) · 関連: <a href="architecture.html">Architecture</a> · <a href="workflow-guide.html">Workflow Guide</a> · <a href="cheatsheet.ja.md">Cheatsheet (ja)</a></div>
 </header>
 
 <div class="layout">
@@ -135,8 +135,8 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
 <main>
 
 <section class="card" id="concepts">
-  <h2>1. 基本コンセプト — pm-server は 3 つの層から成る</h2>
-  <p>PM Lens を効率よく使うために、最初に「<strong>誰が pm-server を呼ぶか</strong>」を整理する。</p>
+  <h2>1. 基本コンセプト — PM Lens は 3 つの層から成る</h2>
+  <p>PM Lens を効率よく使うために、最初に「<strong>誰が PM Lens を呼ぶか</strong>」を整理する。</p>
   <table>
     <tr><th>呼び手</th><th>使う経路</th><th>例</th></tr>
     <tr>
@@ -146,13 +146,13 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
     </tr>
     <tr>
       <td><span class="badge badge-cli">CLI</span> shell (人間)</td>
-      <td><code>pm-server &lt;subcommand&gt;</code></td>
+      <td><code>pmlens &lt;subcommand&gt;</code></td>
       <td>bootstrap・install・migrate・dry-run</td>
     </tr>
     <tr>
       <td><span class="badge badge-pro">Hook</span> Claude Code</td>
       <td>PostToolUse hook (自動)</td>
-      <td>ツール実行直後に context を pm-server に流す</td>
+      <td>ツール実行直後に context を PM Lens に流す</td>
     </tr>
   </table>
   <div class="tip">
@@ -179,10 +179,10 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
 
   <h3>2.1 インストール</h3>
 <pre><span class="prompt">$</span> <span class="cmd">pip install pm-server</span>
-<span class="prompt">$</span> <span class="cmd">pm-server install</span>           <span class="comment"># Claude Code に MCP サーバーを登録</span>
-<span class="ok">✓ claude-code: registered pm-server</span>
+<span class="prompt">$</span> <span class="cmd">pmlens install</span>           <span class="comment"># Claude Code に MCP サーバーを登録</span>
+<span class="ok">✓ claude-code: registered pmlens</span>
 
-<span class="prompt">$</span> <span class="cmd">pm-server install-hooks</span>     <span class="comment"># 自動 context 注入の hook を有効化 (任意)</span>
+<span class="prompt">$</span> <span class="cmd">pmlens install-hooks</span>     <span class="comment"># 自動 context 注入の hook を有効化 (任意)</span>
 <span class="ok">✓ installed</span></pre>
 
   <h3>2.2 プロジェクトの初期化</h3>
@@ -197,9 +197,9 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
   <h3>2.3 CLAUDE.md ルールの注入</h3>
   <p>auto-action rules (CLAUDE.md / AGENTS.md) を注入すると、セッション開始時に Claude が自動で
      <code>pm_status / pm_next / pm_recall</code> を呼ぶようになる。</p>
-<pre><span class="prompt">$</span> <span class="cmd">pm-server update-rules</span>             <span class="comment"># auto detect → 該当 host の rule file を更新</span>
-<span class="prompt">$</span> <span class="cmd">pm-server update-rules --target=all</span> <span class="comment"># 強制的に全 host (CLAUDE.md + AGENTS.md)</span>
-<span class="prompt">$</span> <span class="cmd">pm-server update-rules --dry-run</span>    <span class="comment"># 差分を表示するだけ</span></pre>
+<pre><span class="prompt">$</span> <span class="cmd">pmlens update-rules</span>             <span class="comment"># auto detect → 該当 host の rule file を更新</span>
+<span class="prompt">$</span> <span class="cmd">pmlens update-rules --target=all</span> <span class="comment"># 強制的に全 host (CLAUDE.md + AGENTS.md)</span>
+<span class="prompt">$</span> <span class="cmd">pmlens update-rules --dry-run</span>    <span class="comment"># 差分を表示するだけ</span></pre>
 
   <h3>2.4 動作確認</h3>
 <pre><span class="prompt">&gt;</span> 現在の進捗は？
@@ -212,9 +212,9 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
 <span class="comment"># → pm_next → PMSERV-001 が推薦される</span></pre>
 
   <div class="tip">
-    <strong>動かない時:</strong> <code>pm-server status</code> (CLI) を直接叩いて bootstrap を切り分ける。
+    <strong>動かない時:</strong> <code>pmlens status</code> (CLI) を直接叩いて bootstrap を切り分ける。
     Claude 側で見えない場合は <code>claude mcp list</code> で MCP 登録を確認、
-    あるいは <code>pm-server install --dry-run</code> で何が起きるか確認。
+    あるいは <code>pmlens install --dry-run</code> で何が起きるか確認。
   </div>
 </section>
 
@@ -224,7 +224,7 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
 
   <h3>3.1 サーバー管理</h3>
   <div class="cmd-card">
-    <span class="cmd-name">pm-server install</span><span class="cmd-purpose">— 指定 host に MCP として登録</span>
+    <span class="cmd-name">pmlens install</span><span class="cmd-purpose">— 指定 host に MCP として登録</span>
     <dl class="kv">
       <dt>--target</dt><dd><code>claude-code</code> (default) / <code>codex</code> / <code>auto</code> / <code>all</code></dd>
       <dt>--dry-run</dt><dd>変更内容だけ表示</dd>
@@ -232,7 +232,7 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
   </div>
 
   <div class="cmd-card">
-    <span class="cmd-name">pm-server uninstall</span><span class="cmd-purpose">— 登録を解除</span>
+    <span class="cmd-name">pmlens uninstall</span><span class="cmd-purpose">— 登録を解除</span>
     <dl class="kv">
       <dt>--target</dt><dd><code>install</code> と同じ choices</dd>
       <dt>--dry-run</dt><dd>変更内容だけ表示</dd>
@@ -240,28 +240,28 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
   </div>
 
   <div class="cmd-card">
-    <span class="cmd-name">pm-server migrate</span><span class="cmd-purpose">— 旧 <code>pm-agent</code> からの移行</span>
+    <span class="cmd-name">pmlens migrate</span><span class="cmd-purpose">— 旧 <code>pm-agent</code> からの移行</span>
   </div>
 
   <div class="cmd-card">
-    <span class="cmd-name">pm-server serve</span><span class="cmd-purpose">— MCP サーバーを stdio で起動 (Claude Code が内部で呼ぶ)</span>
+    <span class="cmd-name">pmlens serve</span><span class="cmd-purpose">— MCP サーバーを stdio で起動 (Claude Code が内部で呼ぶ)</span>
   </div>
 
   <h3>3.2 プロジェクト操作</h3>
   <div class="cmd-card">
-    <span class="cmd-name">pm-server discover [SCAN_PATH]</span><span class="cmd-purpose">— サブツリーを scan して <code>.pm/</code> を持つ project を一括登録</span>
+    <span class="cmd-name">pmlens discover [SCAN_PATH]</span><span class="cmd-purpose">— サブツリーを scan して <code>.pm/</code> を持つ project を一括登録</span>
     <p class="muted">depth-5 cap + excluded dirs + <code>~/.pm/</code> skip で bounded walk を保証 (PMSERV-081)。
        単一トランザクションで registry に書き込む (PMSERV-066)。</p>
   </div>
 
   <div class="cmd-card">
-    <span class="cmd-name">pm-server status</span><span class="cmd-purpose">— カレント project の summary を表示</span>
+    <span class="cmd-name">pmlens status</span><span class="cmd-purpose">— カレント project の summary を表示</span>
     <p class="muted">CLI からの diagnostics 用。MCP 経由 (<code>pm_status</code>) と同じデータを 1 行ずつ表示する。</p>
   </div>
 
   <h3>3.3 ルール / hook 管理</h3>
   <div class="cmd-card">
-    <span class="cmd-name">pm-server update-rules</span><span class="cmd-purpose">— CLAUDE.md / AGENTS.md に auto-action rules を注入</span>
+    <span class="cmd-name">pmlens update-rules</span><span class="cmd-purpose">— CLAUDE.md / AGENTS.md に auto-action rules を注入</span>
     <dl class="kv">
       <dt>--target</dt><dd><code>auto</code> (default 検出) / <code>claude-code</code> / <code>codex</code> / <code>all</code></dd>
       <dt>--all</dt><dd>全 registered project に対して実行</dd>
@@ -270,23 +270,23 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
   </div>
 
   <div class="cmd-card">
-    <span class="cmd-name">pm-server update-claudemd</span><span class="cmd-purpose"><span class="badge badge-warn">deprecated</span> v0.6.0 以降 — <code>update-rules</code> の alias</span>
+    <span class="cmd-name">pmlens update-claudemd</span><span class="cmd-purpose"><span class="badge badge-warn">deprecated</span> v0.6.0 以降 — <code>update-rules</code> の alias</span>
     <p class="muted">後方互換用。新規スクリプトでは <code>update-rules</code> を使う。</p>
   </div>
 
   <div class="cmd-card">
-    <span class="cmd-name">pm-server install-hooks</span><span class="cmd-purpose">— Claude Code settings.json に hook を登録</span>
+    <span class="cmd-name">pmlens install-hooks</span><span class="cmd-purpose">— Claude Code settings.json に hook を登録</span>
   </div>
   <div class="cmd-card">
-    <span class="cmd-name">pm-server uninstall-hooks</span><span class="cmd-purpose">— hook 登録を解除</span>
+    <span class="cmd-name">pmlens uninstall-hooks</span><span class="cmd-purpose">— hook 登録を解除</span>
   </div>
 
   <h3>3.4 補助</h3>
   <div class="cmd-card">
-    <span class="cmd-name">pm-server context-inject</span><span class="cmd-purpose">— session context block を stdout 出力 (将来の SessionStart hook 用)</span>
+    <span class="cmd-name">pmlens context-inject</span><span class="cmd-purpose">— session context block を stdout 出力 (将来の SessionStart hook 用)</span>
   </div>
   <div class="cmd-card">
-    <span class="cmd-name">pm-server --version</span><span class="cmd-purpose">— version 確認</span>
+    <span class="cmd-name">pmlens --version</span><span class="cmd-purpose">— version 確認</span>
   </div>
 </section>
 
@@ -389,13 +389,13 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
 
   <div class="tip">
     <strong>Tips:</strong> <code>pm_status</code> のレスポンスには <code>diagnostics.utils_fingerprint</code> / <code>outbox_pending</code>
-    が含まれる。これは「pm-server バイナリと現在の <code>utils.py</code> が一致するか」「Desktop からの未処理 outbox が何件あるか」を返す。
+    が含まれる。これは「pmlens バイナリと現在の <code>utils.py</code> が一致するか」「Desktop からの未処理 outbox が何件あるか」を返す。
     <em>セッション開始時に毎回これらを見れば、stale binary や見落とし outbox を早期発見できる。</em>
   </div>
 </section>
 
 <section class="card" id="memory">
-  <h2>6. メモリ活用 — pm-server の心臓部</h2>
+  <h2>6. メモリ活用 — PM Lens の心臓部</h2>
   <p>SQLite + FTS5 のメモリ層は「compaction で失われる文脈を永続化する」中核機能。タイミングと粒度がコツ。</p>
 
   <h3>6.1 type の使い分け</h3>
@@ -462,7 +462,7 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
 <span class="comment"># → all_issues_resolved=true なら「親 PMSERV-042 を done に戻しますか？」と提案</span></pre>
 
   <div class="callout">
-    <strong>silent な warnings は禁忌:</strong> pm-server は副作用 (parent revert / quality gate 巻き戻し) を
+    <strong>silent な warnings は禁忌:</strong> PM Lens は副作用 (parent revert / quality gate 巻き戻し) を
     <code>warnings[]</code> で必ず返す。Claude がこれを user に提示しないと「バグっぽく見える」事故が起きる
     (CLAUDE.md auto-action rules で明示的に要求されている)。
   </div>
@@ -502,11 +502,11 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
   </table>
 
   <h3>9.1 install / update のターゲット切り替え</h3>
-<pre><span class="prompt">$</span> <span class="cmd">pm-server install --target=auto</span>      <span class="comment"># 環境を自動検出</span>
-<span class="prompt">$</span> <span class="cmd">pm-server install --target=all</span>       <span class="comment"># 全 host (Code + Codex)</span>
-<span class="prompt">$</span> <span class="cmd">pm-server install --target=codex</span>     <span class="comment"># Codex CLI のみ</span>
+<pre><span class="prompt">$</span> <span class="cmd">pmlens install --target=auto</span>      <span class="comment"># 環境を自動検出</span>
+<span class="prompt">$</span> <span class="cmd">pmlens install --target=all</span>       <span class="comment"># 全 host (Code + Codex)</span>
+<span class="prompt">$</span> <span class="cmd">pmlens install --target=codex</span>     <span class="comment"># Codex CLI のみ</span>
 
-<span class="prompt">$</span> <span class="cmd">pm-server update-rules --target=all --all</span>  <span class="comment"># 全 host × 全 project の rule 注入</span></pre>
+<span class="prompt">$</span> <span class="cmd">pmlens update-rules --target=all --all</span>  <span class="comment"># 全 host × 全 project の rule 注入</span></pre>
 
   <div class="tip">
     <strong>auto detection の仕組み:</strong> <code>installer.py</code> は filesystem (<code>~/.claude/</code>, <code>~/.codex/</code>)、
@@ -553,17 +553,17 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
 </section>
 
 <section class="card" id="hooks">
-  <h2>11. Hooks &amp; CLAUDE.md — pm-server を「自律」させる 2 つの経路</h2>
-  <p>pm-server が「ユーザーが叩かないのに動く」のは <strong>2 つの違う仕組み</strong>のおかげ。</p>
+  <h2>11. Hooks &amp; CLAUDE.md — PM Lens を「自律」させる 2 つの経路</h2>
+  <p>PM Lens が「ユーザーが叩かないのに動く」のは <strong>2 つの違う仕組み</strong>のおかげ。</p>
 
   <h3>11.1 CLAUDE.md auto-action rules (LLM レイヤ)</h3>
-  <p><code>pm-server update-rules</code> が CLAUDE.md / AGENTS.md に注入する「自動行動ルール」セクション。
+  <p><code>pmlens update-rules</code> が CLAUDE.md / AGENTS.md に注入する「自動行動ルール」セクション。
      Claude が prompt 解釈時にこれを参照し、適切なタイミングで <code>pm_*</code> ツールを発火する。</p>
   <p class="muted">例: 「セッション開始時に <code>pm_status / pm_next / pm_recall</code> を実行する」「タスクに着手する前に in_progress に変更する」等。</p>
 
   <h3>11.2 Claude Code hooks (ランタイムレイヤ)</h3>
-  <p><code>pm-server install-hooks</code> が <code>~/.claude/settings.json</code> に登録する PostToolUse hook。
-     ツール実行<strong>直後</strong>に pm-server がコールバックされ、context を memory に転写したり diagnostic を更新する。</p>
+  <p><code>pmlens install-hooks</code> が <code>~/.claude/settings.json</code> に登録する PostToolUse hook。
+     ツール実行<strong>直後</strong>に PM Lens がコールバックされ、context を memory に転写したり diagnostic を更新する。</p>
 
   <h3>11.3 二経路の使い分け</h3>
   <table>
@@ -614,12 +614,12 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
   <h2>13. FAQ &amp; トラブルシューティング</h2>
 
   <p class="faq-q">Q. <code>claude mcp list</code> に pm-server が出ない</p>
-  <p class="faq-a">A. <code>pm-server install --dry-run</code> で何が起きるか確認、必要なら <code>pm-server install</code> 再実行。
+  <p class="faq-a">A. <code>pmlens install --dry-run</code> で何が起きるか確認、必要なら <code>pmlens install</code> 再実行。
      <code>~/.claude/mcp_servers.json</code> も直接 grep してみる。</p>
 
   <p class="faq-q">Q. Claude が auto で <code>pm_status</code> を呼んでくれない</p>
   <p class="faq-a">A. CLAUDE.md の auto-action rules セクションが古いか欠落している可能性。
-     <code>pm-server update-rules</code> を実行。global CLAUDE.md (<code>~/.claude/CLAUDE.md</code>) と project CLAUDE.md
+     <code>pmlens update-rules</code> を実行。global CLAUDE.md (<code>~/.claude/CLAUDE.md</code>) と project CLAUDE.md
      の両方を確認する。</p>
 
   <p class="faq-q">Q. <code>pm_recall</code> が前回 session を返さない</p>
@@ -635,7 +635,7 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
 
   <p class="faq-q">Q. WAL sidecar (<code>memory.db-shm</code>) が大量に生成される</p>
   <p class="faq-a">A. v0.7.0+ で Lens モードでは <code>?mode=ro&amp;immutable=1</code> で接続するため発生しないはず
-     (PMSERV-080)。発生する場合は pm-server の version を <code>pm-server --version</code> で確認。</p>
+     (PMSERV-080)。発生する場合は PM Lens の version を <code>pmlens --version</code> で確認。</p>
 
   <p class="faq-q">Q. <code>pm_add_issue(severity=defect)</code> で親 task が done に戻った警告を見逃した</p>
   <p class="faq-a">A. CLAUDE.md rule で warnings[] を明示するよう書かれているが、Claude が拾い損ねる場合がある。
@@ -659,7 +659,7 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
 </section>
 
 <footer style="text-align: center; color: var(--muted); font-size: 12px; margin: 24px 0;">
-  PM Lens v0.10.0 · User Guide · 2026-06-15
+  PM Lens v0.12.0 · User Guide · 2026-06-15
 </footer>
 
 </main>

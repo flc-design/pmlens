@@ -1,7 +1,7 @@
 # PM Lens
 
-[![PyPI version](https://img.shields.io/pypi/v/pm-server.svg)](https://pypi.org/project/pm-server/)
-[![Python versions](https://img.shields.io/pypi/pyversions/pm-server.svg)](https://pypi.org/project/pm-server/)
+[![PyPI version](https://img.shields.io/pypi/v/pmlens.svg)](https://pypi.org/project/pmlens/)
+[![Python versions](https://img.shields.io/pypi/pyversions/pmlens.svg)](https://pypi.org/project/pmlens/)
 [![CI](https://github.com/flc-design/pmlens/actions/workflows/ci.yml/badge.svg)](https://github.com/flc-design/pmlens/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Multi-Host](https://img.shields.io/badge/multi--host-Claude%20Code%20%2B%20Codex%20CLI-success)](#multi-host-support-claude-code--codex-cli)
@@ -35,7 +35,7 @@ Track tasks, visualize progress, record decisions — through natural language i
 
 ## Features
 
-- **🔌 Multi-host first** — registers in **Claude Code AND Codex CLI** with one command (`pm-server install --target=auto`). Project rules sync to both `CLAUDE.md` and `AGENTS.md` automatically (ADR-008). Switch hosts mid-project without losing context — same `.pm/` data, same workflows
+- **🔌 Multi-host first** — registers in **Claude Code AND Codex CLI** with one command (`pmlens install --target=auto`). Project rules sync to both `CLAUDE.md` and `AGENTS.md` automatically (ADR-008). Switch hosts mid-project without losing context — same `.pm/` data, same workflows
 - **42 MCP tools** — task CRUD, child issues, status, blockers, velocity, dashboard, ADR, session memory, workflows, knowledge records, multi-host rules injection, cross-host outbox bridge, build-in-public X drafts, and more
 - **Workflow engine** — template-based development workflows with loops, user gates, and chaining (Discovery → Development)
 - **Knowledge records** — structured findings between casual memory and formal ADR (research, tradeoff, spec, etc.)
@@ -43,7 +43,7 @@ Track tasks, visualize progress, record decisions — through natural language i
 - **Session memory** — SQLite + FTS5 full-text search. Memories persist across sessions and link to tasks/decisions
 - **Cross-project search** — search memories across all projects via a global index
 - **Natural language** — say "進捗は？" or "what's next?" instead of memorizing commands
-- **Zero configuration** — `pip install` + `pm-server install`, then just say "PM初期化して"
+- **Zero configuration** — `pip install` + `pmlens install`, then just say "PM初期化して"
 - **Multi-project** — manage all your projects from a global registry with cross-project dashboards
 - **Git-friendly** — plain YAML files in `.pm/` directory, trackable with `git diff`
 - **Non-invasive** — adds only a `.pm/` directory to your project. `rm -rf .pm/` to remove completely
@@ -56,7 +56,7 @@ Track tasks, visualize progress, record decisions — through natural language i
 
 ```bash
 pip install pm-server
-pm-server install       # Registers MCP server in Claude Code
+pmlens install          # Registers MCP server in Claude Code
 # Restart Claude Code
 ```
 
@@ -86,18 +86,18 @@ You can also update manually:
 
 ### Troubleshooting: MCP fails to connect after an update
 
-If Claude Code reports an MCP connection failure (or `pm-server: ENOENT`) right
+If Claude Code reports an MCP connection failure (or `pmlens: ENOENT`) right
 after `pip install --upgrade`, the usual cause is an **interrupted install**. If
 pip is stopped mid-extraction (Ctrl-C, sleep, low disk), the package can be left
 half-written: `pip list` still shows it as installed, but some modules and the
-`pm-server` console script are missing — so the launcher can't be found.
+`pmlens` console script are missing — so the launcher can't be found.
 
 Recover with a forced clean reinstall of the code package (`pmlens`):
 
 ```bash
 pip install --force-reinstall --no-deps pmlens==<version>
 pyenv rehash          # pyenv users only — regenerate the shim
-pm-server --help      # verify → "PM Lens — ..."
+pmlens --help         # verify → "PM Lens — ..."
 ```
 
 MCP servers connect only at startup, so **restart Claude Code** afterward (a
@@ -113,7 +113,7 @@ failed connection is not retried within a running session).
 ✓ Detected: name=my-app, version=1.2.0 (from package.json)
 ```
 
-pm-server automatically detects project info from `package.json`, `pyproject.toml`, `Cargo.toml`, `.git/config`, and `README.md`.
+PM Lens automatically detects project info from `package.json`, `pyproject.toml`, `Cargo.toml`, `.git/config`, and `README.md`.
 
 ### Use it
 
@@ -133,14 +133,14 @@ pm-server automatically detects project info from `package.json`, `pyproject.tom
 
 ## Multi-Host Support (Claude Code + Codex CLI)
 
-`pm-server` v0.5.0 supports two MCP **hosts** — Claude Code (`~/.claude/`) and
+PM Lens v0.5.0 supports two MCP **hosts** — Claude Code (`~/.claude/`) and
 Codex CLI (`~/.codex/config.toml`) — as registration targets. The two hosts
 keep MCP configuration in completely separate stores, so a single install
 must reach both when needed.
 
 ### `--target` flag
 
-`pm-server install` and `pm-server uninstall` accept a `--target` (alias `-t`)
+`pmlens install` and `pmlens uninstall` accept a `--target` (alias `-t`)
 flag. The default is **conservative on purpose**: existing scripts and
 documentation that say `pm-server install` continue to register only
 Claude Code, exactly as in v0.4.x.
@@ -152,7 +152,7 @@ Claude Code, exactly as in v0.4.x.
 | `auto`          | Detect via filesystem (`~/.codex/config.toml` exists?) — register in detected hosts only. |
 | `all`           | Force every known host. Creates `~/.codex/config.toml` if absent.            |
 
-The companion command `pm-server update-rules` (introduced in v0.5.0 alongside
+The companion command `pmlens update-rules` (introduced in v0.5.0 alongside
 this feature) defaults to `--target auto` because it is a brand-new command
 with no v0.4.x baseline to preserve.
 
@@ -175,19 +175,19 @@ with no v0.4.x baseline to preserve.
 
 ```bash
 # Default (back-compat) — Claude Code only
-pm-server install
+pmlens install
 
-# Add pm-server to whichever host(s) are detected on this machine
-pm-server install --target auto
+# Add PM Lens to whichever host(s) are detected on this machine
+pmlens install --target auto
 
 # Force registration in both, creating ~/.codex/config.toml if needed
-pm-server install --target all
+pmlens install --target all
 
 # Preview what would happen, don't touch any files
-pm-server install --target auto --dry-run
+pmlens install --target auto --dry-run
 
 # Symmetric removal (same --target semantics)
-pm-server uninstall --target auto
+pmlens uninstall --target auto
 ```
 
 See [`docs/design.md` §5.2](docs/design.md) and ADR-007 for the detailed
@@ -207,7 +207,7 @@ The rules section is bracketed by `<!-- pm-server:begin v=N -->` /
 `<!-- pm-server:end -->` markers and updated **in place** — user content
 outside the markers is never touched.
 
-`pm_update_rules` (and its CLI sibling `pm-server update-rules`) defaults
+`pm_update_rules` (and its CLI sibling `pmlens update-rules`) defaults
 to `--target auto`: it detects which host(s) are present on this machine
 and updates only those instruction files. Detection runs four signals
 (filesystem, marker, `CLAUDECODE` env, fallback) — see ADR-008 amendment
@@ -216,9 +216,9 @@ A3 in [`docs/design.md` §6.4](docs/design.md).
 | Action                           | Tool                                                  |
 | -------------------------------- | ----------------------------------------------------- |
 | MCP (in-session)                 | `pm_update_rules(target="auto", dry_run=False)`       |
-| CLI (this project)               | `pm-server update-rules --target auto`                |
-| CLI (every registered project)   | `pm-server update-rules --target auto --all`          |
-| Legacy CLAUDE.md only            | `pm_update_claudemd` / `pm-server update-claudemd`    |
+| CLI (this project)               | `pmlens update-rules --target auto`                   |
+| CLI (every registered project)   | `pmlens update-rules --target auto --all`             |
+| Legacy CLAUDE.md only            | `pm_update_claudemd` / `pmlens update-claudemd`       |
 
 `AGENTS.md` is backed up to `AGENTS.md.bak.<timestamp>` before each write.
 `CLAUDE.md` backup symmetry is still pending in PMSERV-058 (originally targeted for v0.6.0).
@@ -332,11 +332,11 @@ dataclasses, atomic-write helpers).
 
 ## Parallel Work Lines (Branch-Aware Continuity)
 
-Running several streams of work in one repo — e.g. a mainline, a paper, and teaching material? pm-server gives each line its own session-continuity context. Two topologies are supported (ADR-028).
+Running several streams of work in one repo — e.g. a mainline, a paper, and teaching material? PM Lens gives each line its own session-continuity context. Two topologies are supported (ADR-028).
 
 ### Recommended: one git worktree per line (zero config)
 
-pm-server scopes **everything** — tasks, memories, and session summaries — to the directory that contains `.pm/`. Because `.pm/memory.db` is git-ignored, every `git worktree` gets its own independent store automatically:
+PM Lens scopes **everything** — tasks, memories, and session summaries — to the directory that contains `.pm/`. Because `.pm/memory.db` is git-ignored, every `git worktree` gets its own independent store automatically:
 
 ```bash
 git worktree add ../myproj-paper  paper   # 論文 line
@@ -354,7 +354,7 @@ Prefer a single directory and `git checkout` between lines? Pass the branch as a
 pm_recall(track="paper")     # last session recorded while on the `paper` branch
 ```
 
-- The branch is recorded automatically when `pm_session_summary(action="save")` runs. It is read from `.git/HEAD` **as text** — pm-server never shells out to `git`, so a hostile `.git/config` can't execute code (CVE-2026-45033 / git config-exec class).
+- The branch is recorded automatically when `pm_session_summary(action="save")` runs. It is read from `.git/HEAD` **as text** — PM Lens never shells out to `git`, so a hostile `.git/config` can't execute code (CVE-2026-45033 / git config-exec class).
 - Under the bundled plugin, the SessionStart hook surfaces the current branch so the model can pass `track=` on its first recall; re-pass it after any `git checkout`.
 - If a line has no recorded summary yet (e.g. an existing DB from before this feature), `pm_recall(track=...)` gracefully falls back to the overall-latest and sets `track_matched: false` — so it never breaks on day one.
 
@@ -385,7 +385,7 @@ See **ADR-028** (design) and **ADR-035** on the SynapticLedger side (unified `.p
 
 ## Data Structure
 
-pm-server stores task data as plain YAML and memories in SQLite:
+PM Lens stores task data as plain YAML and memories in SQLite:
 
 ```
 your-project/
@@ -413,7 +413,7 @@ YAML files are human-readable and hand-editable. Memory DB is the source of trut
 
 ## CLAUDE.md Integration
 
-Add this to your project's `CLAUDE.md` for automatic PM behavior (or run `pm-server update-rules`):
+Add this to your project's `CLAUDE.md` for automatic PM behavior (or run `pmlens update-rules`):
 
 ```markdown
 ## PM Lens 自動行動ルール（必ず従うこと）
@@ -468,12 +468,12 @@ Claude Code はセッションが長くなるとコンテキストを自動圧�
 
 ---
 
-## Tips: Getting the Most out of pm-server
+## Tips: Getting the Most out of PM Lens
 
 ### Recommended Workflow
 
 ```
-1. Install & register      →  pip install pm-server && pm-server install
+1. Install & register      →  pip install pm-server && pmlens install
 2. Start Claude Code       →  (restart after install)
 3. Initialize project      →  "PM初期化して" or "Initialize PM"
 4. Add tasks               →  "Add task: implement user auth"
@@ -485,7 +485,7 @@ Claude Code はセッションが長くなるとコンテキストを自動圧�
 
 ### Protecting Context from Compaction
 
-Claude Code automatically compresses (compacts) conversation context when sessions get long. This means detailed information from earlier exchanges can be lost. pm-server's memory tools protect against this:
+Claude Code automatically compresses (compacts) conversation context when sessions get long. This means detailed information from earlier exchanges can be lost. PM Lens's memory tools protect against this:
 
 | Situation | What to do |
 |---|---|
@@ -499,7 +499,7 @@ Claude Code automatically compresses (compacts) conversation context when sessio
 
 ### Session Continuity
 
-pm-server's memory layer ensures nothing is lost between sessions:
+PM Lens's memory layer ensures nothing is lost between sessions:
 
 ```
 Session 1                          Session 2
@@ -512,12 +512,12 @@ Session 1                          Session 2
 
 ### Automatic Hooks (Lifecycle Enforcement)
 
-pm-server automatically installs Claude Code hooks at first session start (`pm_status`). After a `git commit`, a PostToolUse hook injects a reminder into the conversation, prompting Claude to call `pm_log`, `pm_update_task`, and `pm_next`.
+PM Lens automatically installs Claude Code hooks at first session start (`pm_status`). After a `git commit`, a PostToolUse hook injects a reminder into the conversation, prompting Claude to call `pm_log`, `pm_update_task`, and `pm_next`.
 
 - Hooks are installed globally in `~/.claude/settings.json`
-- Existing user hooks are preserved (pm-server hooks are appended, not replaced)
+- Existing user hooks are preserved (PM Lens hooks are appended, not replaced)
 - No manual setup needed — hooks are auto-installed on upgrade
-- To manage manually: `pm-server install-hooks` / `pm-server uninstall-hooks`
+- To manage manually: `pmlens install-hooks` / `pmlens uninstall-hooks`
 
 ### Multi-Project Management
 
@@ -533,21 +533,21 @@ pm-server automatically installs Claude Code hooks at first session start (`pm_s
 ## CLI Commands
 
 ```bash
-pm-server install          # Register MCP server (default: Claude Code only — back-compat).
+pmlens install             # Register MCP server (default: Claude Code only — back-compat).
                            # Pass --target {auto,all,claude-code,codex} for multi-host.
                            # Pass --dry-run to preview without writing. See "Multi-Host Support" below.
-pm-server uninstall        # Symmetric to install (same --target / --dry-run semantics).
-pm-server serve            # Start MCP server (called by Claude Code automatically)
-pm-server discover .       # Scan for projects with .pm/ directories
-pm-server status           # Show project status from terminal
-pm-server context-inject   # Print session context to stdout (for hook integration)
-pm-server migrate          # Migrate from pm-agent (rename transition)
-pm-server update-rules     # Inject PM Lens rules into CLAUDE.md and/or AGENTS.md (ADR-008).
+pmlens uninstall           # Symmetric to install (same --target / --dry-run semantics).
+pmlens serve               # Start MCP server (called by Claude Code automatically)
+pmlens discover .          # Scan for projects with .pm/ directories
+pmlens status              # Show project status from terminal
+pmlens context-inject      # Print session context to stdout (for hook integration)
+pmlens migrate             # Migrate from pm-agent (rename transition)
+pmlens update-rules        # Inject PM Lens rules into CLAUDE.md and/or AGENTS.md (ADR-008).
                            # --target {auto,all,claude-code,codex} (default: auto)
                            # --dry-run / --all (apply to every registered project)
-pm-server update-claudemd  # Legacy alias of `update-rules --target=claude-code`. Deprecated since v0.6.0.
-pm-server install-hooks    # Manually install Claude Code hooks (auto-installed via pm_status)
-pm-server uninstall-hooks  # Remove PM Lens hooks from Claude Code settings
+pmlens update-claudemd     # Legacy alias of `update-rules --target=claude-code`. Deprecated since v0.6.0.
+pmlens install-hooks       # Manually install Claude Code hooks (auto-installed via pm_status)
+pmlens uninstall-hooks     # Remove PM Lens hooks from Claude Code settings
 ```
 
 ---
@@ -568,7 +568,7 @@ Claude Code Session
   ├── Skills (super-research, etc.)
   │
   └── MCP Server (stdio)
-        └── pm-server serve
+        └── pmlens serve
               │
               ├── server.py    → 42 MCP tools (FastMCP)
               ├── models.py    → Pydantic v2 data models (17 models, 15 enums)
@@ -586,7 +586,7 @@ Claude Code Session
                                    ├─ install_codex()       → ~/.codex/config.toml (tomlkit)
                                    └─ install(target=...)   → orchestrator + InstallSummary
 
-Data layer (operated on through pm-server serve):
+Data layer (operated on through pmlens serve):
   ├── project-A/.pm/ (YAML + workflows + knowledge + memory.db)
   ├── project-B/.pm/ (YAML + workflows + knowledge + memory.db)
   └── ~/.pm/registry.yaml + memory.db
@@ -601,13 +601,13 @@ If you were using the earlier `pm-agent` package:
 ```bash
 pip uninstall pm-agent
 pip install pm-server
-pm-server migrate       # Switches MCP registration from pm-agent to pm-server
+pmlens migrate          # Switches MCP registration from pm-agent to pmlens
 # Restart Claude Code
 ```
 
 The `migrate` command will:
 - Remove the old `pm-agent` MCP registration
-- Register `pm-server` as the new MCP server
+- Register `pmlens` as the new MCP server
 - Verify `~/.pm/registry.yaml` integrity
 - Warn about any `CLAUDE.md` files that reference `pm-agent`
 
@@ -658,9 +658,11 @@ ruff format src/        # Format
 ## Trademark notice
 
 "PM Lens"™ is a trademark of FLC design Co., Ltd., used as the display name of
-this project. The project is currently distributed on PyPI as `pm-server`; the
-PyPI package, the Python import name (`pm_server`), and the MCP tooling retain
-the `pm-server` / `pm_server` identifiers during the transition to the PM Lens brand.
+this project. The project is published on PyPI as `pmlens`; the Python import
+name (`pmlens`), the console binary (`pmlens`), and the MCP tooling all use the
+`pmlens` identifier. A compatibility wrapper distribution named `pm-server` is
+retained on PyPI so existing `pip install pm-server` / `uvx pm-server`
+invocations keep working during the transition to the PM Lens brand.
 
 This project is **not affiliated with, endorsed by, or sponsored by**:
 

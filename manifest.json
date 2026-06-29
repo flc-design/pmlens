@@ -2,7 +2,7 @@
   "manifest_version": "0.4",
   "name": "pmlens",
   "display_name": "PM Lens (Read-only)",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "description": "Read-only project-management Lens for Claude Desktop/Cowork. Surfaces tasks, blockers, memory, and dashboards from a project's .pm/ store; writes are structurally disabled.",
   "long_description": "PM Lens is a project-management MCP server. This .mcpb bundle ships it in Lens mode (PM_LENS=1): only the read-only tool allowlist (pm_status, pm_next, pm_tasks, pm_blockers, pm_recall, pm_memory_search, pm_memory_stats, pm_dashboard, pm_risks, pm_velocity, pm_list, pm_knowledge_query, pm_workflow_status, pm_workflow_list, pm_workflow_templates) is registered. Mutators and subprocess paths are structurally unreachable (ADR-015/017/018). SQLite is opened with mode=ro&immutable=1 so the Desktop/Cowork host never creates -wal/-shm sidecars in another project's .pm/ (PMSERV-080). When PM_DESKTOP_WRITE=1 (set by this bundle for Claude Desktop), an append-only outbox at ~/.pm/desktop/desktop.db unlocks pm_outbox_remember / pm_outbox_log so cross-host knowledge capture works without touching any project's main memory.db (Phase 2 / ADR-019).",
   "author": {

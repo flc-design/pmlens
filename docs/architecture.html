@@ -89,7 +89,7 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
 <header class="hero">
   <h1>PM Lens — Architecture &amp; Behavior</h1>
   <div class="subtitle">Claude Code 用プロジェクト管理 MCP サーバーの全体機能・データフロー・状態遷移マップ</div>
-  <div class="meta">バージョン 0.10.0 (2026-06-15 時点) · 42 MCP tools · 15 RO + 2 outbox-RW + 25 full-RW · 1,033 tests · MIT</div>
+  <div class="meta">バージョン 0.12.0 (2026-06-15 時点) · 42 MCP tools · 15 RO + 2 outbox-RW + 25 full-RW · 1,033 tests · MIT</div>
   <div class="meta">関連ドキュメント: <a href="user-guide.html">User Guide (CLI &amp; UX Tips)</a> · <a href="workflow-guide.html">Workflow Guide (作り方)</a> · <a href="cheatsheet.ja.md">Cheatsheet (ja)</a></div>
 </header>
 
@@ -122,7 +122,7 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
     <tr><td><strong>言語</strong></td><td>Python 3.11+</td></tr>
     <tr><td><strong>主要フレームワーク</strong></td><td>FastMCP, Pydantic v2, Click, Jinja2, tomlkit</td></tr>
     <tr><td><strong>データ形式</strong></td><td>YAML (human-readable, git-friendly) + SQLite per-project (<code>.pm/memory.db</code>) + global (<code>~/.pm/memory.db</code>) + outbox (<code>~/.pm/desktop/desktop.db</code>)</td></tr>
-    <tr><td><strong>配布</strong></td><td>PyPI <code>pm-server</code> (Full RW) + <code>.mcpb</code> bundle (Lens RO / Desktop Outbox)</td></tr>
+    <tr><td><strong>配布</strong></td><td>PyPI <code>pmlens</code> (Full RW) + <code>.mcpb</code> bundle (Lens RO / Desktop Outbox)</td></tr>
     <tr><td><strong>対象ホスト</strong></td><td>Claude Code, Claude Desktop, Claude Cowork, Codex CLI</td></tr>
     <tr><td><strong>動作モード</strong></td><td><code>PM_LENS=0</code> Full RW / <code>PM_LENS=1</code> Lens RO / <code>PM_LENS=1 + PM_DESKTOP_WRITE=1</code> Outbox bridge (Phase 2)</td></tr>
     <tr><td><strong>ライセンス</strong></td><td>MIT</td></tr>
@@ -260,7 +260,7 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
   <p>42 個の MCP ツールがカテゴリ別に提供される。配布モードによって登録される ツール集合が異なる:
      <span class="badge badge-ro">RO</span> は Lens モード (<code>PM_LENS=1</code>) で利用可能、
      <span class="badge" style="background:#ede9fe;color:#6d28d9">OUTBOX</span> は Lens + <code>PM_DESKTOP_WRITE=1</code> で追加開放される Desktop Outbox 書込み tool、
-     <span class="badge badge-rw">RW</span> は full pm-server (Claude Code / Codex 配布) のみ。</p>
+     <span class="badge badge-rw">RW</span> は full PM Lens (Claude Code / Codex 配布) のみ。</p>
   <div class="legend">
     <div class="legend-item"><span class="swatch" style="background:#dbeafe;border-color:#2563eb"></span>RO (Lens で利用可)</div>
     <div class="legend-item"><span class="swatch" style="background:#ede9fe;border-color:#6d28d9"></span>OUTBOX-RW (Desktop bridge only)</div>
@@ -273,7 +273,7 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
     <tr><td><code>pm_discover</code></td><td>サブツリー walk で .pm/ project を検出 (depth=5 cap)</td><td><span class="badge badge-rw">RW</span></td></tr>
     <tr><td><code>pm_list</code></td><td>~/.pm/registry.yaml の登録 project 一覧</td><td><span class="badge badge-ro">RO</span></td></tr>
     <tr><td><code>pm_cleanup</code></td><td>古いログ・記憶・summary の clean-up</td><td><span class="badge badge-rw">RW</span></td></tr>
-    <tr><td><code>pm_update_claudemd</code></td><td>CLAUDE.md の pm-server セクションを最新化</td><td><span class="badge badge-rw">RW</span></td></tr>
+    <tr><td><code>pm_update_claudemd</code></td><td>CLAUDE.md の PM Lens セクションを最新化</td><td><span class="badge badge-rw">RW</span></td></tr>
     <tr><td><code>pm_update_rules</code></td><td>Codex AGENTS.md を最新化</td><td><span class="badge badge-rw">RW</span></td></tr>
 
     <tr><td rowspan="5">Status &amp; navigation</td>
@@ -322,14 +322,14 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
     <tr><td><code>pm_workflow_list</code></td><td>active/completed/paused/abandoned 一覧</td><td><span class="badge badge-ro">RO</span></td></tr>
     <tr><td><code>pm_workflow_templates</code></td><td>builtin + custom テンプレート一覧</td><td><span class="badge badge-ro">RO</span></td></tr>
   </table>
-  <p class="muted">15 RO + 2 OUTBOX-RW + 25 Full-RW = 42 ツール (2026-06-15, v0.10.0)。Lens 配布では RO_ALLOWLIST 外の
+  <p class="muted">15 RO + 2 OUTBOX-RW + 25 Full-RW = 42 ツール (2026-06-15, v0.12.0)。Lens 配布では RO_ALLOWLIST 外の
      ツールが FastMCP に未登録 = 構造的不変条件 (ADR-015/017/018)。OUTBOX 2 ツールは <code>PM_DESKTOP_WRITE=1</code>
      が追加で立った時のみ登録され、main <code>.pm/memory.db</code> は touch しない (ADR-019)。</p>
 </section>
 
 <section class="card" id="lens">
   <h2>4. Lens Mode (Read-Only) Flow</h2>
-  <p><code>PM_LENS=1</code> 環境変数が立った pm-server プロセスは、起動時に <code>RO_ALLOWLIST</code> 外のツールを
+  <p><code>PM_LENS=1</code> 環境変数が立った PM Lens プロセスは、起動時に <code>RO_ALLOWLIST</code> 外のツールを
      FastMCP に登録しない。これは Claude Desktop / Cowork のような passive ビューア host で「書き込み事故」を
      構造的に防ぐ防衛機構。</p>
   <div class="svg-wrap">
@@ -357,11 +357,11 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
     <!-- Step 3: uv runtime -->
     <rect x="480" y="20" width="160" height="60" rx="6" fill="#fff" stroke="#2563eb" stroke-width="1.5"/>
     <text x="560" y="42" text-anchor="middle" font-weight="700">uv runtime</text>
-    <text x="560" y="60" text-anchor="middle" fill="#666" font-size="10">PyPI から pm-server fetch</text>
+    <text x="560" y="60" text-anchor="middle" fill="#666" font-size="10">PyPI から pmlens fetch</text>
 
     <!-- Step 4: process -->
     <rect x="680" y="20" width="180" height="60" rx="6" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
-    <text x="770" y="42" text-anchor="middle" font-weight="700">pm-server プロセス</text>
+    <text x="770" y="42" text-anchor="middle" font-weight="700">PM Lens プロセス</text>
     <text x="770" y="60" text-anchor="middle" fill="#666" font-size="10">env: PM_LENS=1</text>
 
     <line x1="200" y1="50" x2="240" y2="50" stroke="#2563eb" stroke-width="1.5" marker-end="url(#arrow2)"/>
@@ -518,7 +518,7 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
 
   <h3>5.5 <code>content-pipeline</code> (4 steps, ADR-024)</h3>
   <p class="muted">.pm の知見 (lesson/insight/ADR/defect) を redact 済みの build-in-public X 下書きへ変換
-     (extract → draft → redact → review)。pm-server は X 認証情報を持たず投稿しない — redaction が唯一の安全層。
+     (extract → draft → redact → review)。PM Lens は X 認証情報を持たず投稿しない — redaction が唯一の安全層。
      詳細は workflow-guide.html §5.5。</p>
 </section>
 
@@ -628,9 +628,9 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
   <p>同一コードベースが 3 つの配布モードを持つ。PyPI は Full RW、.mcpb は構造的 RO (Lens)、
      .mcpb + <code>PM_DESKTOP_WRITE=1</code> は Lens に Outbox 書込みだけを足した bridge モード。</p>
   <table>
-    <tr><th></th><th>PyPI <code>pm-server</code></th><th>.mcpb bundle (Lens)</th><th>.mcpb + PM_DESKTOP_WRITE</th></tr>
+    <tr><th></th><th>PyPI <code>pmlens</code></th><th>.mcpb bundle (Lens)</th><th>.mcpb + PM_DESKTOP_WRITE</th></tr>
     <tr><td><strong>対象 host</strong></td><td>Claude Code (CLI) / Codex CLI</td><td>Claude Cowork / その他 viewer</td><td>Claude Desktop (Phase 2 bridge)</td></tr>
-    <tr><td><strong>インストール</strong></td><td><code>pip install pm-server</code> &rarr; <code>pm-server install</code></td><td>.mcpb ファイルを host に drag &amp; drop</td><td>.mcpb + manifest が <code>PM_DESKTOP_WRITE=1</code> を auto-propagate (PMSERV-100)</td></tr>
+    <tr><td><strong>インストール</strong></td><td><code>pip install pm-server</code> &rarr; <code>pmlens install</code></td><td>.mcpb ファイルを host に drag &amp; drop</td><td>.mcpb + manifest が <code>PM_DESKTOP_WRITE=1</code> を auto-propagate (PMSERV-100)</td></tr>
     <tr><td><strong>登録 tools</strong></td><td>Full RW (42 tools)</td><td>Lens RO (15 tools)</td><td>RO 15 + OUTBOX-RW 2 = 17 tools</td></tr>
     <tr><td><strong>環境変数</strong></td><td>未設定</td><td><code>PM_LENS=1</code></td><td><code>PM_LENS=1, PM_DESKTOP_WRITE=1</code></td></tr>
     <tr><td><strong>SQLite モード</strong></td><td>RW main + outbox</td><td><code>?mode=ro&amp;immutable=1</code> main / outbox 不触</td><td>main は RO 不変、outbox <code>~/.pm/desktop/desktop.db</code> は append-only RW</td></tr>
@@ -751,7 +751,7 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
 </section>
 
 <footer style="text-align: center; color: var(--muted); font-size: 12px; margin: 24px 0;">
-  Generated 2026-06-15 · pm-server v0.10.0 · Phase 2 Desktop Outbox (ADR-019) shipped · 1,033 tests · 42 MCP tools
+  Generated 2026-06-15 · PM Lens v0.12.0 · Phase 2 Desktop Outbox (ADR-019) shipped · 1,033 tests · 42 MCP tools
 </footer>
 
 </main>

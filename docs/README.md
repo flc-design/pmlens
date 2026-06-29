@@ -12,7 +12,7 @@ PM Lens の各種ドキュメント。読者層と用途で 3 つの HTML ガイ
 
 ## 全ドキュメント一覧
 
-### HTML ガイド (v0.10.0 時点)
+### HTML ガイド (v0.12.0 時点)
 - **[architecture.html](./architecture.html)** — Architecture &amp; Behavior（42 MCP tools, Lens mode, Phase 2 Desktop Outbox, distribution channels）
 - **[user-guide.html](./user-guide.html)** — User Guide（CLI コマンド完全リファレンス・UX Tips・トラブルシューティング）
 - **[workflow-guide.html](./workflow-guide.html)** — Workflow Guide（5 builtin templates 詳解 (incl. brainstorming, content-pipeline)・YAML schema・カスタム作成方法）
@@ -26,7 +26,7 @@ PM Lens の各種ドキュメント。読者層と用途で 3 つの HTML ガイ
 
 ## どこから読むべきか
 
-- **初めて pm-server を入れる** → `user-guide.html` の §2 Quickstart
+- **初めて PM Lens を入れる** → `user-guide.html` の §2 Quickstart
 - **Claude Code セッションでの日常運用を知りたい** → `user-guide.html` の §4 セッションフロー・§5 進捗チェック Tips
 - **設計判断の経緯を理解したい** → `architecture.html` を順に読み、必要なら `design.md` を深堀り
 - **自分の組織向けに workflow を増やしたい** → `workflow-guide.html` の §6 schema・§7 カスタム作成

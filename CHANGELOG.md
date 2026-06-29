@@ -19,6 +19,18 @@
 - The binary name (`pm-server` console script), the migrate machinery's legacy
   key, and the CLAUDE.md marker slug (`pm-server:begin`) deliberately stay
   `pm-server` (backward compatibility / the ADR-032 marker invariant).
+- **Step 7 (Phase A — reversible)** lands the rest on-branch ahead of the gated
+  0.12.0 publish: `prog_name` → `pmlens`; identity prose refreshed across
+  `README*` / `docs/*` / cheatsheets / skills (3-term rule — `pm-server` = the
+  retained install handle, `pmlens` = the body identity, "PM Lens" = display
+  name); the version bumped `0.11.0` → `0.12.0` across every drift-guarded
+  surface; and the install/migrate **binary resolver now prefers the `pmlens`
+  binary** (`shutil.which("pmlens") or shutil.which("pm-server")`) so the
+  migrated `pmlens` registration execs the pipx-installed `pmlens` at cutover,
+  with `pm-server` kept as the mid-flight fallback. The `plugin.json` /
+  `marketplace.json` plugin **name** deliberately stays `pm-server` (the
+  `/plugin install pm-server@flc-design` handle) until cutover, so existing
+  installs are not stranded.
 
 ### Added
 

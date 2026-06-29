@@ -24,7 +24,14 @@ def _mock_claude(monkeypatch, *, pm_server_present: bool, claude: str | None = "
     """
 
     def which(name):
-        return {"claude": claude, "pm-server": "/usr/bin/pm-server"}.get(name)
+        # PMSERV-137 A4: pmlens is on PATH (mirrors a host after `pipx install
+        # pmlens`) so the new registration resolves to the pmlens binary, with
+        # pm-server kept as the mid-flight fallback.
+        return {
+            "claude": claude,
+            "pmlens": "/usr/bin/pmlens",
+            "pm-server": "/usr/bin/pm-server",
+        }.get(name)
 
     monkeypatch.setattr(installer.shutil, "which", which)
 
@@ -171,6 +178,11 @@ class TestMigrateClaudeCode:
         assert result.status == "installed"
         assert any("add" in c and "pmlens" in c for c in calls), calls
         assert any("remove" in c and "pm-server" in c for c in calls), calls
+        # PMSERV-137 A4: the new pmlens registration must invoke the pmlens
+        # binary (resolved via shutil.which("pmlens")), not the legacy
+        # pm-server binary. The binary is the token right after the "--".
+        add_cmd = next(c for c in calls if "add" in c and "pmlens" in c)
+        assert add_cmd[add_cmd.index("--") + 1] == "/usr/bin/pmlens", add_cmd
 
     def test_skipped_when_pm_server_absent(self, monkeypatch):
         _mock_claude(monkeypatch, pm_server_present=False)

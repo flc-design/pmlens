@@ -1,5 +1,5 @@
 ---
-name: pm-server
+name: pmlens
 description: >
   プロジェクト管理 MCP Server。タスク追跡、進捗可視化、ブロッカー検知、
   ADR記録、全プロジェクト横断ダッシュボードを提供する。
