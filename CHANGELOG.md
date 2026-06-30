@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Documentation
+
+- **Repo tidy-up after the 0.12.0 rename (PMSERV-141)** — synced `README.ja.md`
+  with `README.md`: added the missing "pm-server からの移行" section and fixed a
+  stale `pip install pm-server` → `pip install -U pmlens` in the pm-agent
+  migration block (the EN README had gained the pm-server migration section,
+  leaving the JA side a section behind). Archived the one-time
+  `docs/memory-layer-prompt.md` (Phase-1 implementation prompt) under
+  `docs/archive/` and relocated its docs-index entry to a new アーカイブ
+  subsection. Working-tree-only housekeeping (regenerable caches, stale `dist/`
+  artifacts trimmed to `pmlens-0.12.0.*`, old rules backups) was pruned
+  alongside but is not part of the tracked history.
+
 ## [0.12.0] - 2026-06-29
 
 ### Changed
