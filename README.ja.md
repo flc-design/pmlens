@@ -529,13 +529,32 @@ Claude Code Session
 
 ---
 
+## pm-server からの移行
+
+以前の名称 **PM Server**（`pm-server`）でインストールしていた場合:
+
+何も壊れません — `pip install pm-server` / `uvx pm-server` はそのまま動作します（`pm-server` ディストリビューションは `pmlens` に依存する薄いラッパーになりました）。新しい名称に移行するには:
+
+```bash
+pip install -U pmlens          # または: pipx install pmlens
+pmlens migrate-from-pm-server  # MCP サーバーを再登録 + 設定を移行
+# Claude Code を再起動
+```
+
+`migrate-from-pm-server` の実行内容:
+- MCP サーバー `pm-server` → `pmlens` を再登録（Claude Code + Codex）
+- `mcp__pm-server__*` → `mcp__pmlens__*` の権限を書き換え（追加方式・既存を壊さない）
+- 編集する全ファイルにタイムスタンプ付きバックアップを作成
+
+`.pm/` のデータは**そのまま**です。詳細は `docs/MIGRATION.md` を参照してください。
+
 ## pm-agent からの移行
 
 以前の `pm-agent` パッケージから移行する場合:
 
 ```bash
 pip uninstall pm-agent
-pip install pm-server
+pip install -U pmlens
 pmlens migrate       # MCP 登録を pm-agent → pmlens に切り替え
 # Claude Code を再起動
 ```

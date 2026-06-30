@@ -22,7 +22,10 @@ PM Lens の各種ドキュメント。読者層と用途で 3 つの HTML ガイ
 - [design.md](./design.md) — 詳細設計書（アーキテクチャ・データモデル・MCP API 一覧）
 - [workflow.md](./workflow.md) — Claude Code 開発ワークフロー（プロセス論）
 - [memory-layer-design.md](./memory-layer-design.md) — メモリ層 (SQLite + FTS5) の設計
-- [memory-layer-prompt.md](./memory-layer-prompt.md) — メモリ層導入時のプロンプト履歴
+
+### アーカイブ
+過去の一度きりのドキュメント（履歴保存目的・現行運用では参照不要）。
+- [archive/memory-layer-prompt.md](./archive/memory-layer-prompt.md) — メモリ層導入時の実装指示プロンプト（2026-04 / v2、Phase 1 で完了）
 
 ## どこから読むべきか
 
