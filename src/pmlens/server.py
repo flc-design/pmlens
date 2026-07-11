@@ -1182,6 +1182,17 @@ def pm_recall(
         recall itself came back empty — an ``outbox_note`` are still added
         when running under PM_LENS=1 (Desktop/Cowork; redundant with
         pm_status.diagnostics in Claude Code, so skipped there).
+        MATCHING ASYMMETRY (AD-5): the ``scope="project"`` filter here
+        resolves ``project_path`` and each entry's ``source_project`` to
+        absolute ``Path`` objects (via ``expanduser().resolve()``) and
+        compares those, so a relative path, a ``~``-prefixed path, a path
+        with a trailing slash, or one containing ``..`` segments still
+        matches the same directory. This is deliberately different from
+        ``pm_outbox_pending(filter_project=...)``, which compares
+        ``source_project`` as a raw, unresolved string — passing a
+        relative path or a trailing-slash variant there can silently
+        return zero matches even though the same path resolves correctly
+        here.
     """
     # Normalize an empty/whitespace track to None so resolution and response-key
     # injection use the same predicate — track="" then behaves exactly like the
@@ -1821,6 +1832,20 @@ def pm_outbox_pending(
     filter_since: optional ISO 8601 timestamp string; narrows results to
         entries with created_at >= filter_since (ISSUE_desktop-outbox-one-way
         R1).
+    filter_project: matches each entry's stored ``source_project`` as a raw,
+        UNRESOLVED string (exact equality — no ``Path.resolve()``,
+        ``expanduser()``, or trailing-slash normalization). MATCHING
+        ASYMMETRY (AD-5): this is deliberately different from
+        ``pm_recall``'s ``include_outbox=true`` overlay, whose
+        ``scope="project"`` filter resolves both ``project_path`` and each
+        entry's ``source_project`` to absolute paths before comparing.
+        Passing a relative path, a ``~``-prefixed path, a path with a
+        trailing slash, or any other spelling that isn't byte-identical to
+        how ``source_project`` was stored will silently return zero
+        matches here even though the same directory would match under
+        pm_recall's resolve()-based overlay. Pass the exact string
+        previously supplied as ``source_project`` (e.g. by
+        pm_outbox_remember/pm_outbox_log) to filter reliably.
 
     unregistered_projects (PMSERV-147, ADR-039 T4, additive): a list of
     {"project": path, "count": n} covering distinct source_project values
