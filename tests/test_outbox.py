@@ -902,3 +902,48 @@ def test_pm_outbox_pending_unregistered_projects_empty_when_none(tmp_path: Path)
 
     res = srv.pm_outbox_pending()
     assert res["unregistered_projects"] == []
+
+
+def test_pm_outbox_merge_mixed_batch_preserves_all_reasons(tmp_path: Path) -> None:
+    """PMSERV-147 regression: a single pm_outbox_merge call mixing a
+    registered id, an unregistered-project id, a no-target-project id, an
+    already-processed id, and a not_found id must resolve each id
+    independently — the new T4 pre-flight guard (inserted mid-loop) must
+    not disturb any of the pre-existing per-id outcomes (spec item 3:
+    'preserve every other existing behavior in this function's per-id loop
+    untouched')."""
+    import pmlens.server as srv
+
+    registered = _make_project(tmp_path, name="mixed_registered")
+    unregistered = tmp_path / "mixed_unregistered"
+    unregistered.mkdir()
+
+    ok_id = srv.pm_outbox_remember(content="ok", type="memory", source_project=str(registered))[
+        "outbox_id"
+    ]
+    unreg_id = srv.pm_outbox_remember(
+        content="unreg", type="memory", source_project=str(unregistered)
+    )["outbox_id"]
+    no_target_id = srv.pm_outbox_remember(content="no target", type="memory")["outbox_id"]
+    already_id = srv.pm_outbox_remember(
+        content="already", type="memory", source_project=str(registered)
+    )["outbox_id"]
+    # Pre-merge `already_id` in its own call so the batch below hits the
+    # already_processed (skip) path rather than merging it twice.
+    pre = srv.pm_outbox_merge(ids=[already_id])
+    assert len(pre["merged"]) == 1
+    missing_id = 999999
+
+    res = srv.pm_outbox_merge(ids=[ok_id, unreg_id, no_target_id, already_id, missing_id])
+
+    assert [m["id"] for m in res["merged"]] == [ok_id]
+    assert res["merged"][0]["target_project"] == str(registered)
+
+    assert [s["id"] for s in res["skipped"]] == [already_id]
+    assert res["skipped"][0]["reason"] == "already_processed"
+
+    warning_by_id = {w["id"]: w for w in res["warnings"]}
+    assert warning_by_id[unreg_id]["reason"] == "unregistered_project"
+    assert warning_by_id[no_target_id]["reason"] == "no_target_project"
+    assert warning_by_id[missing_id]["reason"] == "not_found"
+    assert not (unregistered / ".pm").exists()
