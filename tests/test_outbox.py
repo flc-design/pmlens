@@ -193,6 +193,41 @@ def test_pending_filters_project_type_and_status(outbox_store: DesktopOutboxStor
     assert only_merged["total"] == 1
 
 
+def test_pending_filter_since_narrows_by_created_at(
+    outbox_store: DesktopOutboxStore,
+) -> None:
+    """PMSERV-145 (ADR-039 T2): filter_since adds a created_at >= ? clause.
+
+    Rows are inserted directly with explicit created_at values (rather than
+    via append(), which always stamps datetime('now')) so the boundary is
+    deterministic instead of racing real-clock second resolution.
+    """
+    conn = sqlite3.connect(str(outbox_store.db_path))
+    try:
+        conn.execute(
+            "INSERT INTO desktop_outbox (host_id, source_session, type, content, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("h", "s", "memory", "old", "2026-01-01T00:00:00"),
+        )
+        conn.execute(
+            "INSERT INTO desktop_outbox (host_id, source_session, type, content, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("h", "s", "memory", "new", "2026-06-01T00:00:00"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    assert outbox_store.pending()["total"] == 2
+
+    since_page = outbox_store.pending(filter_since="2026-03-01T00:00:00")
+    assert since_page["total"] == 1
+    assert since_page["items"][0]["content"] == "new"
+
+    since_all = outbox_store.pending(filter_since="2000-01-01T00:00:00")
+    assert since_all["total"] == 2
+
+
 def test_pending_invalid_pagination_raises(outbox_store: DesktopOutboxStore) -> None:
     with pytest.raises(ValueError):
         outbox_store.pending(limit=-1)
@@ -587,6 +622,71 @@ def test_pm_outbox_merge_no_target_project_yields_warning(tmp_path: Path) -> Non
     res = srv.pm_outbox_merge(ids=[rid])
     assert res["merged"] == []
     assert any(w["reason"] == "no_target_project" for w in res["warnings"])
+
+
+def test_pm_outbox_remember_response_includes_pending_total(tmp_path: Path) -> None:
+    """PMSERV-145 (ADR-039 T2): remember echoes back the DB-wide pending
+    count (via the same already-open RW store), not scoped to this insert."""
+    import pmlens.server as srv
+
+    first = srv.pm_outbox_remember(content="a", type="memory")
+    assert first["pending_total"] == 1
+    second = srv.pm_outbox_remember(content="b", type="memory")
+    assert second["pending_total"] == 2
+
+
+def test_pm_outbox_log_response_includes_pending_total(tmp_path: Path) -> None:
+    """Mirror of the remember test for pm_outbox_log; pending_total counts
+    across BOTH remember and log entries (DB-wide, not type-scoped)."""
+    import pmlens.server as srv
+
+    srv.pm_outbox_remember(content="a", type="memory")
+    log_res = srv.pm_outbox_log(entry="did stuff")
+    assert log_res["pending_total"] == 2
+
+
+def test_pm_outbox_pending_filter_since_narrows_results(tmp_path: Path) -> None:
+    """Tool-level: filter_since threads through to the store's WHERE clause.
+
+    An old-dated row is inserted directly (bypassing the tool, which always
+    timestamps with datetime('now')) so the boundary is deterministic.
+    """
+    import pmlens.server as srv
+
+    srv.pm_outbox_remember(content="via tool", type="memory")
+
+    db_path = default_outbox_db_path()
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(
+            "INSERT INTO desktop_outbox (host_id, source_session, type, content, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("h", "s", "memory", "ancient", "2000-01-01T00:00:00"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    unfiltered = srv.pm_outbox_pending()
+    assert unfiltered["total"] == 2
+
+    filtered = srv.pm_outbox_pending(filter_since="2020-01-01T00:00:00")
+    assert filtered["total"] == 1
+    assert filtered["items"][0]["content"] == "via tool"
+
+
+def test_pm_outbox_pending_does_not_create_db(tmp_path: Path) -> None:
+    """PMSERV-145 (ADR-039 T2): pm_outbox_pending now opens the store with
+    readonly=True — desktop.db must not be created when absent."""
+    import pmlens.server as srv
+
+    db_path = default_outbox_db_path()
+    assert not db_path.exists()
+
+    res = srv.pm_outbox_pending()
+    assert res["status"] == "ok"
+    assert res["items"] == []
+    assert not db_path.exists()
 
 
 def test_pm_status_diagnostics_includes_outbox_pending(tmp_path: Path) -> None:

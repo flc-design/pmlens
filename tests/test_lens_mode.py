@@ -106,11 +106,17 @@ def test_lens_mode_includes_full_ro_allowlist(lens_server):
 
 
 def test_lens_mode_registered_equals_allowlist(lens_server):
-    """Lens モードで登録ツール集合が RO_ALLOWLIST と厳密一致すること.
+    """Lens モードで登録ツール集合が RO_ALLOWLIST | OUTBOX_READ_ALLOWLIST と
+    厳密一致すること.
 
     N-1: RO_ALLOWLIST が test から import 可能で、登録ツールとの一致を assert できる.
+    PMSERV-145 (ADR-039 T2): pm_outbox_pending (OUTBOX_READ_ALLOWLIST) は
+    PM_DESKTOP_WRITE に関わらず PM_LENS=1 で常に登録されるため、厳密一致の
+    期待集合に加える。
     """
-    assert lens_server.REGISTERED_TOOLS == set(lens_server.RO_ALLOWLIST)
+    assert lens_server.REGISTERED_TOOLS == (
+        set(lens_server.RO_ALLOWLIST) | set(lens_server.OUTBOX_READ_ALLOWLIST)
+    )
 
 
 def test_lens_mode_enabled_flag(lens_server):
@@ -500,6 +506,51 @@ def test_desktop_write_mode_still_hides_other_mutators(desktop_write_server):
     other_mutators = MUTATOR_TOOLS - _OUTBOX_WRITE_TOOLS
     leaked = other_mutators & desktop_write_server.REGISTERED_TOOLS
     assert leaked == set(), f"non-outbox mutators leaked under PM_DESKTOP_WRITE=1: {leaked}"
+
+
+# ─── PMSERV-145 / ADR-039 T2: OUTBOX_READ_ALLOWLIST gating ───────────
+# pm_outbox_pending is read-only (readonly=True store), so it must be
+# reachable under PM_LENS=1 regardless of PM_DESKTOP_WRITE — unlike
+# pm_outbox_remember/pm_outbox_log, which stay gated behind
+# PM_DESKTOP_WRITE=1.
+
+_OUTBOX_READ_TOOLS: frozenset[str] = frozenset({"pm_outbox_pending"})
+
+
+def test_lens_only_exposes_outbox_read_but_hides_outbox_write(lens_server):
+    """PM_LENS=1, PM_DESKTOP_WRITE=0: pm_outbox_pending (read) registers,
+    pm_outbox_remember/pm_outbox_log (write) stay hidden."""
+    missing = _OUTBOX_READ_TOOLS - lens_server.REGISTERED_TOOLS
+    assert missing == set(), f"pm_outbox_pending missing under PM_LENS=1: {missing}"
+    leaked = _OUTBOX_WRITE_TOOLS & lens_server.REGISTERED_TOOLS
+    assert leaked == set(), f"outbox-write tools leaked into Lens-only mode: {leaked}"
+    assert lens_server.PM_DESKTOP_WRITE_ENABLED is False
+
+
+def test_desktop_write_mode_exposes_all_three_outbox_tools(desktop_write_server):
+    """PM_LENS=1 + PM_DESKTOP_WRITE=1: read + both write outbox tools all
+    register (pm_outbox_pending, pm_outbox_remember, pm_outbox_log)."""
+    expected = _OUTBOX_READ_TOOLS | _OUTBOX_WRITE_TOOLS
+    missing = expected - desktop_write_server.REGISTERED_TOOLS
+    assert missing == set(), f"outbox tools missing under PM_DESKTOP_WRITE=1: {missing}"
+
+
+def test_pm_outbox_pending_note_is_host_aware(lens_server):
+    """PM_LENS=1: pm_outbox_pending's note steers to Claude Code for merge,
+    since pm_outbox_merge is not registered on this host."""
+    result = lens_server.pm_outbox_pending()
+    assert "note" in result
+    assert "Claude Code" in result["note"]
+    assert "pm_outbox_merge" in result["note"]
+
+
+def test_pm_outbox_pending_note_is_code_mode_by_default(normal_server):
+    """PM_LENS=0: pm_outbox_pending's note keeps the existing merge/reject
+    guidance (pm_outbox_merge is directly callable on this host)."""
+    result = normal_server.pm_outbox_pending()
+    assert "note" in result
+    assert "pm_outbox_merge" in result["note"]
+    assert "pm_outbox_reject" in result["note"]
 
 
 def test_normal_mode_with_desktop_write_is_noop(monkeypatch):

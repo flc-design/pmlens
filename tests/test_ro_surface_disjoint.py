@@ -194,7 +194,11 @@ class _CallGraph:
 
 # Built once — pure static analysis of on-disk source, no import side effects.
 _GRAPH = _CallGraph.build(_PKG_DIR)
-_RO_SEED = set(srv.RO_ALLOWLIST)
+# PMSERV-145 (ADR-039 T2): OUTBOX_READ_ALLOWLIST (pm_outbox_pending) is also
+# a read-only Lens surface (registers under PM_LENS=1 independent of
+# PM_DESKTOP_WRITE) — fold it into the seed so the same static-reachability
+# proof covers it.
+_RO_SEED = set(srv.RO_ALLOWLIST) | set(srv.OUTBOX_READ_ALLOWLIST)
 _RO_CLOSURE = _GRAPH.reachable(_RO_SEED)
 
 

@@ -138,6 +138,17 @@ OUTBOX_WRITE_ALLOWLIST: frozenset[str] = frozenset(
     }
 )
 
+# Read-only outbox tools (PMSERV-145, ADR-039 T2). pm_outbox_pending only
+# ever opens the outbox store with readonly=True, so — unlike
+# OUTBOX_WRITE_ALLOWLIST — it does not need PM_DESKTOP_WRITE=1 to be safe to
+# register: it registers whenever PM_LENS=1, independent of the
+# PM_DESKTOP_WRITE_ENABLED flag that gates OUTBOX_WRITE_ALLOWLIST.
+OUTBOX_READ_ALLOWLIST: frozenset[str] = frozenset(
+    {
+        "pm_outbox_pending",
+    }
+)
+
 REGISTERED_TOOLS: set[str] = set()
 
 
@@ -146,18 +157,23 @@ def _tool():
 
     Gating logic:
     - PM_LENS=0 (Claude Code): すべての tool を登録する。
-    - PM_LENS=1, PM_DESKTOP_WRITE=0 (Lens viewer): RO_ALLOWLIST のみ登録、
-      RO_ALLOWLIST 外は素の関数を返して MCP 経由で不可視にする。
+    - PM_LENS=1, PM_DESKTOP_WRITE=0 (Lens viewer): RO_ALLOWLIST +
+      OUTBOX_READ_ALLOWLIST のみ登録、それ以外は素の関数を返して MCP 経由で
+      不可視にする。
     - PM_LENS=1, PM_DESKTOP_WRITE=1 (Desktop outbox host, ADR-019): 上記に加えて
       OUTBOX_WRITE_ALLOWLIST も登録する。これにより pm_outbox_remember /
       pm_outbox_log が Desktop で reach 可能となり Phase 2 の機能経路が成立する。
+      OUTBOX_READ_ALLOWLIST (pm_outbox_pending) は PM_DESKTOP_WRITE の値に
+      関わらず常に登録される — read-only なので writer 権限を要らない
+      (PMSERV-145)。
     """
 
     def decorator(fn):
         tool_name = fn.__name__
         if PM_LENS_ENABLED and tool_name not in RO_ALLOWLIST:
-            if not (PM_DESKTOP_WRITE_ENABLED and tool_name in OUTBOX_WRITE_ALLOWLIST):
-                return fn
+            if tool_name not in OUTBOX_READ_ALLOWLIST:
+                if not (PM_DESKTOP_WRITE_ENABLED and tool_name in OUTBOX_WRITE_ALLOWLIST):
+                    return fn
         REGISTERED_TOOLS.add(tool_name)
         return mcp.tool()(fn)
 
@@ -473,13 +489,22 @@ def pm_status(project_path: str | None = None) -> dict:
     # Hidden under PM_LENS=1 to avoid implying "you should merge" on a host
     # that has no merger tools registered. Surfacing only when there are
     # entries to merge keeps pm_status output uncluttered.
+    # diagnostics.outbox_pending is the DB-WIDE pending count (unfiltered,
+    # not scoped to this project) — see get_pending_count() docstring
+    # (PMSERV-145, ADR-039 T2).
     diagnostics: dict = {
         "utils_fingerprint": get_utils_fingerprint(),
         "builtin_templates_dir": get_builtin_templates_dir_status(),
     }
     if not PM_LENS_ENABLED:
         try:
-            outbox_pending = get_outbox_store(db_path=default_outbox_db_path()).get_pending_count()
+            # readonly=True (PMSERV-145, ADR-039 T2): this is a read-only
+            # diagnostics probe, so it must not risk schema-creating
+            # desktop.db as a side effect (that was T1's readonly store
+            # param landing precisely to close this gap).
+            outbox_pending = get_outbox_store(
+                db_path=default_outbox_db_path(), readonly=True
+            ).get_pending_count()
         except Exception:
             outbox_pending = 0
         diagnostics["outbox_pending"] = outbox_pending
@@ -1298,12 +1323,34 @@ def pm_log(
 _OUTBOX_REMEMBER_NOTE = (
     "Saved to ~/.pm/desktop/desktop.db (Desktop outbox). "
     "In Claude Code, call pm_outbox_pending to review and "
-    "pm_outbox_merge to promote into the project's main memory store."
+    "pm_outbox_merge to promote into the project's main memory store. "
+    "Read it back anytime via pm_outbox_pending, or overlay unmerged "
+    "entries onto recall context with pm_recall(include_outbox=true)."
 )
 
 _OUTBOX_LOG_NOTE = (
     "Logged to Desktop outbox. "
-    "Merge in Claude Code via pm_outbox_merge to append to daily/YYYY-MM-DD.yaml."
+    "Merge in Claude Code via pm_outbox_merge to append to daily/YYYY-MM-DD.yaml. "
+    "Read it back anytime via pm_outbox_pending, or overlay unmerged "
+    "entries onto recall context with pm_recall(include_outbox=true)."
+)
+
+# pm_outbox_pending note text (PMSERV-145, ADR-039 T2) — host-aware:
+# PM_LENS=1 hosts (Desktop/Cowork) never have pm_outbox_merge registered
+# (it stays outside both RO_ALLOWLIST and OUTBOX_READ_ALLOWLIST), so the
+# note steers them to Claude Code instead of describing an unreachable tool.
+# PM_LENS=0 (Claude Code) keeps the existing merge/reject guidance.
+_OUTBOX_PENDING_NOTE_LENS = (
+    "This is a Desktop outbox view (~/.pm/desktop/desktop.db). "
+    "Promoting (merging) entries into a project's memory requires "
+    "pm_outbox_merge in Claude Code — merging from Desktop is unavailable "
+    "by design (Lens stays read-only)."
+)
+
+_OUTBOX_PENDING_NOTE_CODE = (
+    "This is the Desktop outbox (~/.pm/desktop/desktop.db). "
+    "Use pm_outbox_merge to promote entries into a project's main memory "
+    "store, or pm_outbox_reject to discard entries that aren't worth keeping."
 )
 
 
@@ -1344,6 +1391,10 @@ def pm_outbox_remember(
         "outbox_id": outbox_id,
         "session_id": _current_session_id,
         "type": type,
+        # pending_total (PMSERV-145, ADR-039 T2): the DB-WIDE pending count
+        # after this insert (via the same already-open RW store) — NOT
+        # scoped to this entry, this project, or this session.
+        "pending_total": store.get_pending_count(),
         "note": _OUTBOX_REMEMBER_NOTE,
     }
 
@@ -1385,6 +1436,10 @@ def pm_outbox_log(
         "session_id": _current_session_id,
         "type": "log",
         "category": category,
+        # pending_total (PMSERV-145, ADR-039 T2): the DB-WIDE pending count
+        # after this insert (via the same already-open RW store) — NOT
+        # scoped to this entry, this project, or this session.
+        "pending_total": store.get_pending_count(),
         "note": _OUTBOX_LOG_NOTE,
     }
 
@@ -1419,17 +1474,35 @@ def pm_outbox_pending(
     filter_project: str | None = None,
     filter_type: str | None = None,
     filter_status: str = "pending",
+    filter_since: str | None = None,
     limit: int = 50,
     offset: int = 0,
 ) -> dict:
     """List entries in the Desktop outbox (~/.pm/desktop/desktop.db).
 
+    Read-only (PMSERV-145, ADR-039 T2): always opens the outbox store with
+    readonly=True, so this tool never creates desktop.db as a side effect.
+    Registered under both PM_LENS=0 (Claude Code) and PM_LENS=1
+    (OUTBOX_READ_ALLOWLIST — Lens viewer and Desktop outbox host alike),
+    independent of PM_DESKTOP_WRITE, since a read-only tool needs no write
+    permission.
+
     Pagination (amendment f8) is mandatory: limit defaults to 50 and offset
     starts at 0. Response includes total + has_more + next_offset so the
     caller can iterate without hanging on hundreds of pending entries.
+    NOTE: ``total`` (and ``has_more``/``next_offset``) reflect the CURRENT
+    query's filters (filter_status/filter_project/filter_type/filter_since)
+    — this is a filtered count across all matching pages, not a page-local
+    count, but it is also NOT the DB-wide pending count. For the DB-wide
+    pending count (unconditioned by any filter) see pm_status.diagnostics.
+    outbox_pending or the pending_total echoed back by pm_outbox_remember /
+    pm_outbox_log.
 
     filter_status: 'pending' (default) | 'merged' | 'rejected' | 'all'
     filter_type: 'memory' | 'log' | 'lesson' | 'artifact'
+    filter_since: optional ISO 8601 timestamp string; narrows results to
+        entries with created_at >= filter_since (ISSUE_desktop-outbox-one-way
+        R1).
     """
     if filter_type is not None and filter_type not in {"memory", "log", "lesson", "artifact"}:
         return {
@@ -1454,17 +1527,20 @@ def pm_outbox_pending(
             "message": "limit and offset must be non-negative",
         }
 
-    store = get_outbox_store(db_path=default_outbox_db_path())
+    store = get_outbox_store(db_path=default_outbox_db_path(), readonly=True)
     page = store.pending(
         filter_project=filter_project,
         filter_type=filter_type,  # type: ignore[arg-type]
         filter_status=filter_status,
+        filter_since=filter_since,
         limit=limit,
         offset=offset,
     )
+    note = _OUTBOX_PENDING_NOTE_LENS if PM_LENS_ENABLED else _OUTBOX_PENDING_NOTE_CODE
     return {
         "status": "ok",
         **page,
+        "note": note,
     }
 
 

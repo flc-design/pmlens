@@ -272,13 +272,23 @@ class DesktopOutboxStore:
         filter_project: str | None = None,
         filter_type: OutboxType | None = None,
         filter_status: str = "pending",
+        filter_since: str | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> dict:
         """Paginated listing of outbox entries.
 
         filter_status='all' lists across all statuses (including merged/rejected).
+        filter_since (PMSERV-145, ADR-039 T2): optional ISO 8601 timestamp
+        string; when provided, adds a ``created_at >= ?`` clause so callers
+        can narrow the listing to entries created at or after that instant
+        (ISSUE_desktop-outbox-one-way R1). No format validation is performed
+        here — SQLite compares it as a text bound, matching the TEXT
+        ``created_at`` column populated via ``datetime('now')``.
         Returns {"items": [...], "total": N, "has_more": bool, "next_offset": int}.
+        ``total`` is the count for THIS filtered query (not DB-wide) —
+        contrast with :meth:`get_pending_count`, which is always the
+        unfiltered, DB-wide pending count.
 
         Missing-DB (PMSERV-142, evaluated fresh on every call) and SQLite-error
         paths both return the same empty shape without touching sqlite or
@@ -306,6 +316,9 @@ class DesktopOutboxStore:
         if filter_type is not None:
             clauses.append("type = ?")
             params.append(filter_type)
+        if filter_since is not None:
+            clauses.append("created_at >= ?")
+            params.append(filter_since)
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
 
         conn = None
@@ -341,7 +354,14 @@ class DesktopOutboxStore:
         }
 
     def get_pending_count(self) -> int:
-        """Return the count of pending entries (used by pm_status diagnostics).
+        """Return the DB-WIDE count of pending entries (used by pm_status
+        diagnostics, and by the ``pending_total`` echoed back on
+        pm_outbox_remember/pm_outbox_log — PMSERV-145, ADR-039 T2).
+
+        This is always the unfiltered total across the whole desktop.db —
+        never scoped to a project, page, or any other filter — so callers
+        must not confuse it with :meth:`pending`'s ``total`` (which IS
+        scoped to that call's filters).
 
         Missing-DB (PMSERV-142, evaluated fresh on every call) and
         SQLite-error paths both return 0 without touching sqlite or raising.
