@@ -1333,8 +1333,15 @@ class TestUserVersionZeroToOneMigration:
     def test_fts_created_legacy_rows_not_indexed_new_rows_are(self, tmp_path: Path):
         """FTS table/triggers are created, but pre-migration rows are NOT
         backfilled into the index (triggers only fire on inserts AFTER the
-        virtual table exists). New saves ARE searchable. This pins the
+        virtual table exists). New saves ARE searchable via FTS. This pins the
         deliberate non-backfill behavior so a future 'rebuild' isn't assumed.
+
+        PMSERV-143 (ADR-039 T5): search_ex() falls back to a base-table LIKE
+        scan when the FTS5 MATCH path returns zero rows, and that scan is NOT
+        limited to FTS-indexed rows — so the legacy row is still surfaced,
+        just via strategy="like_fallback" instead of "fts". That's the
+        intended fallback behavior (it's a feature, not a re-introduction of
+        backfill); the FTS index itself still does not contain the legacy row.
         """
         db_path = tmp_path / "legacy.db"
         _build_v0_legacy_db(db_path)
@@ -1351,10 +1358,15 @@ class TestUserVersionZeroToOneMigration:
             }
             assert {"memories_fts", "memories_ai", "memories_ad"} <= objs
 
-            # Legacy memory predates the FTS index → not found.
-            assert store.search("antiquated") == []
+            # The FTS index itself has no row for the legacy memory: MATCH
+            # finds nothing, so search_ex falls back to the LIKE scan (which
+            # reads the base `memories` table directly and does find it).
+            results, strategy = store.search_ex("antiquated")
+            assert strategy == "like_fallback"
+            assert any("antiquated" in m.content for m in results)
 
-            # A memory saved AFTER migration is indexed via the trigger → found.
+            # A memory saved AFTER migration is indexed via the trigger → found
+            # directly by FTS, no fallback needed.
             new_id = store.save(
                 Memory(
                     session_id="sess-new",
@@ -1363,8 +1375,9 @@ class TestUserVersionZeroToOneMigration:
                     project="newproj",
                 )
             )
-            results = store.search("freshmemory")
-            assert any(m.id == new_id for m in results)
+            new_results, new_strategy = store.search_ex("freshmemory")
+            assert new_strategy == "fts"
+            assert any(m.id == new_id for m in new_results)
         finally:
             store.close()
 

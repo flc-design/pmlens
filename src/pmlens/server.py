@@ -1320,9 +1320,14 @@ def pm_recall(
 
     # Search by query
     if query:
-        results = store.search(query, type=type, limit=limit)
+        results, search_strategy = store.search_ex(query, type=type, limit=limit)
         response = _maybe_add_lens_note(
-            {"query": query, "results": [_memory_dict(m) for m in results]}, store
+            {
+                "query": query,
+                "results": [_memory_dict(m) for m in results],
+                "search_strategy": search_strategy,
+            },
+            store,
         )
         if include_outbox:
             response.update(_build_outbox_overlay(project_path, query, limit))
@@ -1453,7 +1458,7 @@ def pm_memory_search(
             results = [r for r in results if tag_set.issubset(set(r.get("tags", [])))]
         return {"query": query, "cross_project": True, "results": results[:limit]}
 
-    results = store.search(query, type=type, limit=limit * 2)
+    results, search_strategy = store.search_ex(query, type=type, limit=limit * 2)
 
     # Apply additional filters
     if tags:
@@ -1479,6 +1484,7 @@ def pm_memory_search(
             "query": query,
             "filters": {"type": type, "tags": tags, "task_id": task_id},
             "results": [_result_dict(m) for m in results[:limit]],
+            "search_strategy": search_strategy,
         },
         store,
     )

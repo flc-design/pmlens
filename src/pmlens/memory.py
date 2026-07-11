@@ -391,18 +391,45 @@ class MemoryStore:
 
         return memory_id
 
-    def search(
+    def search_ex(
         self,
         query: str,
         type: str | None = None,
         limit: int = 5,
-    ) -> list[Memory]:
-        """Full-text search using FTS5.
+    ) -> tuple[list[Memory], str]:
+        """Full-text search using FTS5, with a LIKE fallback when FTS finds nothing.
+
+        PMSERV-143 (ADR-039 T5): ``memories_fts`` uses ``tokenize='unicode61'``,
+        which segments CJK text on unicode category boundaries rather than real
+        word boundaries. Multi-token/compound Japanese queries (e.g. "経営戦略",
+        "2つのエンジン") can legitimately MATCH zero rows even though the
+        characters are present in stored content — see
+        ``docs/reports/ja-fts-baseline.md`` for the measured hit/miss numbers.
+        The exact recall rate is SQLite-version-dependent (FTS5 tokenizer
+        behaviour has shifted across releases); if ``sqlite3.sqlite_version``
+        differs from the environment the baseline report was measured on,
+        re-run ``tests/test_memory_ja_fts.py`` and update the baseline/report
+        if the numbers moved.
+
+        When the FTS5 MATCH query returns zero rows, this falls back to a
+        plain substring scan (``content LIKE ? OR tags LIKE ?``, with ``%``
+        and ``_`` escaped) so those queries still surface something instead of
+        a hard empty result. This is a recall safety net, not a tokenizer fix
+        — trigram tokenizer migration is intentionally out of scope here (see
+        ADR-039 AD-8) and tracked as a separate future issue.
 
         Args:
             query: Search query string.
             type: Filter by memory type.
             limit: Maximum results.
+
+        Returns:
+            ``(memories, strategy)`` where ``strategy`` is ``"fts"`` when the
+            FTS5 MATCH path produced the results, or ``"like_fallback"`` when
+            the LIKE fallback ran. The ``type`` filter is applied as a
+            post-filter *after* LIMIT in both branches — matching this
+            method's pre-existing (pre-T5) behaviour exactly, so switching
+            strategies never changes when the type filter is applied.
         """
         safe_query = _sanitize_fts_query(query)
         rows = self._conn.execute(
@@ -413,11 +440,39 @@ class MemoryStore:
                LIMIT ?""",
             (safe_query, limit),
         ).fetchall()
+        strategy = "fts"
+
+        if not rows:
+            strategy = "like_fallback"
+            escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            pattern = f"%{escaped}%"
+            rows = self._conn.execute(
+                """SELECT * FROM memories
+                   WHERE (content LIKE ? ESCAPE '\\' OR tags LIKE ? ESCAPE '\\')
+                   ORDER BY created_at DESC
+                   LIMIT ?""",
+                (pattern, pattern, limit),
+            ).fetchall()
 
         memories = [self._row_to_memory(r) for r in rows]
         if type:
             memories = [m for m in memories if m.type.value == type]
-        return memories
+        return memories, strategy
+
+    def search(
+        self,
+        query: str,
+        type: str | None = None,
+        limit: int = 5,
+    ) -> list[Memory]:
+        """Full-text search using FTS5. Thin delegation to :meth:`search_ex`.
+
+        Args:
+            query: Search query string.
+            type: Filter by memory type.
+            limit: Maximum results.
+        """
+        return self.search_ex(query, type=type, limit=limit)[0]
 
     def get_by_task(self, task_id: str) -> list[Memory]:
         """Get all memories linked to a task."""
