@@ -2,6 +2,42 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Desktop outbox read surface (ADR-039 T1-T3, PMSERV-142/145/146)**:
+  `pm_outbox_pending` is now read-pure — it opens `~/.pm/desktop/desktop.db`
+  with `readonly=True` and never creates it as a side effect — and is
+  reachable from both the Lens viewer (`PM_LENS=1`) and the Desktop outbox
+  host (`PM_LENS=1` + `PM_DESKTOP_WRITE=1`) without needing write access,
+  gaining `pending_total`, `filter_since`, and a host-aware `note`.
+  `pm_recall(include_outbox=true)` overlays unmerged Desktop outbox entries
+  (`outbox_entries[]` + `outbox_summary{pending_total, project_pending,
+  unscoped_pending, scope}`) onto normal recall context, with a lighter
+  `outbox_pending_count` / `outbox_note` nudge on ordinary calls when Lens
+  has unmerged entries waiting. The deliberate matching asymmetry between
+  this overlay's resolve()-based `scope="project"` filter and
+  `pm_outbox_pending`'s raw-string `filter_project` is documented
+  (PMSERV-146, AD-5).
+- **Japanese FTS baseline for cross-project search (PMSERV-143, ADR-039
+  T5)**: `search_global`'s SQLite FTS5 index now has a baseline configuration
+  validated against Japanese content, with a `LIKE` fallback path for misses.
+
+### Fixed
+
+- **`pm_outbox_merge` implicit `.pm/memory.db` creation defect (PMSERV-147,
+  ADR-039 T4)**: merging a pending outbox entry whose resolved project
+  (`target_project` or the row's `source_project`) had not been `pm_init`'d
+  used to reach code paths that could create `.pm/memory.db` as a side
+  effect of a failed merge. `pm_outbox_merge` now runs an
+  `is_initialized_project` pre-flight guard before touching any project
+  store, skipping the id with a `warnings[]` entry
+  (`reason="unregistered_project"`) instead — it never auto-initializes a
+  project. `pm_outbox_remember`/`pm_outbox_log` gained matching
+  `unregistered_project` guidance in their own `warnings[]`, and
+  `pm_outbox_pending` gained an additive `unregistered_projects[]` list so a
+  caller can see at a glance which pending entries still need `pm_init`
+  before they can be merged.
+
 ### Documentation
 
 - **Repo tidy-up after the 0.12.0 rename (PMSERV-141)** — synced `README.ja.md`

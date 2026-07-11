@@ -318,6 +318,61 @@ pmlens uninstall --target auto
 | `pm_outbox_merge` | 保留中の Outbox エントリを対象プロジェクトの本ストアへ昇格 |
 | `pm_outbox_reject` | 保留中の Outbox エントリを監査可能な理由付きで却下 |
 
+### 到達可能性マトリクス（誰が何を呼べるか、ADR-039）
+
+どのビルドがどのツールに届くかは、2つの環境変数で決まる。`PM_LENS=1` は
+ビルドを読み取り専用の「Lens viewer」モードに切り替える（Claude Desktop /
+Cowork 向け）。さらに `PM_DESKTOP_WRITE=1` を重ねると、自分専用の Outbox
+データベースへの書き込みも許された「Desktop outbox host」になる。下表は
+`server.py` の実際の `RO_ALLOWLIST` / `OUTBOX_READ_ALLOWLIST` /
+`OUTBOX_WRITE_ALLOWLIST` の判定をそのまま反映したもので、願望や設計意図で
+はない:
+
+| ツール | Claude Code（デフォルト） | Lens viewer（`PM_LENS=1`） | Desktop outbox host（`PM_LENS=1` + `PM_DESKTOP_WRITE=1`） |
+|---|---|---|---|
+| `pm_recall` / `pm_status` 等の read | 可 | 可（本体 `.pm/memory.db` は read-only のまま） | 可 |
+| `pm_outbox_pending` | 可 | 可 | 可 |
+| `pm_outbox_remember` / `pm_outbox_log` | 可 | 不可 | 可 |
+| `pm_outbox_merge` / `pm_outbox_reject` | 可 | 不可 | 不可 |
+| `pm_add_task` 等の mutator | 可 | 不可 | 不可 |
+
+**なぜ Desktop からは merge できないのか（R5）。** 書き込み権限のある
+Desktop outbox host からでも `pm_outbox_merge` / `pm_outbox_reject` は
+利用できない — これは制限漏れではなく、意図した仕様である。merge は
+プロジェクト本体の `.pm/memory.db` へ実際に書き込む工程であり、その一手を
+Claude Code 側だけに残しておくことで、2つのホストが同じエントリを二重に
+マージしてしまう事故を構造的に防いでいる。保留中のエントリはどちらの
+ホストからでも `pm_outbox_pending` で確認できるので、内容を確かめたうえで
+Claude Code 側から merge / reject してほしい。この一手間を解消する将来の
+クラウド同期機能は計画済みで、それが実装されるまでの案内としてご理解
+いただきたい。
+
+**スコープについて正直に: HOME ディレクトリ単位であり、マシン跨ぎではない。**
+`~/.pm/desktop/desktop.db` はユーザーの HOME ディレクトリ配下に置かれる
+ため、**同一マシン上の** Claude Desktop と Claude Code のセッションを橋渡し
+する — 朝 Desktop で書き留めたメモが、午後の Code セッションで読み返せる、
+というのがこの機能の範囲である。**2台の異なるマシン間では同期しない。**
+別マシンへの Outbox エントリの引き継ぎは、将来のクラウド同期のスコープで
+あり、現時点のこの機能が解決するものではない。
+
+**使用例。**
+
+```
+# 未マージの Desktop エントリを recall コンテキストに重ね合わせる
+pm_recall(project_path=".", include_outbox=true)
+# -> 通常の pm_recall レスポンスに outbox_entries[] +
+#    outbox_summary{pending_total, project_pending, unscoped_pending, scope}
+#    が追加される
+
+# Claude Code でまだ pm_init していないプロジェクト宛てに Desktop から
+# 保存しても、保存自体は失敗しない（エラーではなく案内として扱う）
+pm_outbox_remember(content="...", source_project="/path/to/new-project")
+# -> status: "saved" に加えて warnings[] エントリが付与される:
+#    {"code": "unregistered_project",
+#     "remediation": "Claude Code が使える場合はそのパスで pm_init し、
+#     その後 pm_outbox_merge を実行 ..."}
+```
+
 ### メンテナンス
 
 | ツール | 説明 |

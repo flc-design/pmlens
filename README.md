@@ -321,6 +321,56 @@ dataclasses, atomic-write helpers).
 | `pm_outbox_merge` | Promote pending outbox entries into the target project's main store |
 | `pm_outbox_reject` | Reject pending outbox entries with an auditable reason |
 
+### Reachability Matrix (Who Can Call What, ADR-039)
+
+Two env flags gate what a build can reach: `PM_LENS=1` switches a build into
+read-only "Lens viewer" mode (Claude Desktop, Cowork); adding
+`PM_DESKTOP_WRITE=1` on top of that makes it a "Desktop outbox host" that may
+also write to its own outbox database. The table below reflects the actual
+`RO_ALLOWLIST` / `OUTBOX_READ_ALLOWLIST` / `OUTBOX_WRITE_ALLOWLIST` gates in
+`server.py`, not aspirational design:
+
+| Tool | Claude Code (default) | Lens viewer (`PM_LENS=1`) | Desktop outbox host (`PM_LENS=1` + `PM_DESKTOP_WRITE=1`) |
+|---|---|---|---|
+| `pm_recall` / `pm_status` / other reads | yes | yes (main `.pm/memory.db` stays read-only) | yes |
+| `pm_outbox_pending` | yes | yes | yes |
+| `pm_outbox_remember` / `pm_outbox_log` | yes | no | yes |
+| `pm_outbox_merge` / `pm_outbox_reject` | yes | no | no |
+| `pm_add_task` and other mutators | yes | no | no |
+
+**Why Desktop can't merge (R5).** You'll notice `pm_outbox_merge` and
+`pm_outbox_reject` stay unavailable even from a Desktop outbox host with
+write access. That's on purpose, not an oversight: merging is the step that
+actually writes into a project's main `.pm/memory.db`, and keeping that one
+step on the Claude Code side means two hosts can never race to merge the
+same entry twice. In the meantime, review what's pending from either side
+with `pm_outbox_pending`, then merge or reject it from Claude Code. A future
+cross-machine cloud-sync feature is the intended way to close this gap.
+
+**Scope: per-HOME, not cross-machine.** `~/.pm/desktop/desktop.db` lives
+under your home directory, so it bridges Claude Desktop and Claude Code
+sessions on the *same* machine — a note captured on Desktop this morning
+shows up in Code this afternoon. It does **not** sync between two different
+computers; carrying outbox entries across machines is future cloud-sync
+scope, not something this feature does today.
+
+**Usage examples.**
+
+```
+# Overlay unmerged Desktop entries onto recall context
+pm_recall(project_path=".", include_outbox=true)
+# -> adds outbox_entries[] + outbox_summary{pending_total, project_pending,
+#    unscoped_pending, scope} to the normal pm_recall response
+
+# Saving from Desktop into a project Claude Code hasn't pm_init'd yet still
+# succeeds -- it's guidance, not a failure
+pm_outbox_remember(content="...", source_project="/path/to/new-project")
+# -> status: "saved", plus a warnings[] entry:
+#    {"code": "unregistered_project",
+#     "remediation": "If Claude Code is available: run pm_init on that
+#     path, then pm_outbox_merge ..."}
+```
+
 ### Maintenance
 
 | Tool | Description |

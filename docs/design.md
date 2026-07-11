@@ -560,6 +560,80 @@ if __name__ == "__main__":
     cli()
 ```
 
+### 4.3 Lens Mode / Desktop Outbox 到達可能性マトリクス (ADR-039)
+
+> 本節は Desktop⇔Code 双方向 Outbox（`docs/issues/DESIGN_desktop-outbox-two-way.md`、
+> ADR-039）の T7 で追記。§4.1 のツール一覧は Phase 1-7（v0.5.0）時点のもので、
+> `PM_LENS` / `PM_DESKTOP_WRITE` ゲーティングと Outbox ツール群（後発）を
+> 反映していない既知のドリフトがある。本節はその差分を埋めるための独立した
+> 追記であり、§4.1 自体の書き直しはスコープ外。
+
+`server.py` の `_tool()` デコレータは、2つの環境変数フラグで登録するツール
+集合を切り替える:
+
+- `PM_LENS=0`（デフォルト、Claude Code）— 全ツールを登録。
+- `PM_LENS=1`（Lens viewer、Claude Desktop / Cowork）— `RO_ALLOWLIST` +
+  `OUTBOX_READ_ALLOWLIST` のみ登録。それ以外は素の関数を返し MCP 経由で
+  不可視化する。
+- `PM_LENS=1` + `PM_DESKTOP_WRITE=1`（Desktop outbox host、ADR-019）— 上記に
+  加えて `OUTBOX_WRITE_ALLOWLIST` も登録する。`OUTBOX_READ_ALLOWLIST`
+  （`pm_outbox_pending`）は read-only なので `PM_DESKTOP_WRITE` の値に
+  関わらず常に登録される（PMSERV-145）。
+
+不変条件マトリクス（`server.py` の `RO_ALLOWLIST` / `OUTBOX_READ_ALLOWLIST` /
+`OUTBOX_WRITE_ALLOWLIST` を実コードから確認して作成。設計意図の記憶ではなく
+現在の実装値）:
+
+| ツール | Code | Lens viewer (`PM_LENS=1`) | Desktop outbox host (`PM_LENS=1` + `PM_DESKTOP_WRITE=1`) |
+|---|---|---|---|
+| `pm_recall` / `pm_status` 等の read | ✅ | ✅ (本体 `.pm/memory.db` は read-only のまま) | ✅ |
+| `pm_outbox_pending` | ✅ | ✅ | ✅ |
+| `pm_outbox_remember` / `pm_outbox_log` | ✅ | ❌ | ✅ |
+| `pm_outbox_merge` / `pm_outbox_reject` | ✅ | ❌ | ❌ |
+| `pm_add_task` 等の mutator | ✅ | ❌ | ❌ |
+
+**R5: Desktop からの merge は非対応（意図的な非スコープ）。**
+`pm_outbox_merge` / `pm_outbox_reject` はどの `PM_LENS` の組み合わせでも
+`RO_ALLOWLIST` / `OUTBOX_READ_ALLOWLIST` / `OUTBOX_WRITE_ALLOWLIST` の
+いずれにも含まれないため、Desktop outbox host（write 権限あり）からでも
+到達不可能である。これはガードの取りこぼしではなく設計判断そのもの:
+merge はプロジェクト本体の `.pm/memory.db` へ実際に書き込む工程であり、
+その一手を Claude Code 側だけに残すことで、2つのホストが同一エントリを
+二重にマージしてしまう事故を構造的に排除している。保留中のエントリは
+`pm_outbox_pending` でどちらのホストからでも確認できるので、内容を確認した
+うえで Claude Code 側から merge / reject する運用とする。この一手間を
+解消する将来のクラウド同期機能が計画されており、それまでの案内として
+`pm_outbox_pending` のレスポンス（`_OUTBOX_PENDING_NOTE_LENS`）に同旨の
+文言を埋め込んでいる。
+
+**スコープ: per-HOME であり、マシン跨ぎではない。**
+`~/.pm/desktop/desktop.db` はプロセスの `$HOME` 配下に置かれる
+（`default_outbox_db_path()`）。したがって Desktop⇔Code の橋渡しは
+**同一マシン上の同一 HOME** に限られる。同一マシン内の Desktop→Code /
+Desktop→Desktop（複数セッション）の引き継ぎは解決するが、2台の異なる
+マシン間での Outbox エントリ共有は行わない。マシン跨ぎの同期は将来の
+クラウド同期 MVP のスコープであり、本設計（ADR-039）の対象外。
+
+**使用例（`pm_recall(include_outbox=true)` と未登録プロジェクトのフロー）。**
+
+```
+# 未マージの Desktop エントリを recall コンテキストに重ね合わせる
+pm_recall(project_path=".", include_outbox=true)
+# -> 通常の pm_recall レスポンスに outbox_entries[] +
+#    outbox_summary{pending_total, project_pending, unscoped_pending, scope}
+#    が追加される（AD-5: scope="project" のとき、source_project を resolve()
+#    して project_path と比較する。pm_outbox_pending の filter_project は
+#    非 resolve の完全一致なので挙動が異なる — §4.1 ではなく PMSERV-146 参照）
+
+# Claude Code でまだ pm_init していないプロジェクト宛てに Desktop から
+# 保存しても、保存自体は失敗しない（エラーではなく案内として扱う。PMSERV-147）
+pm_outbox_remember(content="...", source_project="/path/to/new-project")
+# -> status: "saved" に加えて warnings[] エントリが付与される:
+#    {"code": "unregistered_project",
+#     "remediation": "Claude Code が使える場合はそのパスで pm_init し、
+#     その後 pm_outbox_merge を実行 ..."}
+```
+
 ---
 
 ## 5. installer.py 設計
