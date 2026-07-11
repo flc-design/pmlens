@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from pmlens import outbox as _outbox
+from pmlens.models import PmServerError
 from pmlens.outbox import (
     DesktopOutboxStore,
     clear_outbox_store,
@@ -307,6 +308,128 @@ def test_default_path_honors_monkeypatched_global_pm_dir(monkeypatch, tmp_path: 
     assert default_outbox_db_path() == fake / "desktop" / "desktop.db"
 
 
+# ─── Read-pure / readonly store (PMSERV-142, ADR-039 T1) ────────────
+
+
+def _assert_no_db_artifacts(db_path: Path) -> None:
+    """Assert the DB file and its WAL/SHM sidecars were never created."""
+    assert not db_path.exists()
+    assert not db_path.with_name(db_path.name + "-wal").exists()
+    assert not db_path.with_name(db_path.name + "-shm").exists()
+
+
+def test_readonly_missing_db_reads_return_empty_shapes_without_creating_file(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "desktop" / "desktop.db"
+    ro_store = DesktopOutboxStore(db, readonly=True)
+
+    page = ro_store.pending()
+    assert page == {"items": [], "total": 0, "has_more": False, "next_offset": 0}
+    assert ro_store.get(1) is None
+    assert ro_store.get_pending_count() == 0
+
+    _assert_no_db_artifacts(db)
+
+
+def test_readonly_construction_alone_does_not_create_file(tmp_path: Path) -> None:
+    """Unlike the RW constructor (_ensure_schema), readonly=True must never
+    create the DB file/schema just from instantiation."""
+    db = tmp_path / "desktop.db"
+    DesktopOutboxStore(db, readonly=True)
+    _assert_no_db_artifacts(db)
+
+
+def test_readonly_store_append_raises_pm_server_error(tmp_path: Path) -> None:
+    db = tmp_path / "desktop.db"
+    ro_store = DesktopOutboxStore(db, readonly=True)
+    with pytest.raises(PmServerError, match="read-only"):
+        ro_store.append("h", "s", "memory", "x")
+    assert not db.exists()
+
+
+def test_readonly_store_mark_merged_and_mark_rejected_raise(tmp_path: Path) -> None:
+    db = tmp_path / "desktop.db"
+    ro_store = DesktopOutboxStore(db, readonly=True)
+    with pytest.raises(PmServerError, match="read-only"):
+        ro_store.mark_merged(1, None, None)
+    with pytest.raises(PmServerError, match="read-only"):
+        ro_store.mark_rejected(1, "some reason")
+    assert not db.exists()
+
+
+def test_cache_staleness_ro_store_sees_entries_appended_after_construction(
+    tmp_path: Path,
+) -> None:
+    """Cross-check BLOCKER regression: missing-ness must be evaluated on
+    every read call, never decided/cached at __init__. Sequence: (1) a RO
+    store is constructed while desktop.db is absent and confirms empty,
+    (2) a separate RW store then creates the DB and appends an entry, (3)
+    the SAME RO store instance from step 1 must see the new entry — proving
+    the RO store did not freeze "missing" at construction time."""
+    db = tmp_path / "desktop.db"
+
+    ro_store = DesktopOutboxStore(db, readonly=True)
+    assert ro_store.pending()["total"] == 0
+    assert ro_store.get_pending_count() == 0
+    assert not db.exists()
+
+    rw_store = DesktopOutboxStore(db, readonly=False)
+    rid = rw_store.append("claude-desktop", "sess-a", "memory", "late arrival")
+    assert db.exists()
+
+    page = ro_store.pending()
+    assert page["total"] == 1
+    assert page["items"][0]["id"] == rid
+    assert ro_store.get(rid) is not None
+    assert ro_store.get(rid)["content"] == "late arrival"
+    assert ro_store.get_pending_count() == 1
+
+
+def test_get_outbox_store_readonly_factory_returns_readonly_instance(tmp_path: Path) -> None:
+    db = tmp_path / "desktop.db"
+    store = get_outbox_store(db_path=db, readonly=True)
+    assert isinstance(store, DesktopOutboxStore)
+    assert store.readonly is True
+    assert not db.exists()  # RO factory call must not create the DB
+
+
+def test_get_outbox_store_default_signature_still_rw(tmp_path: Path) -> None:
+    """Existing db_path=-only call sites (server.py's 5 outbox tools) must
+    keep working unchanged: readonly defaults to False (RW, schema created
+    eagerly on construction)."""
+    db = tmp_path / "desktop.db"
+    store = get_outbox_store(db_path=db)
+    assert store.readonly is False
+    assert db.exists()
+
+
+def test_get_outbox_store_rw_and_ro_are_separate_cache_slots(tmp_path: Path) -> None:
+    db = tmp_path / "desktop.db"
+    rw = get_outbox_store(db_path=db)
+    ro = get_outbox_store(db_path=db, readonly=True)
+    assert rw is not ro
+    assert rw.readonly is False
+    assert ro.readonly is True
+    # A second call to each slot returns the cached instance for that slot.
+    assert get_outbox_store(db_path=db) is rw
+    assert get_outbox_store(db_path=db, readonly=True) is ro
+
+
+def test_clear_outbox_store_resets_both_rw_and_ro_slots(tmp_path: Path) -> None:
+    db = tmp_path / "desktop.db"
+    rw_first = get_outbox_store(db_path=db)
+    ro_first = get_outbox_store(db_path=db, readonly=True)
+
+    clear_outbox_store()
+
+    rw_second = get_outbox_store(db_path=db)
+    ro_second = get_outbox_store(db_path=db, readonly=True)
+
+    assert rw_second is not rw_first
+    assert ro_second is not ro_first
+
+
 # ─── Tool-level passthrough tests (PMSERV-101 final) ──────────────────
 
 
@@ -359,6 +482,44 @@ def test_pm_outbox_reject_requires_reason(tmp_path: Path) -> None:
     res = srv.pm_outbox_reject(ids=[1], reason="")
     assert res["status"] == "error"
     assert res["code"] == "reason_required"
+
+
+def test_pm_outbox_merge_missing_db_short_circuits_not_found(tmp_path: Path) -> None:
+    """PMSERV-142 T1-6 / AD-6: with no desktop.db at all, pm_outbox_merge
+    must return not_found for every requested id without ever constructing
+    an RW store (which would call _ensure_schema and create the file)."""
+    import pmlens.server as srv
+
+    db = default_outbox_db_path()
+    assert not db.exists()
+
+    res = srv.pm_outbox_merge(ids=[1, 2, 3], target_project=str(tmp_path))
+
+    assert res["merged"] == []
+    assert res["warnings"] == [
+        {"id": 1, "reason": "not_found"},
+        {"id": 2, "reason": "not_found"},
+        {"id": 3, "reason": "not_found"},
+    ]
+    assert not db.exists()
+
+
+def test_pm_outbox_reject_missing_db_short_circuits_not_found(tmp_path: Path) -> None:
+    """Mirror of the merge guard: pm_outbox_reject must not construct an RW
+    store (and therefore not create desktop.db) when it is absent."""
+    import pmlens.server as srv
+
+    db = default_outbox_db_path()
+    assert not db.exists()
+
+    res = srv.pm_outbox_reject(ids=[1, 2], reason="not relevant")
+
+    assert res["rejected"] == []
+    assert res["warnings"] == [
+        {"id": 1, "reason": "not_found"},
+        {"id": 2, "reason": "not_found"},
+    ]
+    assert not db.exists()
 
 
 def test_pm_outbox_merge_routes_memory_and_log_to_target(tmp_path: Path) -> None:

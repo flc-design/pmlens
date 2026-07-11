@@ -1484,10 +1484,24 @@ def pm_outbox_merge(
     via warnings[] so the caller can distinguish skips from successful
     merges (idempotent guarantee).
     """
-    store = get_outbox_store(db_path=default_outbox_db_path())
     merged: list[dict] = []
     skipped: list[dict] = []
     warnings: list[dict] = []
+
+    # PMSERV-142 (T1-6, AD-6): pre-flight existence guard. RW __init__
+    # schema-generation is untouched — append() (remember/log) is the only
+    # legitimate desktop.db creation trigger — so a missing DB must be
+    # detected *before* constructing an RW store, not worked around after.
+    if not default_outbox_db_path().exists():
+        warnings = [{"id": outbox_id, "reason": "not_found"} for outbox_id in ids]
+        return {
+            "status": "ok" if merged or not warnings else "partial",
+            "merged": merged,
+            "skipped": skipped,
+            "warnings": warnings,
+        }
+
+    store = get_outbox_store(db_path=default_outbox_db_path())
 
     for outbox_id in ids:
         row = store.get(outbox_id)
@@ -1601,10 +1615,21 @@ def pm_outbox_reject(
             "code": "reason_required",
             "message": "reason is required and must be non-empty",
         }
-    store = get_outbox_store(db_path=default_outbox_db_path())
     rejected: list[int] = []
     skipped: list[dict] = []
     warnings: list[dict] = []
+
+    # PMSERV-142 (T1-6, AD-6): pre-flight existence guard — see pm_outbox_merge.
+    if not default_outbox_db_path().exists():
+        warnings = [{"id": outbox_id, "reason": "not_found"} for outbox_id in ids]
+        return {
+            "status": "ok" if rejected or not warnings else "partial",
+            "rejected": rejected,
+            "skipped": skipped,
+            "warnings": warnings,
+        }
+
+    store = get_outbox_store(db_path=default_outbox_db_path())
 
     for outbox_id in ids:
         row = store.get(outbox_id)

@@ -13,7 +13,8 @@ from pathlib import Path
 from typing import Literal
 
 from . import storage as _storage
-from .memory import _apply_pragmas
+from .memory import _BUSY_TIMEOUT_MS, _apply_pragmas
+from .models import PmServerError
 
 OutboxType = Literal["memory", "log", "lesson", "artifact"]
 OutboxStatus = Literal["pending", "merged", "rejected"]
@@ -113,14 +114,45 @@ class DesktopOutboxStore:
 
     Schema enforces append-only semantics via trg_outbox_append_only.
     Only status and merge/reject metadata may be updated after insert.
+
+    readonly (PMSERV-142, AD-2/AD-3): when True, the constructor never
+    creates the DB file/schema and write methods raise PmServerError. The
+    "does desktop.db exist" question is deliberately NOT decided here and
+    cached — it is re-evaluated on every read call (see the read methods
+    below) so a store that is constructed while the file is absent still
+    picks up entries written later by a concurrent RW store in the same
+    process (cross-check BLOCKER: caching missing at __init__ time would
+    reintroduce "file exists but reads keep returning empty").
     """
 
-    def __init__(self, db_path: Path | None = None) -> None:
+    def __init__(self, db_path: Path | None = None, readonly: bool = False) -> None:
         self.db_path: Path = Path(db_path) if db_path is not None else default_outbox_db_path()
-        _ensure_schema(self.db_path)
+        self.readonly: bool = readonly
+        if not readonly:
+            _ensure_schema(self.db_path)
 
     def _connect(self) -> sqlite3.Connection:
-        """Open a short-lived RW connection with WAL pragmas applied."""
+        """Open a short-lived connection.
+
+        RW: current behaviour — WAL + concurrency pragmas via
+        ``_apply_pragmas`` (this connection is what creates/maintains the
+        schema).
+
+        RO (AD-3): ``file:<path>?mode=ro`` — deliberately WITHOUT
+        ``immutable=1``. Unlike memory.db's Lens RO path (see
+        ``memory._connect_readonly``), desktop.db always has an active
+        writer (Desktop outbox host), so ``immutable=1`` risks stale or
+        corrupt reads against a file mid-WAL-write. Only
+        ``PRAGMA busy_timeout`` is applied — ``journal_mode``/``synchronous``
+        would attempt to write the file header and fail with
+        OperationalError on a read-only connection.
+        """
+        if self.readonly:
+            uri = f"file:{self.db_path}?mode=ro"
+            conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
+            conn.row_factory = sqlite3.Row
+            conn.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
+            return conn
         conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
         conn.row_factory = sqlite3.Row
         _apply_pragmas(conn)
@@ -138,6 +170,8 @@ class DesktopOutboxStore:
         tags: str | None = None,
     ) -> int:
         """Append a new outbox entry. Returns the new row id."""
+        if self.readonly:
+            raise PmServerError("outbox store is read-only")
         if type not in _VALID_TYPES:
             raise ValueError(f"invalid type: {type!r} (expected one of {sorted(_VALID_TYPES)})")
         conn = self._connect()
@@ -163,6 +197,8 @@ class DesktopOutboxStore:
     ) -> bool:
         """Transition pending → merged. Returns True if updated, False if already
         non-pending (idempotent skip)."""
+        if self.readonly:
+            raise PmServerError("outbox store is read-only")
         conn = self._connect()
         try:
             cur = conn.execute(
@@ -184,6 +220,8 @@ class DesktopOutboxStore:
     def mark_rejected(self, id: int, reason: str) -> bool:
         """Transition pending → rejected. Returns True if updated, False if
         already non-pending (idempotent skip)."""
+        if self.readonly:
+            raise PmServerError("outbox store is read-only")
         if not reason or not reason.strip():
             raise ValueError("reason is required for rejection")
         conn = self._connect()
@@ -206,13 +244,28 @@ class DesktopOutboxStore:
     # ─── Reads ──────────────────────────────────────────
 
     def get(self, id: int) -> dict | None:
-        """Fetch a single row by id, or None if not found."""
-        conn = self._connect()
+        """Fetch a single row by id, or None if not found.
+
+        Missing-DB (PMSERV-142, evaluated fresh on every call — never
+        cached at __init__) and SQLite-error paths both return None without
+        touching sqlite or raising. connect() and execute() are wrapped in
+        one try because sqlite3 errors surface at first execute rather than
+        at connect (e.g. a crashed writer's stale -shm/-wal producing
+        SQLITE_READONLY_RECOVERY, or a corrupt file producing
+        DatabaseError).
+        """
+        if not self.db_path.exists():
+            return None
+        conn = None
         try:
+            conn = self._connect()
             row = conn.execute("SELECT * FROM desktop_outbox WHERE id = ?", (id,)).fetchone()
             return dict(row) if row else None
+        except sqlite3.Error:
+            return None
         finally:
-            conn.close()
+            if conn is not None:
+                conn.close()
 
     def pending(
         self,
@@ -226,6 +279,10 @@ class DesktopOutboxStore:
 
         filter_status='all' lists across all statuses (including merged/rejected).
         Returns {"items": [...], "total": N, "has_more": bool, "next_offset": int}.
+
+        Missing-DB (PMSERV-142, evaluated fresh on every call) and SQLite-error
+        paths both return the same empty shape without touching sqlite or
+        raising — see get() for why connect()+execute() share one try/except.
         """
         if limit < 0 or offset < 0:
             raise ValueError("limit and offset must be non-negative")
@@ -233,6 +290,10 @@ class DesktopOutboxStore:
             raise ValueError(f"invalid filter_type: {filter_type!r}")
         if filter_status != "all" and filter_status not in _VALID_STATUSES:
             raise ValueError(f"invalid filter_status: {filter_status!r}")
+
+        empty_page = {"items": [], "total": 0, "has_more": False, "next_offset": offset}
+        if not self.db_path.exists():
+            return empty_page
 
         clauses: list[str] = []
         params: list[object] = []
@@ -247,8 +308,9 @@ class DesktopOutboxStore:
             params.append(filter_type)
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
 
-        conn = self._connect()
+        conn = None
         try:
+            conn = self._connect()
             total = int(
                 conn.execute(f"SELECT COUNT(*) FROM desktop_outbox{where}", params).fetchone()[0]
             )
@@ -257,8 +319,11 @@ class DesktopOutboxStore:
                 "ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
                 [*params, limit, offset],
             ).fetchall()
+        except sqlite3.Error:
+            return empty_page
         finally:
-            conn.close()
+            if conn is not None:
+                conn.close()
 
         items = [dict(r) for r in rows]
         next_offset = offset + len(items)
@@ -276,16 +341,26 @@ class DesktopOutboxStore:
         }
 
     def get_pending_count(self) -> int:
-        """Return the count of pending entries (used by pm_status diagnostics)."""
-        conn = self._connect()
+        """Return the count of pending entries (used by pm_status diagnostics).
+
+        Missing-DB (PMSERV-142, evaluated fresh on every call) and
+        SQLite-error paths both return 0 without touching sqlite or raising.
+        """
+        if not self.db_path.exists():
+            return 0
+        conn = None
         try:
+            conn = self._connect()
             return int(
                 conn.execute(
                     "SELECT COUNT(*) FROM desktop_outbox WHERE status = 'pending'"
                 ).fetchone()[0]
             )
+        except sqlite3.Error:
+            return 0
         finally:
-            conn.close()
+            if conn is not None:
+                conn.close()
 
     def close(self) -> None:
         """No-op for short-lived connection design; provided for symmetry
@@ -296,25 +371,39 @@ class DesktopOutboxStore:
 # ─── Module-level factory (f5: pytest test isolation) ──────────────────────
 
 _outbox_store: DesktopOutboxStore | None = None
+_outbox_store_ro: DesktopOutboxStore | None = None
 
 
-def get_outbox_store(db_path: Path | None = None) -> DesktopOutboxStore:
+def get_outbox_store(db_path: Path | None = None, readonly: bool = False) -> DesktopOutboxStore:
     """Return the process-wide DesktopOutboxStore, creating it on first call.
 
-    db_path is only honored on the *first* call within a process. Subsequent
-    calls return the cached instance regardless of db_path — tests that need
-    a fresh store with a different path must call clear_outbox_store() first.
+    db_path is only honored on the *first* call within a process **for the
+    requested cache slot**. RW (readonly=False, default — existing
+    ``db_path=``-only call sites keep working unchanged) and RO
+    (readonly=True) instances live in separate slots (PMSERV-142) so a
+    readonly caller never shares — or accidentally upgrades — a writer's
+    connection, and vice versa. Subsequent calls to the same slot return the
+    cached instance regardless of db_path — tests that need a fresh store
+    with a different path must call clear_outbox_store() first.
     """
-    global _outbox_store
+    global _outbox_store, _outbox_store_ro
+    if readonly:
+        if _outbox_store_ro is None:
+            _outbox_store_ro = DesktopOutboxStore(db_path, readonly=True)
+        return _outbox_store_ro
     if _outbox_store is None:
         _outbox_store = DesktopOutboxStore(db_path)
     return _outbox_store
 
 
 def clear_outbox_store() -> None:
-    """Reset the module-level cache. Required by pytest fixtures so tests
-    do not leak desktop.db state across cases (factory pattern, amendment f5)."""
-    global _outbox_store
+    """Reset both module-level caches (RW and RO — PMSERV-142). Required by
+    pytest fixtures so tests do not leak desktop.db state across cases
+    (factory pattern, amendment f5)."""
+    global _outbox_store, _outbox_store_ro
     if _outbox_store is not None:
         _outbox_store.close()
         _outbox_store = None
+    if _outbox_store_ro is not None:
+        _outbox_store_ro.close()
+        _outbox_store_ro = None
