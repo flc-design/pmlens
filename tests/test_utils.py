@@ -20,6 +20,7 @@ from pmlens.utils import (
     _resolve_targets,
     _timestamped_backup,
     get_utils_fingerprint,
+    is_initialized_project,
     resolve_project_path,
 )
 
@@ -48,6 +49,55 @@ class TestIsProjectPmDir:
         pm = tmp_path / ".pm"
         pm.write_text("not a directory")
         assert _is_project_pm_dir(pm) is False
+
+
+class TestIsInitializedProject:
+    """Tests for is_initialized_project (PMSERV-147, ADR-039 T4, AD-7).
+
+    The predicate is keyed only on .pm/project.yaml existence — registry.yaml
+    must never be consulted.
+    """
+
+    def test_true_when_project_yaml_exists(self, tmp_path):
+        (tmp_path / ".pm").mkdir()
+        (tmp_path / ".pm" / "project.yaml").write_text("name: test\n")
+        assert is_initialized_project(str(tmp_path)) is True
+
+    def test_false_when_pm_dir_missing(self, tmp_path):
+        assert is_initialized_project(str(tmp_path / "nope")) is False
+
+    def test_false_when_pm_dir_exists_without_project_yaml(self, tmp_path):
+        """A .pm/ with only registry.yaml (e.g. the global ~/.pm/) is not
+        an initialized project — mirrors _is_project_pm_dir's semantics."""
+        (tmp_path / ".pm").mkdir()
+        (tmp_path / ".pm" / "registry.yaml").write_text("projects: []\n")
+        assert is_initialized_project(str(tmp_path)) is False
+
+    def test_does_not_consult_registry(self, tmp_path, monkeypatch):
+        """AD-7: registry.yaml must never be read by this predicate, even
+        when it lists the path as registered."""
+        import pmlens.storage as storage
+
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        monkeypatch.setattr(storage, "GLOBAL_PM_DIR", fake_home / ".pm")
+        registry_dir = fake_home / ".pm"
+        registry_dir.mkdir()
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        (registry_dir / "registry.yaml").write_text(f"projects:\n  - path: {proj}\n")
+        # proj has no .pm/project.yaml — must be reported uninitialized
+        # despite being "registered" in registry.yaml.
+        assert is_initialized_project(str(proj)) is False
+
+    def test_relative_path_is_resolved(self, tmp_path, monkeypatch):
+        (tmp_path / ".pm").mkdir()
+        (tmp_path / ".pm" / "project.yaml").write_text("name: test\n")
+        monkeypatch.chdir(tmp_path.parent)
+        assert is_initialized_project(tmp_path.name) is True
+
+    def test_invalid_path_returns_false_not_raise(self):
+        assert is_initialized_project("\0invalid") is False
 
 
 class TestResolveProjectPathExplicit:

@@ -131,6 +131,28 @@ def resolve_project_path(project_path: str | None = None) -> Path:
     )
 
 
+def is_initialized_project(path_str: str) -> bool:
+    """Check whether ``path_str`` is a pm_init'd project (PMSERV-147, AD-7).
+
+    The predicate is keyed **only** on ``.pm/project.yaml`` existence at the
+    resolved path — registry.yaml is deliberately never consulted here, since
+    the registry is a lazily-updated cache and this predicate must stay a
+    single source of truth shared by the outbox remember/log warnings, the
+    pm_outbox_merge pre-flight guard, and the pm_outbox_pending
+    unregistered_projects[] aggregation (ADR-039 T4).
+
+    Any resolution error (``OSError``, ``ValueError``, or any other exception
+    raised while expanding/resolving the path) is treated as "not
+    initialized" rather than propagated — callers use this as a cheap
+    boolean gate, not a validator that should ever raise.
+    """
+    try:
+        resolved = Path(path_str).expanduser().resolve()
+        return (resolved / ".pm" / "project.yaml").exists()
+    except (OSError, ValueError, RuntimeError):
+        return False
+
+
 def generate_task_id(project_name: str, number: int) -> str:
     """Generate a task ID like PROJ-001 from project name and sequence number."""
     prefix = project_name.upper().replace("-", "").replace("_", "")[:6]

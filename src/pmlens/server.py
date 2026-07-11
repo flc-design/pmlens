@@ -76,6 +76,7 @@ from .utils import (
     generate_decision_id,
     generate_task_id,
     get_utils_fingerprint,
+    is_initialized_project,
     resolve_project_path,
 )
 from .velocity import calculate_velocity, detect_risks
@@ -1592,6 +1593,44 @@ _OUTBOX_LOG_NOTE = (
     "entries onto recall context with pm_recall(include_outbox=true)."
 )
 
+# PMSERV-147 (ADR-039 T4): non-alarming guidance (folded into the note, not a
+# warning — nothing is wrong) appended when source_project is omitted, so the
+# caller knows the entry will only be visible in pm_recall's project-scoped
+# overlay as a count, not as a listed item, unless they add source_project.
+_OUTBOX_NO_SOURCE_PROJECT_HINT = (
+    " Tip: pass source_project so this entry shows up under "
+    "pm_recall(include_outbox=true)'s project-scoped overlay — without it, "
+    "the entry only counts toward the total, it is not listed."
+)
+
+# PMSERV-147 (ADR-039 T4, AD-7): dual-audience remediation for an
+# unregistered (not yet pm_init'd) source_project — the reader may or may not
+# have Claude Code available, so both paths are spelled out rather than
+# handing back an instruction only one audience can act on.
+_UNREGISTERED_PROJECT_REMEDIATION = (
+    "If Claude Code is available: run pm_init on that path, then "
+    "pm_outbox_merge to bring this entry into the project's memory. If "
+    "Claude Code is not available here, the entry is still safely stored in "
+    "the Desktop outbox and can always be read via pm_outbox_pending or "
+    "pm_recall(include_outbox=true)."
+)
+
+
+def _unregistered_project_warning(source_project: str) -> dict:
+    """Build the ``warnings[]`` entry for an unregistered source_project
+    (PMSERV-147, ADR-039 T4). Shared by pm_outbox_remember and pm_outbox_log
+    so the code/message/remediation text cannot drift between the two."""
+    return {
+        "code": "unregistered_project",
+        "project": source_project,
+        "message": (
+            f"source_project ({source_project}) has not been pm_init'd yet "
+            "(.pm/project.yaml not found)."
+        ),
+        "remediation": _UNREGISTERED_PROJECT_REMEDIATION,
+    }
+
+
 # pm_outbox_pending note text (PMSERV-145, ADR-039 T2) — host-aware:
 # PM_LENS=1 hosts (Desktop/Cowork) never have pm_outbox_merge registered
 # (it stays outside both RO_ALLOWLIST and OUTBOX_READ_ALLOWLIST), so the
@@ -1643,7 +1682,15 @@ def pm_outbox_remember(
         source_project=source_project,
         tags=tags,
     )
-    return {
+    # PMSERV-147 (ADR-039 T4): the save always succeeds regardless of
+    # source_project's registration state — this is guidance, not a failure.
+    note = _OUTBOX_REMEMBER_NOTE
+    warnings: list[dict] = []
+    if source_project is None:
+        note += _OUTBOX_NO_SOURCE_PROJECT_HINT
+    elif not is_initialized_project(source_project):
+        warnings.append(_unregistered_project_warning(source_project))
+    result: dict = {
         "status": "saved",
         "outbox_id": outbox_id,
         "session_id": _current_session_id,
@@ -1652,8 +1699,11 @@ def pm_outbox_remember(
         # after this insert (via the same already-open RW store) — NOT
         # scoped to this entry, this project, or this session.
         "pending_total": store.get_pending_count(),
-        "note": _OUTBOX_REMEMBER_NOTE,
+        "note": note,
     }
+    if warnings:
+        result["warnings"] = warnings
+    return result
 
 
 @_tool()
@@ -1687,7 +1737,15 @@ def pm_outbox_log(
         source_project=source_project,
         tags=category,
     )
-    return {
+    # PMSERV-147 (ADR-039 T4): the save always succeeds regardless of
+    # source_project's registration state — this is guidance, not a failure.
+    note = _OUTBOX_LOG_NOTE
+    warnings: list[dict] = []
+    if source_project is None:
+        note += _OUTBOX_NO_SOURCE_PROJECT_HINT
+    elif not is_initialized_project(source_project):
+        warnings.append(_unregistered_project_warning(source_project))
+    result: dict = {
         "status": "saved",
         "outbox_id": outbox_id,
         "session_id": _current_session_id,
@@ -1697,8 +1755,11 @@ def pm_outbox_log(
         # after this insert (via the same already-open RW store) — NOT
         # scoped to this entry, this project, or this session.
         "pending_total": store.get_pending_count(),
-        "note": _OUTBOX_LOG_NOTE,
+        "note": note,
     }
+    if warnings:
+        result["warnings"] = warnings
+    return result
 
 
 # Mapping from outbox row.type → main MemoryType used by pm_outbox_merge.
@@ -1760,6 +1821,13 @@ def pm_outbox_pending(
     filter_since: optional ISO 8601 timestamp string; narrows results to
         entries with created_at >= filter_since (ISSUE_desktop-outbox-one-way
         R1).
+
+    unregistered_projects (PMSERV-147, ADR-039 T4, additive): a list of
+    {"project": path, "count": n} covering distinct source_project values
+    across ALL pending entries (not just the current page/filters) that fail
+    is_initialized_project (AD-7 — keyed on .pm/project.yaml existence, not
+    registry.yaml). Lets a caller see at a glance which source_project hints
+    still need pm_init before pm_outbox_merge can promote them.
     """
     if filter_type is not None and filter_type not in {"memory", "log", "lesson", "artifact"}:
         return {
@@ -1794,10 +1862,20 @@ def pm_outbox_pending(
         offset=offset,
     )
     note = _OUTBOX_PENDING_NOTE_LENS if PM_LENS_ENABLED else _OUTBOX_PENDING_NOTE_CODE
+    # PMSERV-147 (ADR-039 T4, C13): aggregated across ALL pending entries
+    # (store.pending_source_project_counts() ignores this call's own
+    # filter_status/filter_project/etc.), on the same already-open readonly
+    # store — no extra store construction.
+    unregistered_projects = [
+        {"project": project, "count": count}
+        for project, count in store.pending_source_project_counts()
+        if not is_initialized_project(project)
+    ]
     return {
         "status": "ok",
         **page,
         "note": note,
+        "unregistered_projects": unregistered_projects,
     }
 
 
@@ -1816,6 +1894,13 @@ def pm_outbox_merge(
     Already-merged / already-rejected ids are silently skipped and surface
     via warnings[] so the caller can distinguish skips from successful
     merges (idempotent guarantee).
+
+    unregistered_project (PMSERV-147, ADR-039 T4, AD-6): if the resolved
+    project path (target_project or the row's source_project) has not been
+    pm_init'd (.pm/project.yaml missing), the id is skipped — surfaced in
+    warnings[] with reason="unregistered_project" and a remediation pointing
+    at pm_init — BEFORE any project store is touched. This tool never
+    auto-initializes a project.
     """
     merged: list[dict] = []
     skipped: list[dict] = []
@@ -1854,6 +1939,25 @@ def pm_outbox_merge(
                     "id": outbox_id,
                     "reason": "no_target_project",
                     "remediation": "pass target_project or set source_project on insert",
+                }
+            )
+            continue
+
+        # PMSERV-147 (ADR-039 T4, AD-6): pre-flight guard BEFORE any call
+        # that could create a project store (_get_memory_store, add_daily_log,
+        # etc.) — an unregistered project must be skipped here, never
+        # auto-initialized. is_initialized_project only touches the
+        # filesystem (no store is opened or created by this check).
+        if not is_initialized_project(project_path):
+            warnings.append(
+                {
+                    "id": outbox_id,
+                    "reason": "unregistered_project",
+                    "project": project_path,
+                    "remediation": (
+                        "Run pm_init on that path, then retry pm_outbox_merge. "
+                        "Automatic initialization is never performed."
+                    ),
                 }
             )
             continue

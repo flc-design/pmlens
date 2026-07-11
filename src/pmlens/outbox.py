@@ -458,6 +458,41 @@ class DesktopOutboxStore:
                 conn.close()
         return [dict(r) for r in rows]
 
+    def pending_source_project_counts(self) -> list[tuple[str, int]]:
+        """Return (source_project, count) pairs across ALL pending entries.
+
+        PMSERV-147 (ADR-039 T4): backs the ``pm_outbox_pending``
+        ``unregistered_projects[]`` aggregation, which needs the count of
+        pending entries per distinct ``source_project`` across the WHOLE
+        table (not just the current page). Grouping happens in SQL rather
+        than in Python for efficiency; rows with a NULL ``source_project``
+        are excluded (an unscoped entry cannot be "unregistered" — there is
+        no project to register). The unregistered/registered split itself
+        (via ``is_initialized_project``) is left to the caller since that
+        predicate touches the filesystem, not this store.
+
+        Missing-DB (evaluated fresh on every call — never cached) and
+        SQLite-error paths both return ``[]`` without touching sqlite or
+        raising — see :meth:`get` for why connect()+execute() share one
+        try/except.
+        """
+        if not self.db_path.exists():
+            return []
+        conn = None
+        try:
+            conn = self._connect()
+            rows = conn.execute(
+                "SELECT source_project, COUNT(*) AS cnt FROM desktop_outbox "
+                "WHERE status = 'pending' AND source_project IS NOT NULL "
+                "GROUP BY source_project"
+            ).fetchall()
+        except sqlite3.Error:
+            return []
+        finally:
+            if conn is not None:
+                conn.close()
+        return [(r["source_project"], int(r["cnt"])) for r in rows]
+
     def close(self) -> None:
         """No-op for short-lived connection design; provided for symmetry
         with MemoryStore and to give the factory a clear shutdown hook."""

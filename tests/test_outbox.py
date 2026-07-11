@@ -312,6 +312,35 @@ def test_get_pending_count_excludes_merged_and_rejected(outbox_store: DesktopOut
     assert outbox_store.get_pending_count() == 1
 
 
+# ─── pending_source_project_counts (PMSERV-147, ADR-039 T4) ─────────
+
+
+def test_pending_source_project_counts_groups_by_project(
+    outbox_store: DesktopOutboxStore,
+) -> None:
+    outbox_store.append("h", "s", "memory", "a", source_project="/proj/x")
+    outbox_store.append("h", "s", "memory", "b", source_project="/proj/x")
+    outbox_store.append("h", "s", "memory", "c", source_project="/proj/y")
+    outbox_store.append("h", "s", "memory", "d")  # no source_project
+
+    counts = dict(outbox_store.pending_source_project_counts())
+    assert counts == {"/proj/x": 2, "/proj/y": 1}
+
+
+def test_pending_source_project_counts_excludes_merged_and_rejected(
+    outbox_store: DesktopOutboxStore,
+) -> None:
+    a = outbox_store.append("h", "s", "memory", "a", source_project="/proj/x")
+    outbox_store.append("h", "s", "memory", "b", source_project="/proj/x")
+    outbox_store.mark_merged(a, None, None)
+    assert dict(outbox_store.pending_source_project_counts()) == {"/proj/x": 1}
+
+
+def test_pending_source_project_counts_missing_db_returns_empty(tmp_path: Path) -> None:
+    store = DesktopOutboxStore(tmp_path / "nope" / "desktop.db", readonly=True)
+    assert store.pending_source_project_counts() == []
+
+
 # ─── Factory (f5) — pytest test isolation ────────────
 
 
@@ -716,3 +745,160 @@ def test_pm_status_diagnostics_outbox_zero_omits_hint(tmp_path: Path) -> None:
     status = srv.pm_status(project_path=str(proj))
     assert status["diagnostics"]["outbox_pending"] == 0
     assert not any("Desktop outbox" in line for line in status["next_pm_actions"])
+
+
+# ─── T4: unregistered-project guidance + merge guard (PMSERV-147, ADR-039) ──
+
+
+def test_pm_outbox_remember_unregistered_source_project_warns(tmp_path: Path) -> None:
+    """source_project pointing at a path without .pm/project.yaml: the save
+    still succeeds, but a warnings[] entry with code=unregistered_project is
+    added (dual-audience message/remediation)."""
+    import pmlens.server as srv
+
+    unregistered = tmp_path / "not_pm_init_yet"
+    unregistered.mkdir()
+
+    res = srv.pm_outbox_remember(content="x", type="memory", source_project=str(unregistered))
+    assert res["status"] == "saved"
+    assert "warnings" in res
+    assert len(res["warnings"]) == 1
+    warning = res["warnings"][0]
+    assert warning["code"] == "unregistered_project"
+    assert warning["project"] == str(unregistered)
+    assert "pm_init" in warning["remediation"]
+    assert "pm_outbox_pending" in warning["remediation"] or "pm_recall" in warning["remediation"]
+
+
+def test_pm_outbox_remember_registered_source_project_no_warnings(tmp_path: Path) -> None:
+    """A pm_init'd (registered) source_project produces no warnings[]."""
+    import pmlens.server as srv
+
+    proj = _make_project(tmp_path, name="registered")
+    res = srv.pm_outbox_remember(content="x", type="memory", source_project=str(proj))
+    assert res["status"] == "saved"
+    assert "warnings" not in res
+
+
+def test_pm_outbox_remember_no_source_project_gets_hint_not_warning(tmp_path: Path) -> None:
+    """Omitting source_project entirely is not an error condition — no
+    warnings[], but the note gains guidance about adding source_project."""
+    import pmlens.server as srv
+
+    res = srv.pm_outbox_remember(content="x", type="memory")
+    assert res["status"] == "saved"
+    assert "warnings" not in res
+    assert "source_project" in res["note"]
+    # Original guidance must still be present (folded in, not replaced).
+    assert "pm_outbox_pending" in res["note"]
+
+
+def test_pm_outbox_log_unregistered_source_project_warns(tmp_path: Path) -> None:
+    """Mirror of the remember test for pm_outbox_log."""
+    import pmlens.server as srv
+
+    unregistered = tmp_path / "also_not_pm_init"
+    unregistered.mkdir()
+
+    res = srv.pm_outbox_log(entry="did stuff", source_project=str(unregistered))
+    assert res["status"] == "saved"
+    assert "warnings" in res
+    assert res["warnings"][0]["code"] == "unregistered_project"
+    assert res["warnings"][0]["project"] == str(unregistered)
+
+
+def test_pm_outbox_log_registered_source_project_no_warnings(tmp_path: Path) -> None:
+    import pmlens.server as srv
+
+    proj = _make_project(tmp_path, name="registered_log")
+    res = srv.pm_outbox_log(entry="did stuff", source_project=str(proj))
+    assert res["status"] == "saved"
+    assert "warnings" not in res
+
+
+def test_pm_outbox_merge_unregistered_target_skipped_no_pm_dir_created(
+    tmp_path: Path,
+) -> None:
+    """AD-6 (critical empirical check): merging against an unregistered
+    target must skip with a remediation entry AND must never create a .pm
+    directory anywhere under that path."""
+    import pmlens.server as srv
+
+    unregistered = tmp_path / "unreg_merge_target"
+    unregistered.mkdir()
+
+    rid = srv.pm_outbox_remember(content="orphan", type="memory")["outbox_id"]
+    res = srv.pm_outbox_merge(ids=[rid], target_project=str(unregistered))
+
+    assert res["merged"] == []
+    assert any(w["reason"] == "unregistered_project" and w["id"] == rid for w in res["warnings"])
+    unreg_warning = next(w for w in res["warnings"] if w["id"] == rid)
+    assert "pm_init" in unreg_warning["remediation"]
+
+    # The critical empirical check: no .pm anywhere under the target path.
+    assert not (unregistered / ".pm").exists()
+    for p in unregistered.rglob(".pm"):
+        raise AssertionError(f"pm_outbox_merge created a .pm dir: {p}")
+
+
+def test_pm_outbox_merge_unregistered_source_project_row_skipped(tmp_path: Path) -> None:
+    """Same guard, but reached via the row's own source_project (no explicit
+    target_project passed to pm_outbox_merge)."""
+    import pmlens.server as srv
+
+    unregistered = tmp_path / "unreg_via_row"
+    unregistered.mkdir()
+
+    rid = srv.pm_outbox_remember(
+        content="orphan2", type="memory", source_project=str(unregistered)
+    )["outbox_id"]
+    res = srv.pm_outbox_merge(ids=[rid])
+
+    assert res["merged"] == []
+    assert any(w["reason"] == "unregistered_project" for w in res["warnings"])
+    assert not (unregistered / ".pm").exists()
+
+
+def test_pm_outbox_merge_registered_target_still_merges(tmp_path: Path) -> None:
+    """Regression guard: the new pre-flight check must not block merges into
+    an already pm_init'd project."""
+    import pmlens.server as srv
+
+    proj = _make_project(tmp_path, name="already_registered")
+    rid = srv.pm_outbox_remember(content="fine", type="memory")["outbox_id"]
+    res = srv.pm_outbox_merge(ids=[rid], target_project=str(proj))
+    assert len(res["merged"]) == 1
+    assert res["warnings"] == []
+
+
+def test_pm_outbox_pending_unregistered_projects_aggregation(tmp_path: Path) -> None:
+    """pm_outbox_pending surfaces {project, count} pairs for distinct
+    source_project values that fail is_initialized_project, computed across
+    ALL pending entries (not just the current page)."""
+    import pmlens.server as srv
+
+    registered = _make_project(tmp_path, name="reg_for_agg")
+    unreg_a = tmp_path / "unreg_a"
+    unreg_a.mkdir()
+    unreg_b = tmp_path / "unreg_b"
+    unreg_b.mkdir()
+
+    srv.pm_outbox_remember(content="1", type="memory", source_project=str(unreg_a))
+    srv.pm_outbox_remember(content="2", type="memory", source_project=str(unreg_a))
+    srv.pm_outbox_remember(content="3", type="memory", source_project=str(unreg_b))
+    srv.pm_outbox_remember(content="4", type="memory", source_project=str(registered))
+
+    res = srv.pm_outbox_pending()
+    by_project = {e["project"]: e["count"] for e in res["unregistered_projects"]}
+    assert by_project == {str(unreg_a): 2, str(unreg_b): 1}
+    assert str(registered) not in by_project
+
+
+def test_pm_outbox_pending_unregistered_projects_empty_when_none(tmp_path: Path) -> None:
+    import pmlens.server as srv
+
+    proj = _make_project(tmp_path, name="all_registered")
+    srv.pm_outbox_remember(content="x", type="memory", source_project=str(proj))
+
+    res = srv.pm_outbox_pending()
+    assert res["unregistered_projects"] == []
