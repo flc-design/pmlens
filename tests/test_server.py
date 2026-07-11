@@ -1486,6 +1486,258 @@ class TestPmRecall:
         assert result["cross_project"] is True
 
 
+# ─── PMSERV-146 / ADR-039 T3: pm_recall(include_outbox=true) overlay ────
+
+
+class TestPmRecallIncludeOutbox:
+    """outbox_entries[]/outbox_summary{} overlay + scope rules + FR-6 note."""
+
+    @pytest.fixture(autouse=True)
+    def _setup_project(self, tmp_project, monkeypatch):
+        from pmlens.models import Project
+        from pmlens.storage import _save_project as _save
+
+        pm_path = tmp_project / ".pm"
+        _save(pm_path, Project(name="testproj", display_name="Test"))
+        monkeypatch.chdir(tmp_project)
+
+        import pmlens.server
+
+        pmlens.server._memory_stores.clear()
+
+    @staticmethod
+    def _force_session(monkeypatch, session_id: str):
+        import pmlens.server
+
+        monkeypatch.setattr(pmlens.server, "_current_session_id", session_id)
+
+    @staticmethod
+    def _seed_outbox(**kwargs) -> int:
+        from pmlens.outbox import default_outbox_db_path, get_outbox_store
+
+        store = get_outbox_store(db_path=default_outbox_db_path())
+        fields = {
+            "host_id": "claude-desktop",
+            "source_session": "sess-desktop",
+            "type": "memory",
+            "content": "content",
+        }
+        fields.update(kwargs)
+        return store.append(**fields)
+
+    def test_overlay_shape_and_provenance(self, monkeypatch, tmp_project):
+        from pmlens.server import pm_recall
+
+        self._force_session(monkeypatch, "sess-A")
+        self._seed_outbox(content="from desktop", source_project=str(tmp_project), tags="a,b")
+
+        result = pm_recall(include_outbox=True)
+        assert "outbox_entries" in result
+        assert "outbox_summary" in result
+        entry = result["outbox_entries"][0]
+        assert entry["content"] == "from desktop"
+        assert entry["source_project"] == str(tmp_project)
+        assert entry["tags"] == "a,b"
+        assert entry["host_id"] == "claude-desktop"
+        assert entry["source_session"] == "sess-desktop"
+        assert entry["source"] == "outbox(unmerged)"
+        assert entry["type"] == "memory"
+        assert "outbox_id" in entry
+        assert "created_at" in entry
+        assert "match_source" not in entry  # default path, not a query hit
+
+        summary = result["outbox_summary"]
+        assert summary["scope"] == "project"
+        assert summary["pending_total"] == 1
+        assert summary["project_pending"] == 1
+        assert summary["unscoped_pending"] == 0
+
+    def test_other_project_excluded_from_list_scoped_counts(
+        self, monkeypatch, tmp_project, tmp_path
+    ):
+        from pmlens.server import pm_recall
+
+        self._force_session(monkeypatch, "sess-A")
+        other_project = tmp_path / "other_proj"
+        other_project.mkdir()
+        self._seed_outbox(content="mine", source_project=str(tmp_project))
+        self._seed_outbox(content="other", source_project=str(other_project))
+        self._seed_outbox(content="no project")
+
+        result = pm_recall(include_outbox=True)
+        contents = {e["content"] for e in result["outbox_entries"]}
+        assert contents == {"mine"}
+        summary = result["outbox_summary"]
+        assert summary["pending_total"] == 3
+        assert summary["project_pending"] == 1
+        assert summary["unscoped_pending"] == 1
+        assert summary["scope"] == "project"
+
+    def test_project_resolution_failure_falls_back_to_scope_all(self, monkeypatch, tmp_path):
+        from pmlens.server import pm_recall
+
+        self._force_session(monkeypatch, "sess-A")
+        self._seed_outbox(content="orphaned")
+
+        unregistered = tmp_path / "not-a-project"
+        unregistered.mkdir()
+        result = pm_recall(include_outbox=True, project_path=str(unregistered))
+        assert result["outbox_summary"]["scope"] == "all"
+        assert result["last_session"] is None
+        assert result["recent_memories"] == []
+        assert "outbox_note" in result
+        contents = {e["content"] for e in result["outbox_entries"]}
+        assert "orphaned" in contents
+
+    def test_query_path_like_hit_has_match_source(self, monkeypatch, tmp_project):
+        from pmlens.server import pm_recall
+
+        self._force_session(monkeypatch, "sess-A")
+        self._seed_outbox(content="banana smoothie recipe", source_project=str(tmp_project))
+        self._seed_outbox(content="unrelated entry", source_project=str(tmp_project))
+
+        result = pm_recall(query="banana", include_outbox=True)
+        assert result["query"] == "banana"
+        assert result["results"] == []  # no matching memory.db entries
+        matches = [e for e in result["outbox_entries"] if e["content"] == "banana smoothie recipe"]
+        assert len(matches) == 1
+        assert matches[0]["match_source"] == "outbox_like"
+
+    def test_entry_over_500_chars_is_truncated(self, monkeypatch, tmp_project):
+        from pmlens.server import pm_recall
+
+        self._force_session(monkeypatch, "sess-A")
+        self._seed_outbox(content="x" * 501, source_project=str(tmp_project))
+
+        result = pm_recall(include_outbox=True)
+        entry = result["outbox_entries"][0]
+        assert len(entry["content"]) == 500
+        assert entry["content_truncated"] is True
+
+    def test_short_entry_omits_truncated_flag(self, monkeypatch, tmp_project):
+        from pmlens.server import pm_recall
+
+        self._force_session(monkeypatch, "sess-A")
+        self._seed_outbox(content="short", source_project=str(tmp_project))
+
+        result = pm_recall(include_outbox=True)
+        entry = result["outbox_entries"][0]
+        assert "content_truncated" not in entry
+
+    def test_task_id_path_ignores_include_outbox(self, monkeypatch, tmp_project):
+        """Design item 4: task_id path stays functionally untouched — no
+        overlay keys, and (unlike the default/query paths) a project
+        resolution failure must still raise rather than degrade."""
+        import pmlens.server as srv
+
+        self._force_session(monkeypatch, "sess-A")
+        srv.pm_remember(content="linked", task_id="TESTPROJ-001")
+        self._seed_outbox(content="pending stuff", source_project=str(tmp_project))
+
+        result = srv.pm_recall(task_id="TESTPROJ-001", include_outbox=True)
+        assert "outbox_entries" not in result
+        assert "outbox_summary" not in result
+        assert "outbox_pending_count" not in result
+        assert "outbox_note" not in result
+
+    def test_task_id_path_still_raises_on_unresolved_project_with_include_outbox(
+        self, monkeypatch, tmp_path
+    ):
+        import pmlens.server as srv
+        from pmlens.models import ProjectNotFoundError
+
+        self._force_session(monkeypatch, "sess-A")
+        unregistered = tmp_path / "not-a-project"
+        unregistered.mkdir()
+        with pytest.raises(ProjectNotFoundError):
+            srv.pm_recall(
+                task_id="TESTPROJ-001",
+                include_outbox=True,
+                project_path=str(unregistered),
+            )
+
+    def test_cross_project_path_ignores_include_outbox(self, monkeypatch, tmp_project):
+        """Design item 4: cross_project path stays functionally untouched."""
+        import pmlens.server as srv
+
+        self._force_session(monkeypatch, "sess-A")
+        srv.pm_remember(content="cross test data")
+        self._seed_outbox(content="pending stuff", source_project=str(tmp_project))
+
+        result = srv.pm_recall(query="cross test", cross_project=True, include_outbox=True)
+        assert "outbox_entries" not in result
+        assert "outbox_summary" not in result
+        assert "outbox_pending_count" not in result
+        assert "outbox_note" not in result
+
+    def test_include_outbox_false_pending_count_present_when_nonzero_no_note_if_not_empty(
+        self, monkeypatch, tmp_project
+    ):
+        import pmlens.server as srv
+
+        self._force_session(monkeypatch, "sess-A")
+        srv.pm_session_summary(action="save", summary="work")  # non-empty recall
+        self._seed_outbox(content="pending stuff", source_project=str(tmp_project))
+        monkeypatch.setattr(srv, "PM_LENS_ENABLED", True)
+
+        result = srv.pm_recall()
+        assert result["outbox_pending_count"] == 1
+        assert "outbox_note" not in result
+
+    def test_include_outbox_false_note_only_when_recall_empty(self, monkeypatch, tmp_project):
+        import pmlens.server as srv
+
+        self._force_session(monkeypatch, "sess-A")
+        self._seed_outbox(content="pending stuff", source_project=str(tmp_project))
+        monkeypatch.setattr(srv, "PM_LENS_ENABLED", True)
+
+        result = srv.pm_recall()  # empty recall: no last_session, no memories
+        assert result["outbox_pending_count"] == 1
+        assert "outbox_note" in result
+        assert "pm_recall(include_outbox=true)" in result["outbox_note"]
+
+    def test_include_outbox_false_no_count_key_when_zero_pending(self, monkeypatch, tmp_project):
+        import pmlens.server as srv
+
+        self._force_session(monkeypatch, "sess-A")
+        monkeypatch.setattr(srv, "PM_LENS_ENABLED", True)
+
+        result = srv.pm_recall()
+        assert "outbox_pending_count" not in result
+        assert "outbox_note" not in result
+
+    def test_include_outbox_false_no_probe_when_not_lens_mode(self, monkeypatch, tmp_project):
+        import pmlens.server as srv
+
+        self._force_session(monkeypatch, "sess-A")
+        self._seed_outbox(content="pending stuff", source_project=str(tmp_project))
+        # PM_LENS_ENABLED left at its default (False) in the test process.
+
+        result = srv.pm_recall()
+        assert "outbox_pending_count" not in result
+        assert "outbox_note" not in result
+
+    def test_desktop_db_absent_returns_empty_overlay_without_creating_file(
+        self, monkeypatch, tmp_project
+    ):
+        from pmlens.outbox import default_outbox_db_path
+        from pmlens.server import pm_recall
+
+        self._force_session(monkeypatch, "sess-A")
+        db_path = default_outbox_db_path()
+        assert not db_path.exists()
+
+        result = pm_recall(include_outbox=True)
+        assert result["outbox_entries"] == []
+        assert result["outbox_summary"] == {
+            "pending_total": 0,
+            "project_pending": 0,
+            "unscoped_pending": 0,
+            "scope": "project",
+        }
+        assert not db_path.exists()
+
+
 class TestBranchAwareLensSafety:
     """ADR-028: branch detection must stay off the read-only / Lens surface."""
 

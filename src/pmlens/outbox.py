@@ -382,6 +382,82 @@ class DesktopOutboxStore:
             if conn is not None:
                 conn.close()
 
+    def list_all_pending(self) -> list[dict]:
+        """Return every pending entry (no pagination), most-recent first.
+
+        PMSERV-146 (ADR-039 T3): backs the ``pm_recall(include_outbox=true)``
+        overlay — both its default-path listing and its ``outbox_summary``
+        scope counts (``project_pending`` / ``unscoped_pending``), which need
+        the full pending set because the project-scope comparison is a
+        ``Path(...).resolve()`` equality done in Python (SQLite cannot
+        normalize/resolve filesystem paths, so it cannot be pushed into the
+        WHERE clause). desktop.db is a small, personal, single-HOME store
+        (WF-028), so an unbounded fetch here is intentional — contrast with
+        :meth:`pending`, the paginated general-purpose listing used by
+        pm_outbox_pending.
+
+        Missing-DB (evaluated fresh on every call — never cached) and
+        SQLite-error paths both return ``[]`` without touching sqlite or
+        raising — see :meth:`get` for why connect()+execute() share one
+        try/except.
+        """
+        if not self.db_path.exists():
+            return []
+        conn = None
+        try:
+            conn = self._connect()
+            rows = conn.execute(
+                "SELECT * FROM desktop_outbox WHERE status = 'pending' "
+                "ORDER BY created_at DESC, id DESC"
+            ).fetchall()
+        except sqlite3.Error:
+            return []
+        finally:
+            if conn is not None:
+                conn.close()
+        return [dict(r) for r in rows]
+
+    def search_pending_like(self, query: str, limit: int = 10) -> list[dict]:
+        """LIKE-based search over pending entries' content/tags columns.
+
+        PMSERV-146 (ADR-039 T3): backs the ``pm_recall(include_outbox=true)``
+        query-path overlay (``match_source="outbox_like"``). ``%`` and ``_``
+        in ``query`` are escaped with a backslash before binding — existing
+        literal backslashes are escaped first so they are not themselves
+        misread as escape introducers — and the SQL clause uses
+        ``ESCAPE '\\'`` to match. The OR is parenthesized deliberately (a bare
+        ``content LIKE ? ESCAPE '\\' OR tags LIKE ? ESCAPE '\\'`` without
+        parens next to ``status = 'pending' AND`` would bind AND tighter than
+        OR and silently drop the ``status='pending'`` filter from the
+        second branch). Results are ordered created_at DESC, most-recent
+        first, capped at ``limit``.
+
+        Missing-DB (evaluated fresh on every call — never cached) and
+        SQLite-error paths both return ``[]`` without touching sqlite or
+        raising — see :meth:`get` for why connect()+execute() share one
+        try/except.
+        """
+        if not self.db_path.exists():
+            return []
+        escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        pattern = f"%{escaped}%"
+        conn = None
+        try:
+            conn = self._connect()
+            rows = conn.execute(
+                "SELECT * FROM desktop_outbox "
+                "WHERE status = 'pending' "
+                "AND (content LIKE ? ESCAPE '\\' OR tags LIKE ? ESCAPE '\\') "
+                "ORDER BY created_at DESC, id DESC LIMIT ?",
+                (pattern, pattern, limit),
+            ).fetchall()
+        except sqlite3.Error:
+            return []
+        finally:
+            if conn is not None:
+                conn.close()
+        return [dict(r) for r in rows]
+
     def close(self) -> None:
         """No-op for short-lived connection design; provided for symmetry
         with MemoryStore and to give the factory a clear shutdown hook."""

@@ -915,6 +915,223 @@ def pm_remember(
     return result
 
 
+# ─── Outbox overlay for pm_recall (PMSERV-146, ADR-039 T3) ──────────
+# include_outbox=true merges unmerged Desktop outbox entries into a
+# pm_recall response, tagged with explicit provenance so they are never
+# confused with promoted/merged memories. Read-pure throughout: always
+# opens the outbox store with readonly=True (T1) and never creates
+# desktop.db as a side effect.
+
+_OUTBOX_OVERLAY_MAX_ENTRIES: int = 10
+_OUTBOX_OVERLAY_CONTENT_LIMIT: int = 500
+
+
+def _truncate_outbox_content(content: str | None) -> tuple[str, bool]:
+    """Truncate overlay entry content at 500 chars (design point 6)."""
+    text = content or ""
+    if len(text) > _OUTBOX_OVERLAY_CONTENT_LIMIT:
+        return text[:_OUTBOX_OVERLAY_CONTENT_LIMIT], True
+    return text, False
+
+
+def _outbox_overlay_entry(row: dict, *, match_source: str | None = None) -> dict:
+    """Convert a raw desktop_outbox row into an overlay entry dict.
+
+    Always tagged ``source: "outbox(unmerged)"`` so overlay entries are
+    structurally distinguishable from promoted/merged memories (DoD2).
+    ``content_truncated`` is only added when truncation actually occurred
+    (additive-keys convention used throughout this module — e.g.
+    ``outbox_pending_count`` below), and ``match_source`` is only added for
+    query-path LIKE hits.
+    """
+    content, truncated = _truncate_outbox_content(row.get("content"))
+    entry: dict = {
+        "outbox_id": row.get("id"),
+        "type": row.get("type"),
+        "content": content,
+        "source_project": row.get("source_project"),
+        "tags": row.get("tags"),
+        "created_at": row.get("created_at"),
+        "host_id": row.get("host_id"),
+        "source_session": row.get("source_session"),
+        "source": "outbox(unmerged)",
+    }
+    if truncated:
+        entry["content_truncated"] = True
+    if match_source is not None:
+        entry["match_source"] = match_source
+    return entry
+
+
+def _outbox_source_project_matches(source_project: str | None, root: Path | None) -> bool:
+    """Resolve()-based project match for the overlay (AD-5).
+
+    Deliberately asymmetric with ``pm_outbox_pending(filter_project=)``,
+    which matches ``source_project`` as a raw string (existing behavior,
+    unchanged) — this overlay instead compares resolved ``Path`` objects, so
+    e.g. a relative vs. absolute spelling of the same directory matches here
+    but would not match there. Any resolution failure (bad path string) is
+    treated as a non-match rather than raising.
+    """
+    if not source_project or root is None:
+        return False
+    try:
+        return Path(source_project).expanduser().resolve() == root
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def _build_outbox_overlay(project_path: str | None, query: str | None, limit: int) -> dict:
+    """Build the include_outbox=true overlay: outbox_entries[] + outbox_summary{}.
+
+    Opens the outbox store readonly (T1) — never creates desktop.db.
+
+    Scope rule (AD-5): resolves ``project_path`` independently of the
+    caller's memory store (pm_recall may be calling this while degrading a
+    ProjectNotFoundError, so this function must never raise). If it
+    resolves, ``scope="project"`` and the *listed* entries (default path
+    only — see below) are filtered to those whose ``source_project``
+    resolves to the same path; entries with no ``source_project`` never
+    appear in the list, only in ``unscoped_pending``. If it does not
+    resolve, ``scope="all"``: no project filter is applied (best-effort
+    visibility for the unregistered-project incident-recovery case, rather
+    than an error).
+
+    ``outbox_summary`` counts (``pending_total`` / ``project_pending`` /
+    ``unscoped_pending``) always describe the outbox as a whole — mirroring
+    the DB-wide ``pending_total`` convention already used by
+    pm_outbox_remember/pm_outbox_log (ADR-039 T2) — independent of any
+    ``query``. Only the *listed* ``outbox_entries`` differ by path:
+
+    - default path (``query is None``): the ``min(limit, 10)`` most recent
+      pending entries, scope-filtered per the rule above.
+    - query path: the ``min(limit, 10)`` most recent pending entries whose
+      content or tags LIKE-match ``query`` (``match_source="outbox_like"``),
+      searched across the whole outbox (not scope-filtered — a keyword
+      search should find matches regardless of which project they came
+      from; only the default "browse recent" listing is scoped).
+    """
+    store = get_outbox_store(db_path=default_outbox_db_path(), readonly=True)
+
+    try:
+        root: Path | None = resolve_project_path(project_path)
+        scope = "project"
+    except ProjectNotFoundError:
+        root = None
+        scope = "all"
+
+    cap = max(0, min(limit, _OUTBOX_OVERLAY_MAX_ENTRIES))
+    pending_total = store.get_pending_count()
+    all_pending = store.list_all_pending()
+
+    project_pending = 0
+    unscoped_pending = 0
+    for row in all_pending:
+        sp = row.get("source_project")
+        if not sp:
+            unscoped_pending += 1
+        elif scope == "project" and _outbox_source_project_matches(sp, root):
+            project_pending += 1
+
+    if query:
+        rows = store.search_pending_like(query, limit=cap)
+        entries = [_outbox_overlay_entry(r, match_source="outbox_like") for r in rows]
+    else:
+        if scope == "project":
+            listed = [
+                r
+                for r in all_pending
+                if _outbox_source_project_matches(r.get("source_project"), root)
+            ]
+        else:
+            listed = all_pending
+        entries = [_outbox_overlay_entry(r) for r in listed[:cap]]
+
+    return {
+        "outbox_entries": entries,
+        "outbox_summary": {
+            "pending_total": pending_total,
+            "project_pending": project_pending,
+            "unscoped_pending": unscoped_pending,
+            "scope": scope,
+        },
+    }
+
+
+def _degraded_recall_with_outbox(project_path: str | None, query: str | None, limit: int) -> dict:
+    """ADR-039 T3 / AD-5: include_outbox=true response when the project
+    itself cannot be resolved (``_get_memory_store`` raised
+    ProjectNotFoundError).
+
+    Rather than propagating the error, pm_recall degrades — the caller
+    likely wants outbox visibility precisely BECAUSE the project isn't
+    registered yet (the unregistered-project incident-recovery case).
+    Mirrors the shape of the path actually being degraded (default vs.
+    query — no ``current_session_id``/task-summary keys on the query path,
+    matching its existing shape) with empty memory-store results, plus the
+    outbox overlay computed with ``scope="all"`` and an explanatory
+    ``outbox_note`` (never ``note`` — that key belongs to
+    ``_maybe_add_lens_note``).
+    """
+    overlay = _build_outbox_overlay(project_path, query, limit)
+    base: dict
+    if query is not None:
+        base = {"query": query, "results": []}
+    else:
+        base = {
+            "current_session_id": _current_session_id,
+            "last_session": None,
+            "recent_memories": [],
+            "ambiguity_detected": False,
+        }
+    base.update(overlay)
+    base["outbox_note"] = (
+        "Project could not be resolved (no .pm/ found), so this shows unmerged "
+        'Desktop outbox entries across ALL projects instead (scope="all"). Run '
+        "pm_init in the target project for project-scoped recall."
+    )
+    return base
+
+
+def _maybe_add_outbox_existence_note(response: dict, *, is_empty: bool) -> dict:
+    """FR-6 (ADR-039 T3): when the caller did NOT request the full overlay
+    (include_outbox=False), still let them know unmerged Desktop entries
+    exist, without fetching/listing them.
+
+    Gated on PM_LENS_ENABLED only: in Claude Code (PM_LENS=0),
+    pm_status.diagnostics.outbox_pending already surfaces this same count on
+    every session-start check-in, so repeating it on every pm_recall call
+    would be redundant noise (see pm_status, ``if not PM_LENS_ENABLED:``
+    branch). Only relevant when include_outbox is False — when it is True
+    the caller already has ``outbox_summary.pending_total`` from the overlay
+    itself, so this would just be a duplicate key.
+
+    ``outbox_pending_count`` is added only when count > 0 (key-present-only-
+    if-nonzero, required for test determinism — never defaulted to 0).
+    ``outbox_note`` is added only when, in addition, the recall itself came
+    back empty (no memories/session found) — that is the situation where a
+    caller most needs to be told "there's outbox content that could help".
+    The readonly probe never creates desktop.db (T1).
+    """
+    if not PM_LENS_ENABLED:
+        return response
+    try:
+        count = get_outbox_store(
+            db_path=default_outbox_db_path(), readonly=True
+        ).get_pending_count()
+    except Exception:
+        count = 0
+    if count > 0:
+        response["outbox_pending_count"] = count
+        if is_empty:
+            response["outbox_note"] = (
+                f"{count} unmerged Desktop outbox entries are available (not shown "
+                "here). Call pm_recall(include_outbox=true) or pm_outbox_pending to "
+                "view them."
+            )
+    return response
+
+
 @_tool()
 def pm_recall(
     query: str | None = None,
@@ -924,6 +1141,7 @@ def pm_recall(
     cross_project: bool = False,
     project_path: str | None = None,
     track: str | None = None,
+    include_outbox: bool = False,
 ) -> dict:
     """Recall memories relevant to the current context.
 
@@ -948,6 +1166,21 @@ def pm_recall(
         isolated parallel lines, prefer one git worktree per line — pm-server
         scopes context per directory, so recall is branch-aware for free (see
         ADR-028 / README).
+    include_outbox: overlay unmerged Desktop outbox entries (ADR-039 T3).
+        Applies ONLY on the default path (no query/task_id) and the query
+        path — task_id and cross_project are unaffected by this flag. Adds
+        ``outbox_entries`` (each tagged ``source="outbox(unmerged)"``, with
+        ``match_source="outbox_like"`` on query-path hits) and
+        ``outbox_summary`` (``pending_total``/``project_pending``/
+        ``unscoped_pending``/``scope``). If the project itself cannot be
+        resolved, degrades to ``scope="all"`` (all-projects view) plus an
+        ``outbox_note`` instead of raising — with include_outbox=False
+        (default), project-resolution failures still raise exactly as
+        before. When include_outbox is False, a lightweight
+        ``outbox_pending_count`` (present only if > 0) and — only if the
+        recall itself came back empty — an ``outbox_note`` are still added
+        when running under PM_LENS=1 (Desktop/Cowork; redundant with
+        pm_status.diagnostics in Claude Code, so skipped there).
     """
     # Normalize an empty/whitespace track to None so resolution and response-key
     # injection use the same predicate — track="" then behaves exactly like the
@@ -967,7 +1200,19 @@ def pm_recall(
             "results": results,
         }
 
-    store = _get_memory_store(project_path)
+    # ADR-039 T3: only the default (no query/task_id) and query paths ever
+    # apply the include_outbox overlay (see docstring), so only those paths
+    # tolerate a ProjectNotFoundError degrading to an outbox-only response.
+    # task_id keeps the original unwrapped call — no try/except at all — so
+    # its behavior is byte-identical whether or not include_outbox is passed
+    # (task text item 3/4: zero behavior change on that branch).
+    if include_outbox and not task_id:
+        try:
+            store = _get_memory_store(project_path)
+        except ProjectNotFoundError:
+            return _degraded_recall_with_outbox(project_path, query, limit)
+    else:
+        store = _get_memory_store(project_path)
 
     def _memory_dict(m: Memory) -> dict:
         return {
@@ -1052,14 +1297,26 @@ def pm_recall(
                 }
                 for c in candidates
             ]
-        return _maybe_add_lens_note(response, store)
+        response = _maybe_add_lens_note(response, store)
+        if include_outbox:
+            response.update(_build_outbox_overlay(project_path, None, limit))
+        else:
+            response = _maybe_add_outbox_existence_note(
+                response, is_empty=(last_session_dict is None and not recent)
+            )
+        return response
 
     # Search by query
     if query:
         results = store.search(query, type=type, limit=limit)
-        return _maybe_add_lens_note(
+        response = _maybe_add_lens_note(
             {"query": query, "results": [_memory_dict(m) for m in results]}, store
         )
+        if include_outbox:
+            response.update(_build_outbox_overlay(project_path, query, limit))
+        else:
+            response = _maybe_add_outbox_existence_note(response, is_empty=(not results))
+        return response
 
     # Search by task_id
     if task_id:
