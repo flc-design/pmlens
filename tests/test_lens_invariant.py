@@ -277,3 +277,211 @@ def test_x_draft_tools_hidden_under_lens(tmp_path: Path) -> None:
     )
     assert proc.returncode == 0, f"stderr={proc.stderr!r}, stdout={proc.stdout!r}"
     assert proc.stdout.strip().splitlines()[-1] == "ok"
+
+
+# ─── T6: full RO+outbox-read surface produces zero FS writes (ADR-039 T6) ──
+# NFR-1 / C18: the whole point of PM_LENS gating (RO_ALLOWLIST /
+# OUTBOX_READ_ALLOWLIST / OUTBOX_WRITE_ALLOWLIST — see server._tool()) is a
+# structural guarantee that a Lens host can only ever write through the
+# Desktop outbox, never through ~/.pm or a project's .pm. The per-tool tests
+# above spot-check individual writers; this sweep instead enumerates
+# srv.REGISTERED_TOOLS itself (whatever it ends up containing under a given
+# env) and calls every one of them with default arguments, then asserts a
+# full filesystem snapshot of both .pm trees is byte-for-byte unchanged.
+# Errors from tools missing required args are expected and ignored — only
+# filesystem side effects are being probed here.
+
+
+def _fs_snapshot(root: Path) -> list[tuple[str, int, int]]:
+    """Snapshot every entry under ``root`` as ``(relative_path, size, mtime_ns)``.
+
+    Walks both files and directories so a newly created (even empty) file or
+    directory shows up as an added tuple, not just a silent mtime bump on an
+    existing entry. Returns ``[]`` if ``root`` itself does not exist yet.
+    """
+    if not root.exists():
+        return []
+    entries: list[tuple[str, int, int]] = []
+    for p in sorted(root.rglob("*")):
+        try:
+            st = p.stat()
+        except OSError:
+            continue
+        entries.append((str(p.relative_to(root)), st.st_size, st.st_mtime_ns))
+    return entries
+
+
+def _seed_lens_invariant_fixture(tmp_path: Path) -> tuple[Path, Path]:
+    """Build a fake HOME plus a minimal registered project for the T6 sweep.
+
+    Returns ``(fake_home, project_root)``. Mirrors the fixtures used by the
+    F1 tests above (schema-valid memory.db so PM_LENS=1 opens it read-only
+    instead of falling back to an in-memory empty store; a minimal
+    project.yaml so project-scoped RO tools can resolve via cwd walk-up).
+    """
+    fake_home = tmp_path / "fake_home"
+    fake_home.mkdir()
+    global_db = fake_home / ".pm" / "memory.db"
+    _seed_pm_server_memories_db(global_db)
+
+    project_root = tmp_path / "t6project"
+    project_db = project_root / ".pm" / "memory.db"
+    _seed_pm_server_memories_db(project_db)
+    (project_root / ".pm" / "project.yaml").write_text(
+        "name: t6project\n"
+        "display_name: T6Project\n"
+        "version: 0.0.1\n"
+        "status: development\n"
+        "started: 2026-01-01\n"
+        "description: lens invariant T6 fixture\n"
+        "phases: []\n",
+        encoding="utf-8",
+    )
+    return fake_home, project_root
+
+
+# Runs inside the subprocess: import pmlens.server fresh (so PM_LENS /
+# PM_DESKTOP_WRITE gating in server._tool() is evaluated under this env),
+# then call every registered tool with zero args, tolerating any exception.
+_T6_SWEEP_SCRIPT = textwrap.dedent("""
+    import json
+    import sys
+
+    import pmlens.server as srv
+
+    assert srv.PM_LENS_ENABLED is True, "PM_LENS not picked up in subprocess"
+    expect_desktop_write = sys.argv[1] == "1"
+    assert srv.PM_DESKTOP_WRITE_ENABLED is expect_desktop_write, (
+        f"PM_DESKTOP_WRITE_ENABLED={srv.PM_DESKTOP_WRITE_ENABLED!r} does not "
+        f"match expected {expect_desktop_write!r}"
+    )
+
+    tool_names = sorted(srv.REGISTERED_TOOLS)
+    errors = {}
+    for name in tool_names:
+        fn = getattr(srv, name)
+        try:
+            fn()
+        except Exception as e:  # noqa: BLE001 - deliberately broad: a tool
+            # erroring on missing required args is expected and fine; only
+            # filesystem side effects are under test here, never the
+            # per-tool return value or error type.
+            errors[name] = f"{type(e).__name__}: {e}"
+
+    print(json.dumps({"tool_names": tool_names, "errors": errors}))
+""")
+
+
+def _run_t6_sweep(fake_home: Path, project_root: Path, *, desktop_write: bool) -> dict:
+    env = {**os.environ, "HOME": str(fake_home), "PM_LENS": "1"}
+    if desktop_write:
+        env["PM_DESKTOP_WRITE"] = "1"
+    else:
+        env.pop("PM_DESKTOP_WRITE", None)
+    env.pop("VIRTUAL_ENV", None)
+
+    proc = subprocess.run(
+        [sys.executable, "-c", _T6_SWEEP_SCRIPT, "1" if desktop_write else "0"],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        cwd=str(project_root),
+    )
+    assert proc.returncode == 0, (
+        f"subprocess failed: stderr={proc.stderr!r}, stdout={proc.stdout!r}"
+    )
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+def test_lens_pure_viewer_zero_fs_writes(tmp_path: Path) -> None:
+    """T6 (ADR-039, NFR-1/C18): the pure Lens-viewer case (PM_LENS=1, no
+    PM_DESKTOP_WRITE) — calling every tool that registers under this env with
+    default arguments must produce ZERO filesystem writes under ~/.pm or the
+    project's .pm. This is the primary DoD4 target: "writes from a Lens host
+    are impossible outside the Desktop outbox" — and in the pure-viewer case
+    there should be no writable surface reachable at all.
+    """
+    fake_home, project_root = _seed_lens_invariant_fixture(tmp_path)
+    home_pm = fake_home / ".pm"
+    project_pm = project_root / ".pm"
+    desktop_db = home_pm / "desktop" / "desktop.db"
+    assert not desktop_db.exists()
+
+    before = {"home": _fs_snapshot(home_pm), "project": _fs_snapshot(project_pm)}
+    result = _run_t6_sweep(fake_home, project_root, desktop_write=False)
+    after = {"home": _fs_snapshot(home_pm), "project": _fs_snapshot(project_pm)}
+
+    # Sanity: the sweep actually exercised a meaningful RO surface — otherwise
+    # this test would trivially pass even if REGISTERED_TOOLS were empty.
+    assert len(result["tool_names"]) >= 10, result["tool_names"]
+    assert "pm_status" in result["tool_names"]
+    assert "pm_outbox_pending" in result["tool_names"]
+    # Pure viewer: the outbox WRITE tools must not even be registered.
+    assert "pm_outbox_remember" not in result["tool_names"]
+    assert "pm_outbox_log" not in result["tool_names"]
+
+    diff = {
+        "home_added": [e for e in after["home"] if e not in before["home"]],
+        "home_removed": [e for e in before["home"] if e not in after["home"]],
+        "project_added": [e for e in after["project"] if e not in before["project"]],
+        "project_removed": [e for e in before["project"] if e not in after["project"]],
+    }
+    assert after == before, (
+        "PM_LENS=1 (pure viewer) full-tool sweep mutated the filesystem "
+        f"under ~/.pm or project .pm: {diff}"
+    )
+
+    # Explicit desktop.db (+ WAL/SHM sidecar) non-creation assertion.
+    assert not desktop_db.exists(), "desktop.db created by a pure-viewer Lens sweep"
+    assert not desktop_db.with_name("desktop.db-wal").exists()
+    assert not desktop_db.with_name("desktop.db-shm").exists()
+
+
+def test_lens_desktop_outbox_host_zero_fs_writes(tmp_path: Path) -> None:
+    """T6 sibling: the Desktop outbox host case (PM_LENS=1 + PM_DESKTOP_WRITE=1)
+    must ALSO produce zero filesystem writes when every registered tool is
+    called with default (i.e. no) arguments. pm_outbox_remember/pm_outbox_log
+    are reachable here, but both require a positional arg (content/entry) the
+    zero-arg call never supplies, so they raise before ever touching
+    desktop.db — confirming the outbox-host build doesn't accidentally widen
+    the writable surface for THIS call shape either.
+    """
+    fake_home, project_root = _seed_lens_invariant_fixture(tmp_path)
+    home_pm = fake_home / ".pm"
+    project_pm = project_root / ".pm"
+    desktop_db = home_pm / "desktop" / "desktop.db"
+    assert not desktop_db.exists()
+
+    before = {"home": _fs_snapshot(home_pm), "project": _fs_snapshot(project_pm)}
+    result = _run_t6_sweep(fake_home, project_root, desktop_write=True)
+    after = {"home": _fs_snapshot(home_pm), "project": _fs_snapshot(project_pm)}
+
+    assert len(result["tool_names"]) >= 10, result["tool_names"]
+    # Outbox host: RO tools + outbox-read + outbox-write tools are all visible.
+    assert "pm_outbox_remember" in result["tool_names"]
+    assert "pm_outbox_log" in result["tool_names"]
+    assert "pm_outbox_pending" in result["tool_names"]
+    # Both outbox writers must have errored (content/entry are required
+    # positional args) — confirms the "zero writes" result below isn't a
+    # false negative from the writers silently no-op'ing on empty input.
+    assert "pm_outbox_remember" in result["errors"], result["errors"]
+    assert "pm_outbox_log" in result["errors"], result["errors"]
+
+    diff = {
+        "home_added": [e for e in after["home"] if e not in before["home"]],
+        "home_removed": [e for e in before["home"] if e not in after["home"]],
+        "project_added": [e for e in after["project"] if e not in before["project"]],
+        "project_removed": [e for e in before["project"] if e not in after["project"]],
+    }
+    assert after == before, (
+        "PM_LENS=1 + PM_DESKTOP_WRITE=1 full-tool sweep (default-arg calls "
+        f"only) mutated the filesystem under ~/.pm or project .pm: {diff}"
+    )
+
+    assert not desktop_db.exists(), (
+        "desktop.db created even though both outbox writers errored on "
+        "missing required args before reaching store.append()"
+    )
+    assert not desktop_db.with_name("desktop.db-wal").exists()
+    assert not desktop_db.with_name("desktop.db-shm").exists()
