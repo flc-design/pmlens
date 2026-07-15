@@ -25,7 +25,13 @@ steps:
       Break the feature into concrete, actionable tasks.
       Set priorities, estimate effort, and define acceptance criteria.
       Register all tasks in pm-server.
+      For a multi-session handoff ("1 task = 1 session"), once the tasks are
+      registered you can generate a self-contained prompt pack in one shot.
     tool_hint: pm_add_task
+    skill_hint: >
+      After registering the tasks, run pm_prompt_pack (or the `pmlens prompt-pack`
+      CLI) to turn them into ready-to-paste session prompts — pass format=html
+      for a lane diagram with copy buttons (PMSERV-157).
     required_artifacts:
       - task
     consumes:

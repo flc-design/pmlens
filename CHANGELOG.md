@@ -50,6 +50,16 @@
   `.pm/prompt-templates/prompt_pack.html`. All task-derived text is Jinja2
   autoescaped and the copy button reads the `<pre>` text content, so the output
   is XSS-safe by construction. CLI + review-workflow integration remain v3.
+- **Prompt Pack v3 — CLI + workflow handoff (PMSERV-157)**: a new
+  `pmlens prompt-pack` CLI subcommand (`--tag`/`--phase`/`--priority`/
+  `--task-id`/`--format`/`--group-by`/`--out`/`--project`) generates a pack
+  outside an MCP session, and the development workflow's Task Breakdown step now
+  hints prompt-pack generation for a "1 task = 1 session" handoff. The MCP tool
+  and the CLI share one orchestration (`prompt_pack.run_prompt_pack`) so they
+  cannot drift. Linked memories are now read through a read-only
+  (`mode=ro&immutable=1`) connection gated on schema presence, so generating a
+  pack never migrates `memory.db` or leaves WAL sidecars — a strict improvement
+  to the read-path purity even over the v1/v2 tool.
 
 ### Fixed
 

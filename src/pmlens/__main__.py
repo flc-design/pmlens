@@ -206,6 +206,90 @@ def status():
     click.echo()
 
 
+@cli.command("prompt-pack")
+@click.option("--tag", "filter_tag", default=None, help="Only tasks carrying this tag.")
+@click.option("--phase", "filter_phase", default=None, help="Only tasks in this phase id.")
+@click.option(
+    "--priority", "filter_priority", default=None, help="Only tasks at this priority (P0-P3)."
+)
+@click.option(
+    "--task-id",
+    "task_ids",
+    multiple=True,
+    help="Explicit task id (repeatable); overrides filters and includes done tasks.",
+)
+@click.option(
+    "--format",
+    "fmt",
+    type=click.Choice(["md", "html"]),
+    default="md",
+    show_default=True,
+    help="Output format.",
+)
+@click.option(
+    "--group-by",
+    "group_by",
+    type=click.Choice(["none", "phase", "track"]),
+    default="none",
+    show_default=True,
+    help="HTML diagram lane grouping.",
+)
+@click.option(
+    "--out",
+    "out_path",
+    default=None,
+    help="Output path (default: .pm/exports/prompt-pack-<label>.<ext>).",
+)
+@click.option(
+    "--project", "project_path", default=None, help="Project dir (default: auto-detect from cwd)."
+)
+def prompt_pack_cmd(
+    filter_tag: str | None,
+    filter_phase: str | None,
+    filter_priority: str | None,
+    task_ids: tuple[str, ...],
+    fmt: str,
+    group_by: str,
+    out_path: str | None,
+    project_path: str | None,
+):
+    """Generate a self-contained implementation-session prompt pack.
+
+    Turns backlog tasks into ready-to-paste session prompts ("1 task = 1
+    session"); use --format html for a diagram + copy buttons. Read-only over
+    the project's data — the only write is the export file.
+    """
+    from .prompt_pack import run_prompt_pack
+    from .utils import resolve_project_path
+
+    try:
+        root = resolve_project_path(project_path)
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(1) from e
+
+    result = run_prompt_pack(
+        root / ".pm",
+        filter_tag=filter_tag,
+        filter_phase=filter_phase,
+        filter_priority=filter_priority,
+        task_ids=list(task_ids) or None,
+        format=fmt,
+        group_by=group_by,
+        out_path=out_path,
+    )
+
+    if result["status"] == "error":
+        click.echo(f"Error: {result['message']}", err=True)
+        raise SystemExit(1)
+    for w in result.get("warnings", []):
+        click.echo(f"⚠ {w}", err=True)
+    if result["task_count"] == 0:
+        click.echo("No tasks matched — nothing generated.")
+        return
+    click.echo(f"✓ {result['task_count']} task(s) → {result['out_path']} ({result['format']})")
+
+
 @cli.command()
 def migrate():
     """pm-agent からの移行。旧 MCP 登録を解除し pm-server として再登録。"""

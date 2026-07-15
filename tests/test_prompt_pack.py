@@ -40,6 +40,7 @@ from pmlens.prompt_pack import (
     group_tasks,
     read_verify_commands,
     render_task_card,
+    run_prompt_pack,
     task_node,
 )
 from pmlens.storage import (
@@ -759,3 +760,238 @@ def test_legacy_yaml_not_upgraded_with_new_fields(tmp_path):
     assert (pm_path / "project.yaml").read_bytes() == project_before
     assert (pm_path / "tasks.yaml").read_bytes() == tasks_before
     assert b"suggested_model" not in tasks_before  # sanity: file really is legacy
+
+
+# ─── v3 (PMSERV-157): shared orchestration, CLI, workflow integration ────────
+
+
+def test_run_prompt_pack_does_not_create_memory_db(tmp_path):
+    # RO improvement: generating a pack for a project with no memory.db must not
+    # create it (constructing a MemoryStore would write schema). run_prompt_pack
+    # reads memories only when memory.db already exists.
+    pm_path = init_pm_directory(tmp_path)
+    _save_tasks(pm_path, [_task(id="P-1", tags=["x"])])
+    assert not (pm_path / "memory.db").exists()
+    res = run_prompt_pack(pm_path, filter_tag="x")
+    assert res["status"] == "ok" and res["task_count"] == 1
+    assert not (pm_path / "memory.db").exists()  # still absent — no side effect
+
+
+def test_tool_delegates_to_run_prompt_pack_parity(tmp_path):
+    # pm_prompt_pack is a thin wrapper over run_prompt_pack; the same selection
+    # must yield the same result shape (minus the out_path, which is per-call).
+    pm_path = _seed(tmp_path, [_task(id="P-1", tags=["x"]), _task(id="P-2", tags=["x"])])
+    tool_res = srv.pm_prompt_pack(filter_tag="x", project_path=str(tmp_path))
+    direct = run_prompt_pack(pm_path, filter_tag="x", out_path=str(tmp_path / "d.md"))
+    assert tool_res["task_ids"] == direct["task_ids"]
+    assert tool_res["task_count"] == direct["task_count"] == 2
+    assert tool_res["format"] == direct["format"] == "md"
+
+
+class TestPromptPackCLI:
+    def _runner(self):
+        from click.testing import CliRunner
+
+        return CliRunner()
+
+    def _cli(self):
+        from pmlens.__main__ import cli
+
+        return cli
+
+    def test_md_generation(self, tmp_path):
+        pm_path = init_pm_directory(tmp_path)
+        _save_tasks(pm_path, [_task(id="T-1", tags=["b"]), _task(id="T-2", tags=["b"])])
+        res = self._runner().invoke(
+            self._cli(), ["prompt-pack", "--tag", "b", "--project", str(tmp_path)]
+        )
+        assert res.exit_code == 0, res.output
+        assert "2 task(s)" in res.output and ".md" in res.output
+
+    def test_html_group_by_track(self, tmp_path):
+        pm_path = init_pm_directory(tmp_path)
+        _save_tasks(
+            pm_path,
+            [
+                _task(id="T-1", tags=["b"], track="A", suggested_model=SuggestedModel.OPUS),
+                _task(id="T-2", tags=["b"], track="B"),
+            ],
+        )
+        res = self._runner().invoke(
+            self._cli(),
+            [
+                "prompt-pack",
+                "--tag",
+                "b",
+                "--format",
+                "html",
+                "--group-by",
+                "track",
+                "--project",
+                str(tmp_path),
+            ],
+        )
+        assert res.exit_code == 0, res.output
+        out = Path(res.output.strip().split("→")[1].split("(")[0].strip())
+        html = out.read_text(encoding="utf-8")
+        assert out.suffix == ".html"
+        assert "chip model-opus" in html and ">A<" in html and ">B<" in html
+
+    def test_task_id_repeatable_override(self, tmp_path):
+        pm_path = init_pm_directory(tmp_path)
+        _save_tasks(pm_path, [_task(id="T-1", tags=["b"]), _task(id="T-2", tags=["b"])])
+        res = self._runner().invoke(
+            self._cli(),
+            ["prompt-pack", "--task-id", "T-2", "--task-id", "T-1", "--project", str(tmp_path)],
+        )
+        assert res.exit_code == 0, res.output
+        assert "2 task(s)" in res.output
+
+    def test_unregistered_project_exits_1(self, tmp_path):
+        res = self._runner().invoke(
+            self._cli(), ["prompt-pack", "--project", str(tmp_path / "nope")]
+        )
+        assert res.exit_code == 1
+
+    def test_no_match_exits_0_with_message(self, tmp_path):
+        pm_path = init_pm_directory(tmp_path)
+        _save_tasks(pm_path, [_task(id="T-1", tags=["b"])])
+        res = self._runner().invoke(
+            self._cli(), ["prompt-pack", "--tag", "none", "--project", str(tmp_path)]
+        )
+        assert res.exit_code == 0
+        assert "No tasks matched" in res.output
+
+    def test_reserved_out_path_exits_1(self, tmp_path):
+        pm_path = init_pm_directory(tmp_path)
+        _save_tasks(pm_path, [_task(id="T-1", tags=["b"])])
+        res = self._runner().invoke(
+            self._cli(),
+            [
+                "prompt-pack",
+                "--tag",
+                "b",
+                "--out",
+                str(pm_path / "tasks.yaml"),
+                "--project",
+                str(tmp_path),
+            ],
+        )
+        assert res.exit_code == 1
+        assert "reserved" in res.output.lower()
+
+    def test_invalid_format_rejected_by_choice(self, tmp_path):
+        init_pm_directory(tmp_path)
+        res = self._runner().invoke(
+            self._cli(), ["prompt-pack", "--format", "pdf", "--project", str(tmp_path)]
+        )
+        assert res.exit_code == 2  # click.Choice rejects before run_prompt_pack
+
+    def test_invalid_group_by_rejected_by_choice(self, tmp_path):
+        init_pm_directory(tmp_path)
+        res = self._runner().invoke(
+            self._cli(), ["prompt-pack", "--group-by", "sprint", "--project", str(tmp_path)]
+        )
+        assert res.exit_code == 2
+
+    def test_phase_and_priority_options(self, tmp_path):
+        pm_path = init_pm_directory(tmp_path)
+        _save_tasks(
+            pm_path,
+            [
+                _task(id="A", phase="p1", priority=Priority.P0),
+                _task(id="B", phase="p2", priority=Priority.P1),
+            ],
+        )
+        res = self._runner().invoke(
+            self._cli(),
+            ["prompt-pack", "--phase", "p1", "--priority", "P0", "--project", str(tmp_path)],
+        )
+        assert res.exit_code == 0, res.output
+        assert "1 task(s)" in res.output  # only task A matches both
+
+    def test_missing_task_id_warning_surfaces(self, tmp_path):
+        pm_path = init_pm_directory(tmp_path)
+        _save_tasks(pm_path, [_task(id="T-1")])
+        res = self._runner().invoke(
+            self._cli(),
+            ["prompt-pack", "--task-id", "T-1", "--task-id", "T-404", "--project", str(tmp_path)],
+        )
+        assert res.exit_code == 0, res.output
+        assert "T-404" in res.output  # the "not found" warning is surfaced
+
+
+def test_development_workflow_has_prompt_pack_hint_without_changing_shape():
+    # Workflow integration (PMSERV-157): the Task Breakdown step gains a
+    # prompt-pack skill_hint, but the step count (9) and chain target must be
+    # unchanged so existing workflow behavior/tests are preserved.
+    from pmlens.workflow import load_workflow_template
+
+    tmpl = load_workflow_template("development")
+    assert len(tmpl.steps) == 9  # unchanged
+    tasks_step = next(s for s in tmpl.steps if s.id == "tasks")
+    assert tasks_step.tool_hint == "pm_add_task"  # existing hint preserved
+    assert tasks_step.skill_hint and "prompt_pack" in tasks_step.skill_hint.lower()
+
+
+def test_run_prompt_pack_reads_memory_db_read_only(tmp_path):
+    # Adversarial-review fix: linked memories are read through a mode=ro&immutable=1
+    # connection, so a generate must not touch memory.db or its sidecars at all
+    # (the read-WRITE open would run PRAGMA journal_mode=WAL + schema migrations).
+    # Snapshot every memory.db* file (whatever the RW seed store left) and assert
+    # run_prompt_pack changes none of them.
+    import hashlib
+
+    pm_path = init_pm_directory(tmp_path)
+    _save_tasks(pm_path, [_task(id="P-1", tags=["x"])])
+    store = MemoryStore(pm_path / "memory.db", global_db_path=None)
+    store.save(
+        Memory(
+            session_id="s",
+            type=MemoryType.LESSON,
+            content="CAUTION-MARKER-XYZ",
+            project="p",
+            task_id="P-1",
+        )
+    )
+    store.close()
+
+    def _snap() -> dict[str, str | None]:
+        out: dict[str, str | None] = {}
+        for name in ("memory.db", "memory.db-wal", "memory.db-shm"):
+            p = pm_path / name
+            out[name] = hashlib.sha256(p.read_bytes()).hexdigest() if p.exists() else None
+        return out
+
+    before = _snap()
+    res = run_prompt_pack(pm_path, filter_tag="x")
+
+    assert res["status"] == "ok"
+    assert _snap() == before  # run_prompt_pack wrote nothing to memory.db*
+    # the memory WAS read (rendered into the caution section) — not a silent skip
+    assert "CAUTION-MARKER-XYZ" in Path(res["out_path"]).read_text(encoding="utf-8")
+
+
+def test_tool_validates_before_resolving_project(tmp_path):
+    # Adversarial-review fix (parity): a bad format on an UNRESOLVABLE project
+    # returns the format-error dict (validate-then-resolve), not a raised
+    # ProjectNotFoundError.
+    res = srv.pm_prompt_pack(format="xml", project_path=str(tmp_path / "no-such-project"))
+    assert res["status"] == "error"
+    assert "xml" in res["message"] and "format" in res["message"]
+
+
+def test_run_prompt_pack_filter_phase_and_priority(tmp_path):
+    # Adversarial-review gap: filter_phase / filter_priority had no coverage.
+    pm_path = init_pm_directory(tmp_path)
+    _save_tasks(
+        pm_path,
+        [
+            _task(id="A", phase="p1", priority=Priority.P0),
+            _task(id="B", phase="p2", priority=Priority.P0),
+            _task(id="C", phase="p1", priority=Priority.P2),
+        ],
+    )
+    assert set(run_prompt_pack(pm_path, filter_phase="p1")["task_ids"]) == {"A", "C"}
+    assert set(run_prompt_pack(pm_path, filter_priority="P0")["task_ids"]) == {"A", "B"}
+    assert run_prompt_pack(pm_path, filter_phase="p1", filter_priority="P0")["task_ids"] == ["A"]
