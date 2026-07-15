@@ -1210,12 +1210,13 @@ def pm_recall(
         store = _get_memory_store(project_path)
         if not query:
             return {"status": "error", "message": "query is required for cross_project search"}
-        results = store.search_global(query, limit=limit)
+        results, search_strategy = store.search_global_ex(query, limit=limit)
         return {
             "current_session_id": _current_session_id,
             "query": query,
             "cross_project": True,
             "results": results,
+            "search_strategy": search_strategy,
         }
 
     # ADR-039 T3: only the default (no query/task_id) and query paths ever
@@ -1458,11 +1459,16 @@ def pm_memory_search(
     store = _get_memory_store(project_path)
 
     if cross_project:
-        results = store.search_global(query, limit=limit)
+        results, search_strategy = store.search_global_ex(query, limit=limit)
         if tags:
             tag_set = {t.strip() for t in tags.split(",") if t.strip()}
             results = [r for r in results if tag_set.issubset(set(r.get("tags", [])))]
-        return {"query": query, "cross_project": True, "results": results[:limit]}
+        return {
+            "query": query,
+            "cross_project": True,
+            "results": results[:limit],
+            "search_strategy": search_strategy,
+        }
 
     results, search_strategy = store.search_ex(query, type=type, limit=limit * 2)
 

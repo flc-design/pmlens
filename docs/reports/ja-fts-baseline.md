@@ -74,14 +74,34 @@
 LIKEフォールバックはこの構造的な取りこぼしに対する**計測された安全網**であり、根本修正（トークナイザー変更）
 ではない。
 
+## クロスプロジェクト計測（PMSERV-153, ADR-039 followup）
+
+PMSERV-143 では別 issue 送りとしていた `search_global`（cross_project 横断検索）の日本語計測 + LIKE
+フォールバック適用を、PMSERV-153 で実施した。
+
+- 対象: `MemoryStore.search_global_ex(query, limit=...) -> tuple[list[dict], str]` を新設
+  （`src/pmlens/memory.py`）。グローバル索引 `memory_index_fts` も per-project の `memories_fts` と同じ
+  `tokenize='unicode61'` を使うため、`search_ex` と同じ FTS→LIKE フォールバック（`content LIKE ? ESCAPE '\'
+  OR tags LIKE ? ESCAPE '\'`）を持たせた。既存 `search_global()` はシグネチャ不変のまま
+  `search_global_ex(...)[0]` への薄い委譲に変更（後方互換）。
+- 計測: golden corpus（同一 15 件）をグローバル索引へ同期し、per-project と同じ 23 クエリで `search_global_ex`
+  を実測（`tests/test_memory_ja_fts.py::TestJapaneseGoldenBaselineCrossProject`）。
+- 結果: **全 23 クエリで per-project ベースライン（上表）と strategy・hit・件数が完全一致（乖離 0）**。
+  同一コーパス・同一トークナイザ・同一フォールバックであり、グローバル索引が追加で持つ `project` 列
+  （本コーパスでは全行 `"pm-server"`）は日本語クエリにヒットしないため。集計も同一（FTS 単独 14/23 ≈ 60.9%、
+  フォールバック込み 19/23 ≈ 82.6%）。
+- テスト戦略: 23 個の数値を複製せず「per-project `search_ex` との parity」を assert する。両索引は unicode61 が
+  SQLite バージョンで揺れても連動して動くため、parity が rot しない固定になる（絶対再現率 19/23・14/23 は
+  集計テストで別途固定）。
+- ISSUE P5 の実障害（outbox_id:5「経営戦略 2つのエンジン…」）はこの cross_project 経路で発生していたが、
+  「経営戦略」単体は LIKE フォールバックで救済される（hit=2）ようになった。複数語 AND クエリ
+  「経営戦略 2つのエンジン」は per-project 同様フォールバックの構造的限界で未ヒットのまま（trigram 移行=PMSERV-150 の判断材料）。
+
 ## スコープ外（明記）
 
-- **`search_global`（cross_project 横断検索）はこのタスクでは計測していない**。ISSUE P5 の実障害はこの
-  cross_project 経路で発生しているが、v1 スコープ外として本タスクからは除外し、別 issue で日本語計測 +
-  LIKE フォールバックの適用を検討する（`docs/issues/DESIGN_desktop-outbox-two-way.md` §3-6 に記載済み）。
-- **trigram tokenizer への移行は本タスクの対象外**（ADR-039 AD-8）。インデックスサイズの倍増・SQLiteバージョン
-  依存・RO Lens 経路との互換性まで波及するため、C16 として別 issue 化が推奨される。今回計測した再現率の数値
-  （FTS単独 60.9% / フォールバック込み 82.6%）が、trigram 移行の投資判断材料になる。
+- **trigram tokenizer への移行は本タスクの対象外**（ADR-039 AD-8、C16 → PMSERV-150 として別 issue 化）。
+  インデックスサイズの倍増・SQLiteバージョン依存・RO Lens 経路との互換性まで波及するため。今回計測した再現率
+  （FTS単独 60.9% / フォールバック込み 82.6%、per-project / cross-project 共通）が、trigram 移行の投資判断材料になる。
 
 ## 実装への反映
 

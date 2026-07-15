@@ -835,17 +835,37 @@ class MemoryStore:
 
         return {"deleted": count, "dry_run": False}
 
-    def search_global(
+    def search_global_ex(
         self,
         query: str,
         limit: int = 10,
-    ) -> list[dict]:
-        """Search across all projects using the global index.
+    ) -> tuple[list[dict], str]:
+        """Cross-project search with a LIKE fallback when FTS finds nothing.
 
-        Returns dicts with project info included.
+        PMSERV-153 (ADR-039 followup): the cross-project sibling of
+        :meth:`search_ex`. ``memory_index_fts`` uses the same
+        ``tokenize='unicode61'`` as the per-project ``memories_fts``, so the
+        identical CJK caveat applies — compound Japanese queries (e.g.
+        "経営戦略") can MATCH zero rows even though the characters are present.
+        See ``docs/reports/ja-fts-baseline.md`` (cross-project section) for the
+        measured hit/miss numbers, and ``tests/test_memory_ja_fts.py`` for the
+        golden-query lock; both are SQLite-version-dependent.
+
+        When the FTS5 MATCH returns zero rows, fall back to a literal substring
+        scan over ``memory_index`` (``content LIKE ? OR tags LIKE ?`` with
+        ``%``/``_`` escaped) so those queries surface something instead of a
+        hard empty result — a recall safety net, not a tokenizer fix (trigram
+        migration is PMSERV-150, out of scope here).
+
+        Returns:
+            ``(results, strategy)`` where ``strategy`` is ``"fts"`` when the
+            FTS5 MATCH produced the results (including the graceful-degradation
+            empty result when the global index is absent or a ``sqlite3.Error``
+            occurs), or ``"like_fallback"`` when the LIKE fallback ran.
         """
         if self.global_db_path is None or not self.global_db_path.exists():
-            return []
+            return [], "fts"
+        conn: sqlite3.Connection | None = None
         try:
             conn = sqlite3.connect(str(self.global_db_path))
             conn.row_factory = sqlite3.Row
@@ -859,7 +879,18 @@ class MemoryStore:
                    LIMIT ?""",
                 (safe_query, limit),
             ).fetchall()
-            conn.close()
+            strategy = "fts"
+            if not rows:
+                strategy = "like_fallback"
+                escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                pattern = f"%{escaped}%"
+                rows = conn.execute(
+                    """SELECT * FROM memory_index
+                       WHERE (content LIKE ? ESCAPE '\\' OR tags LIKE ? ESCAPE '\\')
+                       ORDER BY created_at DESC
+                       LIMIT ?""",
+                    (pattern, pattern, limit),
+                ).fetchall()
             return [
                 {
                     "id": r["id"],
@@ -873,6 +904,22 @@ class MemoryStore:
                     "created_at": r["created_at"],
                 }
                 for r in rows
-            ]
+            ], strategy
         except sqlite3.Error:
-            return []
+            return [], "fts"
+        finally:
+            if conn is not None:
+                conn.close()
+
+    def search_global(
+        self,
+        query: str,
+        limit: int = 10,
+    ) -> list[dict]:
+        """Search across all projects using the global index.
+
+        Thin delegation to :meth:`search_global_ex` that drops the strategy
+        label, preserving the pre-PMSERV-153 list-only return for existing
+        callers. Returns dicts with project info included.
+        """
+        return self.search_global_ex(query, limit=limit)[0]

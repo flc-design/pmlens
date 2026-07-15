@@ -230,3 +230,73 @@ class TestSearchExDelegation:
         like_results, like_strategy = golden_store.search_ex("経営戦略", type="lesson", limit=5)
         assert like_strategy == "like_fallback"
         assert like_results == []
+
+
+# ─── Cross-project baseline (PMSERV-153, ADR-039 followup) ──────────────────
+#
+# The memory_store fixture passes a global_db_path, so golden_store already
+# mirrors every saved memory into the cross-project index. search_global_ex
+# uses the SAME tokenize='unicode61' + FTS→LIKE fallback as search_ex, so on
+# this corpus it tracks the per-project KNOWN_BASELINE query-for-query
+# (measured: 0 divergences across all 23 queries). We assert *parity* with the
+# per-project baseline rather than copying the 23 numbers: both indexes drift
+# in lockstep if the tokenizer shifts across SQLite versions, so parity is the
+# rot-proof lock. See docs/reports/ja-fts-baseline.md (cross-project section).
+
+
+class TestJapaneseGoldenBaselineCrossProject:
+    @pytest.mark.parametrize("query", sorted(KNOWN_BASELINE))
+    def test_global_matches_perproject_baseline(self, golden_store: MemoryStore, query: str):
+        expected = KNOWN_BASELINE[query]
+        g_results, g_strategy = golden_store.search_global_ex(query, limit=5)
+
+        # Cross-project result matches the locked per-project baseline exactly.
+        assert g_strategy == expected["strategy"], (
+            f"query={query!r}: cross-project strategy drifted from baseline "
+            f"({expected['strategy']!r} -> {g_strategy!r}); if genuine, update "
+            f"KNOWN_BASELINE and docs/reports/ja-fts-baseline.md, don't widen"
+        )
+        assert (len(g_results) > 0) == expected["hit"], (
+            f"query={query!r}: cross-project hit/miss drifted from baseline"
+        )
+        assert len(g_results) == expected["count"], (
+            f"query={query!r}: cross-project count drifted from baseline "
+            f"({expected['count']} -> {len(g_results)})"
+        )
+
+        # And it tracks per-project search_ex on THIS corpus, query-for-query.
+        pp_results, pp_strategy = golden_store.search_ex(query, limit=5)
+        assert g_strategy == pp_strategy
+        assert len(g_results) == len(pp_results)
+
+    def test_global_overall_recall_matches_report(self, golden_store: MemoryStore):
+        """Cross-project aggregate recall mirrors the per-project report:
+        19/23 combined (fts + like_fallback), 14/23 FTS-only."""
+        total = len(KNOWN_BASELINE)
+        hits = 0
+        fts_only_hits = 0
+        for query in KNOWN_BASELINE:
+            results, strategy = golden_store.search_global_ex(query, limit=5)
+            if results:
+                hits += 1
+            if strategy == "fts" and results:
+                fts_only_hits += 1
+
+        assert total == 23
+        assert hits == 19
+        assert fts_only_hits == 14
+
+
+class TestSearchGlobalDelegation:
+    """search_global() must stay a thin, list-only delegation to search_global_ex()."""
+
+    def test_search_global_returns_same_list_as_ex(self, golden_store: MemoryStore):
+        ex_results, _strategy = golden_store.search_global_ex("経営戦略", limit=5)
+        plain_results = golden_store.search_global("経営戦略", limit=5)
+        assert [r["memory_id"] for r in plain_results] == [r["memory_id"] for r in ex_results]
+
+    def test_search_global_wrapper_surfaces_like_fallback(self, golden_store: MemoryStore):
+        # "経営戦略" is a like_fallback query (FTS MATCH is empty): the list-only
+        # wrapper must still return the fallback rows, not a hard empty result.
+        results = golden_store.search_global("経営戦略", limit=5)
+        assert len(results) == 2
