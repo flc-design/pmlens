@@ -403,14 +403,19 @@ def test_lens_pure_viewer_zero_fs_writes(tmp_path: Path) -> None:
     there should be no writable surface reachable at all.
     """
     fake_home, project_root = _seed_lens_invariant_fixture(tmp_path)
-    home_pm = fake_home / ".pm"
     project_pm = project_root / ".pm"
-    desktop_db = home_pm / "desktop" / "desktop.db"
+    desktop_db = fake_home / ".pm" / "desktop" / "desktop.db"
+    claude_settings = fake_home / ".claude" / "settings.json"
     assert not desktop_db.exists()
+    assert not claude_settings.exists()
 
-    before = {"home": _fs_snapshot(home_pm), "project": _fs_snapshot(project_pm)}
+    # Snapshot the WHOLE fake HOME, not just ~/.pm: a Lens read must write
+    # nothing anywhere under HOME, including the host-config dir ~/.claude.
+    # Scoping the old snapshot to ~/.pm is precisely what let PMSERV-144
+    # (pm_status auto-installing hooks into ~/.claude/settings.json) slip past.
+    before = {"home": _fs_snapshot(fake_home), "project": _fs_snapshot(project_pm)}
     result = _run_t6_sweep(fake_home, project_root, desktop_write=False)
-    after = {"home": _fs_snapshot(home_pm), "project": _fs_snapshot(project_pm)}
+    after = {"home": _fs_snapshot(fake_home), "project": _fs_snapshot(project_pm)}
 
     # Sanity: the sweep actually exercised a meaningful RO surface — otherwise
     # this test would trivially pass even if REGISTERED_TOOLS were empty.
@@ -428,8 +433,14 @@ def test_lens_pure_viewer_zero_fs_writes(tmp_path: Path) -> None:
         "project_removed": [e for e in before["project"] if e not in after["project"]],
     }
     assert after == before, (
-        "PM_LENS=1 (pure viewer) full-tool sweep mutated the filesystem "
-        f"under ~/.pm or project .pm: {diff}"
+        "PM_LENS=1 (pure viewer) full-tool sweep mutated the filesystem under "
+        f"HOME (~/.pm, ~/.claude, …) or project .pm: {diff}"
+    )
+
+    # PMSERV-144: pm_status must not auto-install hooks under a Lens host.
+    assert not claude_settings.exists(), (
+        "pm_status wrote ~/.claude/settings.json during a pure-viewer Lens "
+        "sweep — hook auto-install leaked past the read-only boundary"
     )
 
     # Explicit desktop.db (+ WAL/SHM sidecar) non-creation assertion.
@@ -448,14 +459,18 @@ def test_lens_desktop_outbox_host_zero_fs_writes(tmp_path: Path) -> None:
     the writable surface for THIS call shape either.
     """
     fake_home, project_root = _seed_lens_invariant_fixture(tmp_path)
-    home_pm = fake_home / ".pm"
     project_pm = project_root / ".pm"
-    desktop_db = home_pm / "desktop" / "desktop.db"
+    desktop_db = fake_home / ".pm" / "desktop" / "desktop.db"
+    claude_settings = fake_home / ".claude" / "settings.json"
     assert not desktop_db.exists()
+    assert not claude_settings.exists()
 
-    before = {"home": _fs_snapshot(home_pm), "project": _fs_snapshot(project_pm)}
+    # Snapshot the whole fake HOME (see the pure-viewer sibling): the outbox
+    # host may only ever write to desktop.db via an explicit outbox writer —
+    # never to ~/.pm, ~/.claude, or the project's .pm on a bare read sweep.
+    before = {"home": _fs_snapshot(fake_home), "project": _fs_snapshot(project_pm)}
     result = _run_t6_sweep(fake_home, project_root, desktop_write=True)
-    after = {"home": _fs_snapshot(home_pm), "project": _fs_snapshot(project_pm)}
+    after = {"home": _fs_snapshot(fake_home), "project": _fs_snapshot(project_pm)}
 
     assert len(result["tool_names"]) >= 10, result["tool_names"]
     # Outbox host: RO tools + outbox-read + outbox-write tools are all visible.
@@ -476,7 +491,13 @@ def test_lens_desktop_outbox_host_zero_fs_writes(tmp_path: Path) -> None:
     }
     assert after == before, (
         "PM_LENS=1 + PM_DESKTOP_WRITE=1 full-tool sweep (default-arg calls "
-        f"only) mutated the filesystem under ~/.pm or project .pm: {diff}"
+        f"only) mutated the filesystem under HOME (~/.pm, ~/.claude, …) or "
+        f"project .pm: {diff}"
+    )
+
+    # PMSERV-144: hook auto-install must be gated off on a Lens host here too.
+    assert not claude_settings.exists(), (
+        "pm_status wrote ~/.claude/settings.json during a Lens outbox-host sweep"
     )
 
     assert not desktop_db.exists(), (
@@ -485,3 +506,65 @@ def test_lens_desktop_outbox_host_zero_fs_writes(tmp_path: Path) -> None:
     )
     assert not desktop_db.with_name("desktop.db-wal").exists()
     assert not desktop_db.with_name("desktop.db-shm").exists()
+
+
+# ─── PMSERV-144: pm_status must not auto-install hooks under a Lens host ────
+# pm_status() carries a convenience auto-install (get_hooks_status → if not
+# installed, install_hooks()) that writes ~/.claude/settings.json — a
+# host-config file OUTSIDE the .pm trees the T6 sweep historically snapshotted,
+# which is exactly how this read-path write leaked past the invariant sweep.
+# This test pins the host-config surface directly and asserts the read still
+# reports hook status truthfully (installed=False) without touching disk.
+
+_PM_STATUS_HOOKS_SCRIPT = textwrap.dedent("""
+    import json
+
+    import pmlens.server as srv
+
+    assert srv.PM_LENS_ENABLED is True, "PM_LENS not picked up in subprocess"
+    result = srv.pm_status()
+    # A "hooks" key only exists if pm_status ran to completion — i.e. it
+    # actually reached the auto-install block being guarded (line ~483).
+    print(json.dumps({"hooks": result.get("hooks")}))
+""")
+
+
+def test_lens_pm_status_does_not_write_claude_settings(tmp_path: Path) -> None:
+    """PMSERV-144: pm_status() under PM_LENS=1 must not create or mutate
+    ~/.claude/settings.json. A Lens viewer reports hook status read-only;
+    the auto-install convenience is Claude-Code-only (PM_LENS=0)."""
+    fake_home, project_root = _seed_lens_invariant_fixture(tmp_path)
+    claude_dir = fake_home / ".claude"
+    settings = claude_dir / "settings.json"
+    # Precondition: a fresh Lens machine with no host-config file yet.
+    assert not settings.exists()
+
+    env = {**os.environ, "HOME": str(fake_home), "PM_LENS": "1"}
+    env.pop("VIRTUAL_ENV", None)
+    env.pop("PM_DESKTOP_WRITE", None)
+
+    proc = subprocess.run(
+        [sys.executable, "-c", _PM_STATUS_HOOKS_SCRIPT],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=15,
+        cwd=str(project_root),
+    )
+    assert proc.returncode == 0, (
+        f"subprocess failed: stderr={proc.stderr!r}, stdout={proc.stdout!r}"
+    )
+
+    # Invariant: the Lens read created neither the host-config file nor its dir.
+    assert not settings.exists(), (
+        "pm_status under PM_LENS=1 wrote ~/.claude/settings.json — hook "
+        "auto-install leaked through the Lens read-only boundary (PMSERV-144)"
+    )
+    assert not claude_dir.exists(), (
+        "pm_status under PM_LENS=1 created ~/.claude/ — a Lens read must not "
+        "touch the host-config dir (PMSERV-144)"
+    )
+
+    # And the read still reports status truthfully: hooks are NOT installed.
+    payload = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert payload["hooks"] == {"installed": False, "path": str(settings)}, payload

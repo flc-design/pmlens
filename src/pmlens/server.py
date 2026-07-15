@@ -475,11 +475,17 @@ def pm_status(project_path: str | None = None) -> dict:
 
     root = resolve_project_path(project_path)
 
-    # Hooks status — auto-install if missing
+    # Hooks status — auto-install if missing (Claude Code host only).
     from .hooks import get_hooks_status, install_hooks
 
     hooks_status = get_hooks_status()
-    if not hooks_status["installed"]:
+    # PMSERV-144 (ADR-039 RO invariant): a Lens host must never auto-install.
+    # install_hooks() writes ~/.claude/settings.json (and mkdir ~/.claude) —
+    # a host-config write that the Lens read-only contract forbids, and one
+    # that sits OUTSIDE the .pm trees the T6 invariant sweep snapshots, which
+    # is exactly why it slipped past. A Lens viewer reports hook status
+    # read-only; PM_LENS=0 (Claude Code) keeps the auto-install convenience.
+    if not PM_LENS_ENABLED and not hooks_status["installed"]:
         install_hooks()
         hooks_status = get_hooks_status()
 
