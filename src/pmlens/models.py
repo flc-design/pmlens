@@ -41,6 +41,20 @@ class Priority(StrEnum):
     P3 = "P3"
 
 
+class SuggestedModel(StrEnum):
+    """Recommended model for a task's implementation session (PMSERV-155 / ADR-041).
+
+    ``any`` (the default) means "no preference" — it behaves like an unset
+    field so existing tasks stay backward compatible and the prompt-pack diagram
+    simply omits a model chip for them.
+    """
+
+    OPUS = "opus"
+    SONNET = "sonnet"
+    HAIKU = "haiku"
+    ANY = "any"
+
+
 class PhaseStatus(StrEnum):
     """Phase lifecycle status."""
 
@@ -220,6 +234,11 @@ class Task(BaseModel):
     notes: str = ""
     parent_id: str | None = None
     severity: IssueSeverity | None = None
+    # Prompt Pack v2 (PMSERV-155 / ADR-041). All optional & defaulted so
+    # existing tasks load unchanged; a prompt pack reads these when present.
+    suggested_model: SuggestedModel = SuggestedModel.ANY
+    after_recommended: list[str] = Field(default_factory=list)  # soft deps (≠ blocked_by)
+    track: str = ""  # lane key for prompt-pack group_by="track"
 
 
 class Consequences(BaseModel):
@@ -294,6 +313,11 @@ class Project(BaseModel):
     phases: list[Phase] = Field(default_factory=list)
     health: ProjectHealth = Field(default_factory=ProjectHealth)
     pm_schema: int = 1
+    # Prompt Pack v2 (PMSERV-155 / ADR-041): project-wide discipline text and
+    # verification commands injected into generated session prompts. Optional &
+    # defaulted (v1 read verify_commands from raw YAML; now formalized as fields).
+    discipline: str = ""
+    verify_commands: list[str] = Field(default_factory=list)
 
 
 class RegistryEntry(BaseModel):

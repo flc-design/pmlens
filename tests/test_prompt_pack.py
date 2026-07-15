@@ -26,6 +26,7 @@ from pmlens.models import (
     MemoryType,
     Priority,
     Project,
+    SuggestedModel,
     Task,
     TaskStatus,
 )
@@ -33,11 +34,22 @@ from pmlens.prompt_pack import (
     _condense,
     _fence,
     adr_refs_for_task,
+    build_prompt_body,
+    build_prompt_pack_html,
     build_prompt_pack_md,
+    group_tasks,
     read_verify_commands,
     render_task_card,
+    task_node,
 )
-from pmlens.storage import _save_decisions, _save_tasks, init_pm_directory
+from pmlens.storage import (
+    _save_decisions,
+    _save_project,
+    _save_tasks,
+    init_pm_directory,
+    load_project,
+    load_tasks,
+)
 
 
 def _task(**kw) -> Task:
@@ -259,9 +271,11 @@ class TestPmPromptPackTool:
         assert res["status"] == "ok"
         assert res["task_count"] == 2
         assert set(res["task_ids"]) == {"P-1", "P-2"}
+        assert res["format"] == "md"
         out = Path(res["out_path"])
         assert out.exists()
         assert out.parent == tmp_path / ".pm" / "exports"
+        assert out.suffix == ".md"  # default extension tracks the format
         md = out.read_text(encoding="utf-8")
         assert "### P-1" in md and "### P-2" in md
         assert "P-3" not in md  # done excluded
@@ -273,11 +287,34 @@ class TestPmPromptPackTool:
         assert res["task_count"] == 1
         assert res["task_ids"] == ["P-9"]
 
-    def test_format_html_is_v2_error(self, tmp_path):
-        _seed(tmp_path, [_task()])
-        res = srv.pm_prompt_pack(format="html", project_path=str(tmp_path))
+    def test_format_html_generates_self_contained_file(self, tmp_path):
+        _seed(tmp_path, [_task(id="P-1", title="html task", tags=["x"])])
+        res = srv.pm_prompt_pack(format="html", filter_tag="x", project_path=str(tmp_path))
+        assert res["status"] == "ok"
+        assert res["format"] == "html"
+        out = Path(res["out_path"])
+        assert out.suffix == ".html" and out.exists()
+        html = out.read_text(encoding="utf-8")
+        assert "<!doctype html>" in html.lower()
+        assert "copy-btn" in html and "P-1" in html
+        # self-contained: no external http(s) references
+        import re as _re
+
+        assert not _re.findall(r'https?://[^\s"\')]+', html)
+
+    def test_format_unknown_is_error(self, tmp_path):
+        _seed(tmp_path, [_task(tags=["x"])])
+        res = srv.pm_prompt_pack(format="pdf", filter_tag="x", project_path=str(tmp_path))
         assert res["status"] == "error"
-        assert "v2" in res["message"]
+        assert "md" in res["message"] and "html" in res["message"]
+
+    def test_group_by_unknown_is_error(self, tmp_path):
+        _seed(tmp_path, [_task(tags=["x"])])
+        res = srv.pm_prompt_pack(
+            format="html", group_by="sprint", filter_tag="x", project_path=str(tmp_path)
+        )
+        assert res["status"] == "error"
+        assert "group_by" in res["message"]
 
     def test_no_match_warns(self, tmp_path):
         _seed(tmp_path, [_task(tags=["a"])])
@@ -415,3 +452,310 @@ def test_pm_prompt_pack_hidden_under_lens(tmp_path):
     )
     assert proc.returncode == 0, f"stderr={proc.stderr!r}, stdout={proc.stdout!r}"
     assert proc.stdout.strip().splitlines()[-1] == "ok"
+
+
+# ─── v2 (PMSERV-155 / ADR-041): data model, HTML, grouping, templates ────────
+
+
+class TestV2DataModel:
+    def test_task_new_fields_default_backward_compatible(self):
+        t = _task()  # constructed WITHOUT the new fields
+        assert t.suggested_model == SuggestedModel.ANY
+        assert t.after_recommended == []
+        assert t.track == ""
+
+    def test_project_new_fields_default(self):
+        p = Project(name="p")
+        assert p.discipline == "" and p.verify_commands == []
+
+    def test_task_fields_roundtrip_yaml(self, tmp_path):
+        pm_path = init_pm_directory(tmp_path)
+        _save_tasks(
+            pm_path,
+            [
+                _task(
+                    id="P-1",
+                    suggested_model=SuggestedModel.OPUS,
+                    after_recommended=["P-2"],
+                    track="Sprint A",
+                )
+            ],
+        )
+        (t,) = load_tasks(pm_path)
+        assert t.suggested_model == SuggestedModel.OPUS
+        assert t.after_recommended == ["P-2"]
+        assert t.track == "Sprint A"
+
+    def test_project_fields_roundtrip_yaml(self, tmp_path):
+        pm_path = init_pm_directory(tmp_path)
+        proj = load_project(pm_path)
+        proj.discipline = "常に typecheck を通す"
+        proj.verify_commands = ["pnpm typecheck", "pnpm test"]
+        _save_project(pm_path, proj)
+        reloaded = load_project(pm_path)
+        assert reloaded.discipline == "常に typecheck を通す"
+        assert reloaded.verify_commands == ["pnpm typecheck", "pnpm test"]
+
+    def test_legacy_project_yaml_without_new_fields_loads(self, tmp_path):
+        # A project.yaml written before v2 (no discipline / verify_commands) must
+        # still load with safe defaults (backward compat).
+        pm_path = tmp_path / ".pm"
+        pm_path.mkdir()
+        (pm_path / "project.yaml").write_text(
+            "name: legacy\ndisplay_name: Legacy\nversion: 0.1.0\nstatus: development\n",
+            encoding="utf-8",
+        )
+        p = load_project(pm_path)
+        assert p.discipline == "" and p.verify_commands == []
+
+
+class TestGroupTasks:
+    def test_none_single_lane(self):
+        tasks = [_task(id="A"), _task(id="B")]
+        lanes = group_tasks(tasks, "none")
+        assert len(lanes) == 1 and lanes[0][0] == ""
+        assert [t.id for t in lanes[0][1]] == ["A", "B"]
+
+    def test_phase_lanes_order_preserved(self):
+        tasks = [
+            _task(id="A", phase="p1"),
+            _task(id="B", phase="p2"),
+            _task(id="C", phase="p1"),
+        ]
+        lanes = group_tasks(tasks, "phase")
+        assert [lbl for lbl, _ in lanes] == ["p1", "p2"]  # first-appearance order
+        assert [t.id for t in lanes[0][1]] == ["A", "C"]
+
+    def test_track_lanes_with_missing_track(self):
+        tasks = [_task(id="A", track="X"), _task(id="B")]  # B has no track
+        lanes = dict((lbl, [t.id for t in ts]) for lbl, ts in group_tasks(tasks, "track"))
+        assert lanes["X"] == ["A"]
+        assert lanes["(no track)"] == ["B"]
+
+    def test_unknown_group_by_degrades_to_single_lane(self):
+        lanes = group_tasks([_task(id="A")], "bogus")
+        assert len(lanes) == 1 and lanes[0][0] == ""
+
+
+class TestTaskNode:
+    def test_model_any_yields_no_chip(self):
+        node = task_node(_task(id="A"))  # default suggested_model = any
+        assert node["suggested_model"] is None
+
+    def test_model_and_deps_surfaced(self):
+        node = task_node(
+            _task(
+                id="A",
+                priority=Priority.P0,
+                suggested_model=SuggestedModel.OPUS,
+                blocked_by=["B"],
+                after_recommended=["C"],
+            )
+        )
+        assert node["priority"] == "P0"
+        assert node["suggested_model"] == "opus"
+        assert node["blocked_by"] == ["B"] and node["after_recommended"] == ["C"]
+
+
+class TestBuildHtml:
+    def _html(self, tasks, **kw):
+        proj = kw.pop("project", Project(name="p", display_name="P"))
+        return build_prompt_pack_html(
+            tasks,
+            project=proj,
+            memories_by_task=kw.pop("memories_by_task", {}),
+            decisions_by_id=kw.pop("decisions_by_id", {}),
+            verify_commands=kw.pop("verify_commands", []),
+            filter_label=kw.pop("filter_label", "sel"),
+            **kw,
+        )
+
+    def test_self_contained_no_external_refs(self):
+        import re as _re
+
+        html = self._html([_task(id="A", title="t")])
+        assert not _re.findall(r'https?://[^\s"\')]+', html)
+        assert "<script" in html and "</script>" in html  # inline JS only
+
+    def test_autoescape_prevents_xss(self):
+        task = _task(id="A", title="<script>alert(1)</script>", description="<b>x</b>")
+        html = self._html([task])
+        assert "<script>alert(1)</script>" not in html  # not live
+        assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html  # escaped
+
+    def test_autoescape_covers_every_task_derived_sink(self):
+        # Each distinct {{ }} expression in the template that renders task-derived
+        # text is its own escaping sink (ADR-041 contract). Feed a unique <img
+        # onerror> payload into EACH and assert every one is escaped — so a
+        # targeted `| safe` on any single field (not just a global autoescape
+        # disable) is caught.
+        def payload(marker: str) -> str:
+            return f"<img src=x onerror=alert('{marker}')>"
+
+        task = _task(
+            id="A",
+            title=payload("TITLE"),
+            description=payload("DESC"),
+            track=payload("TRACK"),
+            blocked_by=[payload("BLK")],
+            after_recommended=[payload("AFT")],
+        )
+        html = build_prompt_pack_html(
+            [task],
+            project=Project(name="p"),
+            memories_by_task={},
+            decisions_by_id={},
+            verify_commands=[payload("VERIFY")],
+            filter_label=payload("FILT"),
+            group_by="track",  # so the track value renders as a lane label
+            discipline=payload("DISC"),
+        )
+        for marker in ("TITLE", "DESC", "TRACK", "BLK", "AFT", "VERIFY", "FILT", "DISC"):
+            live = f"<img src=x onerror=alert('{marker}')>"
+            escaped = f"&lt;img src=x onerror=alert(&#39;{marker}&#39;)&gt;"
+            assert live not in html, f"{marker} sink not escaped (XSS)"
+            assert escaped in html, f"{marker} sink missing escaped form"
+
+    def test_chips_and_dependency_notes(self):
+        html = self._html(
+            [
+                _task(
+                    id="A",
+                    priority=Priority.P0,
+                    suggested_model=SuggestedModel.OPUS,
+                    blocked_by=["B"],
+                    after_recommended=["C"],
+                )
+            ]
+        )
+        assert "chip prio-P0" in html
+        assert "chip model-opus" in html
+        assert "⛔" in html and "B" in html  # hard dep note
+        assert "↝" in html and "C" in html  # soft dep note
+
+    def test_copy_button_reads_textcontent(self):
+        html = self._html([_task(id="A")])
+        assert "copy-btn" in html
+        assert "textContent" in html  # copies original text, not a JS string literal
+
+    def test_discipline_and_verify_commands_rendered(self):
+        html = self._html(
+            [_task(id="A", acceptance_criteria=["works"])],
+            discipline="規律テキスト",
+            verify_commands=["pytest -q"],
+        )
+        assert "規律テキスト" in html
+        assert "pytest -q" in html  # inside the card body via build_prompt_body
+
+    def test_track_lanes_rendered(self):
+        html = self._html(
+            [_task(id="A", track="Sprint A"), _task(id="B", track="DX")],
+            group_by="track",
+        )
+        assert "Sprint A" in html and "DX" in html
+
+    def test_body_shared_with_md(self):
+        # The paste-ready body must be byte-identical between md and html
+        # (build_prompt_body is the single source — ADR-041).
+        task = _task(id="A", description="do it", acceptance_criteria=["ok"])
+        body = build_prompt_body(task, memories=[], decisions_by_id={}, verify_commands=["v"])
+        html = self._html([task], verify_commands=["v"])
+        # every non-empty body line appears in the escaped <pre>
+        for line in body.splitlines():
+            if line.strip():
+                assert line.replace("<", "&lt;").replace(">", "&gt;") in html or line in html
+
+
+class TestTemplateOverride:
+    def test_project_override_wins(self, tmp_path):
+        pm_path = init_pm_directory(tmp_path)
+        override_dir = pm_path / "prompt-templates"
+        override_dir.mkdir()
+        (override_dir / "prompt_pack.html").write_text(
+            "OVERRIDE-MARKER {{ task_count }} tasks", encoding="utf-8"
+        )
+        html = build_prompt_pack_html(
+            [_task(id="A")],
+            project=load_project(pm_path),
+            memories_by_task={},
+            decisions_by_id={},
+            verify_commands=[],
+            filter_label="x",
+            pm_path=pm_path,
+        )
+        assert html == "OVERRIDE-MARKER 1 tasks"
+
+    def test_builtin_used_when_no_override(self, tmp_path):
+        pm_path = init_pm_directory(tmp_path)
+        html = build_prompt_pack_html(
+            [_task(id="A")],
+            project=load_project(pm_path),
+            memories_by_task={},
+            decisions_by_id={},
+            verify_commands=[],
+            filter_label="x",
+            pm_path=pm_path,
+        )
+        assert "<!doctype html>" in html.lower()  # bundled template
+
+
+def test_html_read_path_only_does_not_mutate_ssot(tmp_path):
+    # RO invariant for the HTML path (parallel to the md test): generating an
+    # HTML pack must not mutate tasks.yaml / decisions.yaml / memory.db rows.
+    tasks = [_task(id="P-1", description="see ADR-001", tags=["x"], track="A")]
+    decisions = [Decision(id="ADR-001", title="方針")]
+    memories = [
+        Memory(session_id="s", type=MemoryType.LESSON, content="教訓", project="p", task_id="P-1")
+    ]
+    pm_path = _seed(tmp_path, tasks, decisions=decisions, memories=memories)
+
+    def _mem_row_count() -> int:
+        conn = sqlite3.connect(str(pm_path / "memory.db"))
+        try:
+            return conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+        finally:
+            conn.close()
+
+    tasks_before = (pm_path / "tasks.yaml").read_bytes()
+    decisions_before = (pm_path / "decisions.yaml").read_bytes()
+    rows_before = _mem_row_count()
+
+    srv.pm_prompt_pack(format="html", group_by="track", filter_tag="x", project_path=str(tmp_path))
+
+    assert (pm_path / "tasks.yaml").read_bytes() == tasks_before
+    assert (pm_path / "decisions.yaml").read_bytes() == decisions_before
+    assert _mem_row_count() == rows_before
+
+
+def test_legacy_yaml_not_upgraded_with_new_fields(tmp_path):
+    # ADR-041 negative-consequence guard: generating a pack over a PRE-v2
+    # tasks.yaml / project.yaml (no suggested_model/track/discipline/... keys)
+    # must not rewrite them — the read path never persists the new default
+    # fields, so a legacy file stays byte-for-byte legacy (no surprise diff).
+    pm_path = tmp_path / ".pm"
+    (pm_path / "exports").mkdir(parents=True)
+    (pm_path / "project.yaml").write_text(
+        "name: legacy\ndisplay_name: Legacy\nversion: 0.1.0\nstatus: development\n",
+        encoding="utf-8",
+    )
+    (pm_path / "tasks.yaml").write_text(
+        "tasks:\n"
+        "- id: L-1\n"
+        "  title: legacy task\n"
+        "  phase: phase-1\n"
+        "  status: todo\n"
+        "  priority: P1\n"
+        "  tags: [x]\n",
+        encoding="utf-8",
+    )
+    project_before = (pm_path / "project.yaml").read_bytes()
+    tasks_before = (pm_path / "tasks.yaml").read_bytes()
+
+    for fmt in ("md", "html"):
+        res = srv.pm_prompt_pack(format=fmt, filter_tag="x", project_path=str(tmp_path))
+        assert res["status"] == "ok" and res["task_count"] == 1
+
+    # Neither SSoT file gained the new default fields.
+    assert (pm_path / "project.yaml").read_bytes() == project_before
+    assert (pm_path / "tasks.yaml").read_bytes() == tasks_before
+    assert b"suggested_model" not in tasks_before  # sanity: file really is legacy

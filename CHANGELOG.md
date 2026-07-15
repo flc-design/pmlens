@@ -37,6 +37,19 @@
   Directory resolution enumerates-and-matches the drifting `~/.claude/projects`
   encoding, with an explicit `auto_memory_path` override. Physical
   cross-project ingest + Lens cross-project search are deferred to PMSERV-156.
+- **Prompt Pack v2 — HTML output (PMSERV-155, ADR-041)**: `pm_prompt_pack`
+  gains `format="html"` — a single, CDN-free (CSP-safe) file with a lane
+  progress diagram (priority + `suggested_model` chips, `blocked_by` hard-dep
+  and `after_recommended` soft-dep notes) and a copy button per prompt card —
+  plus a `group_by` (`none`/`phase`/`track`) parameter. New optional task
+  fields `suggested_model` (opus/sonnet/haiku/any), `after_recommended`, and
+  `track`, and project fields `discipline` and `verify_commands`, are all
+  defaulted so existing YAML loads unchanged and generation stays read-only.
+  The paste-ready prompt body is generated once and shared by the markdown and
+  HTML formats, and the HTML template is overridable per project via
+  `.pm/prompt-templates/prompt_pack.html`. All task-derived text is Jinja2
+  autoescaped and the copy button reads the `<pre>` text content, so the output
+  is XSS-safe by construction. CLI + review-workflow integration remain v3.
 
 ### Fixed
 

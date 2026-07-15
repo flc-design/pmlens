@@ -43,7 +43,7 @@ from .models import (
     WorkflowStatus,
 )
 from .outbox import default_outbox_db_path, get_outbox_store
-from .prompt_pack import build_prompt_pack_md, read_verify_commands
+from .prompt_pack import build_prompt_pack_html, build_prompt_pack_md
 from .redaction import load_redaction_config, redact
 from .storage import (
     GLOBAL_PM_DIR,
@@ -2607,16 +2607,22 @@ def pm_prompt_pack(
     filter_priority: str | None = None,
     task_ids: list[str] | None = None,
     format: str = "md",
+    group_by: str = "none",
     out_path: str | None = None,
     project_path: str | None = None,
 ) -> dict:
-    """Generate a self-contained implementation-session prompt pack (PMSERV-154 v1).
+    """Generate a self-contained implementation-session prompt pack (PMSERV-154/155).
 
     Reads backlog tasks — plus their linked memory lessons/insights and any ADRs
-    referenced in the description — and writes a single markdown file to
-    ``.pm/exports/`` whose cards can be pasted straight into fresh
-    implementation sessions ("1 task = 1 session"). See
-    docs/proposals/pmlens-prompt-pack-proposal.md for the full spec.
+    referenced in the description — and writes a single file to ``.pm/exports/``
+    whose cards can be pasted straight into fresh implementation sessions
+    ("1 task = 1 session"). See docs/proposals/pmlens-prompt-pack-proposal.md.
+
+    v2 (ADR-041) adds ``format="html"`` — a CDN-free single file with a lane
+    progress diagram (priority + suggested_model chips, blocked_by / after_recommended
+    notes) and a copy button per card — plus ``group_by`` and the project
+    ``discipline`` / ``verify_commands`` fields. The HTML template is overridable
+    per project via ``.pm/prompt-templates/prompt_pack.html``.
 
     Read-only over the SSoT (tasks/memory/decisions/project) and never touches
     git; the ONLY write is the export file. This tool is deliberately NOT in
@@ -2629,17 +2635,24 @@ def pm_prompt_pack(
         filter_priority: Only tasks at this priority (e.g. "P1").
         task_ids: Explicit task-id selection. When given, it overrides the
             other filters and includes exactly those ids regardless of status.
-        format: Output format. Only "md" in v1 ("html" is v2 — returns error).
-        out_path: Override the default ``.pm/exports/prompt-pack-<label>.md``.
+        format: Output format — "md" (default) or "html".
+        group_by: Diagram lane grouping — "none" (default), "phase", or "track".
+            Only affects the HTML progress diagram.
+        out_path: Override the default ``.pm/exports/prompt-pack-<label>.<ext>``.
         project_path: Project override; defaults to cwd's ``.pm/``.
 
     Returns:
-        dict with status, task_count, task_ids, out_path, and warnings.
+        dict with status, task_count, task_ids, out_path, format, and warnings.
     """
-    if format != "md":
+    if format not in ("md", "html"):
         return {
             "status": "error",
-            "message": f"format={format!r} is not implemented in v1 (md only); HTML output is v2",
+            "message": f"format={format!r} is not supported (use 'md' or 'html')",
+        }
+    if group_by not in ("none", "phase", "track"):
+        return {
+            "status": "error",
+            "message": f"group_by={group_by!r} is not supported (use 'none', 'phase', or 'track')",
         }
 
     if out_path and Path(out_path).name in _PROMPT_PACK_RESERVED_NAMES:
@@ -2695,32 +2708,52 @@ def pm_prompt_pack(
     store = _get_memory_store(project_path)
     memories_by_task = {t.id: store.get_by_task(t.id) for t in selected}
     decisions_by_id = {d.id: d for d in decisions}
-    verify_commands = read_verify_commands(pm_path)
+    # v2: verify_commands / discipline are now formalized Project model fields
+    # (load_project parses them from project.yaml), so the raw-YAML helper is no
+    # longer needed on the write path.
+    verify_commands = project.verify_commands
+    discipline = project.discipline
 
     filter_label = _describe_prompt_pack_filter(filter_tag, filter_phase, filter_priority, task_ids)
-    md = build_prompt_pack_md(
-        selected,
-        project=project,
-        memories_by_task=memories_by_task,
-        decisions_by_id=decisions_by_id,
-        verify_commands=verify_commands,
-        filter_label=filter_label,
-    )
+    if format == "html":
+        content = build_prompt_pack_html(
+            selected,
+            project=project,
+            memories_by_task=memories_by_task,
+            decisions_by_id=decisions_by_id,
+            verify_commands=verify_commands,
+            filter_label=filter_label,
+            group_by=group_by,
+            discipline=discipline,
+            pm_path=pm_path,
+        )
+        ext = "html"
+    else:
+        content = build_prompt_pack_md(
+            selected,
+            project=project,
+            memories_by_task=memories_by_task,
+            decisions_by_id=decisions_by_id,
+            verify_commands=verify_commands,
+            filter_label=filter_label,
+            discipline=discipline,
+        )
+        ext = "md"
 
     dest = (
         Path(out_path)
         if out_path
-        else pm_path / "exports" / f"prompt-pack-{_prompt_pack_slug(filter_label)}.md"
+        else pm_path / "exports" / f"prompt-pack-{_prompt_pack_slug(filter_label)}.{ext}"
     )
     dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text(md, encoding="utf-8")
+    dest.write_text(content, encoding="utf-8")
 
     return {
         "status": "ok",
         "task_count": len(selected),
         "task_ids": [t.id for t in selected],
         "out_path": str(dest),
-        "format": "md",
+        "format": format,
         "warnings": warnings,
     }
 
