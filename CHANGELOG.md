@@ -21,6 +21,22 @@
 - **Japanese FTS baseline for cross-project search (PMSERV-143, ADR-039
   T5)**: `search_global`'s SQLite FTS5 index now has a baseline configuration
   validated against Japanese content, with a `LIKE` fallback path for misses.
+- **Auto-memory bridge v1 (PMSERV-112, ADR-040)**: a new `auto_memory` module
+  bridges Claude Code's native auto-memory store
+  (`~/.claude/projects/<repo>/memory/*.md`) and the PM ledger without risking
+  split-brain. `pm_recall(include_auto_memory=true)` overlays those notes at
+  query time as an additive `auto_memory_entries[]` / `auto_memory_summary{}`
+  key (each tagged `source="auto_memory"`, carrying the raw origin type and
+  `originSessionId` provenance) — read-only, nothing is copied into
+  `memory.db` (dual-write-safe, PMSERV-111), so it is safe under `PM_LENS=1`.
+  `pm_remember(bridge_to_memory_md=true)` (opt-in, default OFF, `PM_LENS=0`
+  only) appends an idempotent pointer block into `MEMORY.md` so the
+  always-in-context index points back at the ledger. The overlay always
+  excludes `MEMORY.md` and the reverse bridge writes only `MEMORY.md`, so the
+  two directions are disjoint and an ingest loop is structurally impossible.
+  Directory resolution enumerates-and-matches the drifting `~/.claude/projects`
+  encoding, with an explicit `auto_memory_path` override. Physical
+  cross-project ingest + Lens cross-project search are deferred to PMSERV-156.
 
 ### Fixed
 

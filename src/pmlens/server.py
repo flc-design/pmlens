@@ -13,6 +13,7 @@ from pathlib import Path
 from fastmcp import FastMCP
 
 from . import storage as _storage
+from .auto_memory import build_auto_memory_overlay, sync_memory_md_pointer
 from .discovery import detect_project_info, read_git_branch, scan_projects
 from .memory import MemoryStore, _has_pm_server_schema
 from .models import (
@@ -881,6 +882,7 @@ def pm_remember(
     decision_id: str | None = None,
     tags: str | None = None,
     project_path: str | None = None,
+    bridge_to_memory_md: bool = False,
 ) -> dict:
     """Save a memory tied to the current session context.
 
@@ -889,6 +891,16 @@ def pm_remember(
     If task_id is omitted, auto-links to the active in-progress task.
     type: observation | insight | lesson
     tags: comma-separated string (e.g. "auth,api,refactor")
+    bridge_to_memory_md: opt-in reverse bridge (ADR-040 / PMSERV-112 v1,
+        default OFF). When True, append an idempotent pointer to this memory
+        into Claude Code's ``MEMORY.md`` index so the always-in-context index
+        points back at the PM ledger. Writes ONLY ``MEMORY.md`` (which the
+        include_auto_memory overlay never reads — no ingest loop) and only when
+        PM_LENS=0 (this tool is already hidden under PM_LENS=1 via RO_ALLOWLIST
+        gating; the guard below is defense-in-depth, PMSERV-144 pattern). The
+        outcome is surfaced under ``memory_md_synced`` so a silent miss never
+        looks like a bug. pm_remember stays the SSoT — the pointer is an index
+        entry, not a duplicate memory (PMSERV-111 dual-write rule holds).
     """
     store = _get_memory_store(project_path)
     pm_path = _get_pm_path(project_path)
@@ -922,6 +934,18 @@ def pm_remember(
     }
     if auto_linked:
         result["auto_linked_task"] = task_id
+    # ADR-040 reverse bridge: opt-in, PM_LENS=0 only. Defense-in-depth — the
+    # tool is already unregistered under PM_LENS=1 (RO_ALLOWLIST gating), but
+    # the explicit guard keeps a direct in-process call (tests, other code)
+    # from writing ~/.claude under Lens, preserving the T6 RO invariant.
+    if bridge_to_memory_md and not PM_LENS_ENABLED:
+        result["memory_md_synced"] = sync_memory_md_pointer(
+            memory_id=memory_id,
+            mtype=type,
+            content=content,
+            project_path=project_path,
+            created_at=_dt.date.today().isoformat(),
+        )
     return result
 
 
@@ -1152,6 +1176,8 @@ def pm_recall(
     project_path: str | None = None,
     track: str | None = None,
     include_outbox: bool = False,
+    include_auto_memory: bool = False,
+    auto_memory_path: str | None = None,
 ) -> dict:
     """Recall memories relevant to the current context.
 
@@ -1202,6 +1228,22 @@ def pm_recall(
         relative path or a trailing-slash variant there can silently
         return zero matches even though the same path resolves correctly
         here.
+    include_auto_memory: overlay Claude Code's native auto-memory notes
+        (ADR-040 / PMSERV-112 v1). Like include_outbox, applies ONLY on the
+        default path (no query/task_id) and the query path. Parses
+        ``~/.claude/projects/<repo>/memory/*.md`` (``MEMORY.md`` — a derived
+        index — always excluded) at query time and adds two additive keys:
+        ``auto_memory_entries`` (each tagged ``source="auto_memory"``, carrying
+        the raw ``origin_type`` string, with ``match_source="auto_memory_like"``
+        on query-path hits) and ``auto_memory_summary``. Read-only: never
+        copies into memory.db (dual-write-safe, PMSERV-111) and never writes —
+        so it is safe under PM_LENS=1. Independent of include_outbox: pass both
+        to get both overlays.
+    auto_memory_path: explicit override for the auto-memory directory when the
+        ``~/.claude/projects`` dir-name encoding cannot be matched
+        automatically (the CC encoding has drifted across versions). Accepts
+        the ``memory/`` dir itself or a parent containing one. Only consulted
+        when include_auto_memory is True.
     """
     # Normalize an empty/whitespace track to None so resolution and response-key
     # injection use the same predicate — track="" then behaves exactly like the
@@ -1326,6 +1368,8 @@ def pm_recall(
             response = _maybe_add_outbox_existence_note(
                 response, is_empty=(last_session_dict is None and not recent)
             )
+        if include_auto_memory:
+            response.update(build_auto_memory_overlay(project_path, None, limit, auto_memory_path))
         return response
 
     # Search by query
@@ -1343,6 +1387,8 @@ def pm_recall(
             response.update(_build_outbox_overlay(project_path, query, limit))
         else:
             response = _maybe_add_outbox_existence_note(response, is_empty=(not results))
+        if include_auto_memory:
+            response.update(build_auto_memory_overlay(project_path, query, limit, auto_memory_path))
         return response
 
     # Search by task_id
