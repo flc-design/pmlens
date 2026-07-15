@@ -6,6 +6,7 @@ import datetime as _dt
 import fnmatch
 import json
 import os
+import re
 import uuid
 from pathlib import Path
 
@@ -41,6 +42,7 @@ from .models import (
     WorkflowStatus,
 )
 from .outbox import default_outbox_db_path, get_outbox_store
+from .prompt_pack import build_prompt_pack_md, read_verify_commands
 from .redaction import load_redaction_config, redact
 from .storage import (
     GLOBAL_PM_DIR,
@@ -56,6 +58,7 @@ from .storage import (
     get_builtin_templates_dir_status,
     init_pm_directory,
     list_workflow_templates,
+    load_decisions,
     load_knowledge,
     load_project,
     load_registry,
@@ -2506,6 +2509,174 @@ def _has_pm_dir() -> bool:
         return True
     except ProjectNotFoundError:
         return False
+
+
+# SSoT / registry filenames a prompt-pack export must never overwrite. The
+# single write pm_prompt_pack performs is caller-controlled via out_path; this
+# is defense-in-depth so an accidental out_path=".pm/tasks.yaml" can't clobber
+# the source of truth (the same SSoT the read path is otherwise pure over).
+_PROMPT_PACK_RESERVED_NAMES: frozenset[str] = frozenset(
+    {
+        "tasks.yaml",
+        "decisions.yaml",
+        "project.yaml",
+        "risks.yaml",
+        "knowledge.yaml",
+        "workflows.yaml",
+        "registry.yaml",
+        "memory.db",
+    }
+)
+
+
+def _prompt_pack_slug(label: str) -> str:
+    """Filesystem-safe slug for the default export filename."""
+    slug = re.sub(r"[^0-9A-Za-z가-힣ぁ-んァ-ヶ一-龠ー_-]+", "-", label).strip("-")
+    return (slug or "backlog").lower()[:60]
+
+
+def _describe_prompt_pack_filter(
+    filter_tag: str | None,
+    filter_phase: str | None,
+    filter_priority: str | None,
+    task_ids: list[str] | None,
+) -> str:
+    """Human-readable description of the task selection for the pack header."""
+    if task_ids:
+        return f"task_ids={', '.join(task_ids)}"
+    parts = []
+    if filter_tag:
+        parts.append(f"tag={filter_tag}")
+    if filter_phase:
+        parts.append(f"phase={filter_phase}")
+    if filter_priority:
+        parts.append(f"priority={filter_priority}")
+    return " / ".join(parts) if parts else "backlog (all non-done tasks)"
+
+
+@_tool()
+def pm_prompt_pack(
+    filter_tag: str | None = None,
+    filter_phase: str | None = None,
+    filter_priority: str | None = None,
+    task_ids: list[str] | None = None,
+    format: str = "md",
+    out_path: str | None = None,
+    project_path: str | None = None,
+) -> dict:
+    """Generate a self-contained implementation-session prompt pack (PMSERV-154 v1).
+
+    Reads backlog tasks — plus their linked memory lessons/insights and any ADRs
+    referenced in the description — and writes a single markdown file to
+    ``.pm/exports/`` whose cards can be pasted straight into fresh
+    implementation sessions ("1 task = 1 session"). See
+    docs/proposals/pmlens-prompt-pack-proposal.md for the full spec.
+
+    Read-only over the SSoT (tasks/memory/decisions/project) and never touches
+    git; the ONLY write is the export file. This tool is deliberately NOT in
+    RO_ALLOWLIST — because it writes, a PM_LENS=1 (Lens) host must never see it
+    (a Lens read must not write; PMSERV-144). It is a Claude Code tool.
+
+    Args:
+        filter_tag: Only tasks carrying this tag.
+        filter_phase: Only tasks in this phase id.
+        filter_priority: Only tasks at this priority (e.g. "P1").
+        task_ids: Explicit task-id selection. When given, it overrides the
+            other filters and includes exactly those ids regardless of status.
+        format: Output format. Only "md" in v1 ("html" is v2 — returns error).
+        out_path: Override the default ``.pm/exports/prompt-pack-<label>.md``.
+        project_path: Project override; defaults to cwd's ``.pm/``.
+
+    Returns:
+        dict with status, task_count, task_ids, out_path, and warnings.
+    """
+    if format != "md":
+        return {
+            "status": "error",
+            "message": f"format={format!r} is not implemented in v1 (md only); HTML output is v2",
+        }
+
+    if out_path and Path(out_path).name in _PROMPT_PACK_RESERVED_NAMES:
+        return {
+            "status": "error",
+            "message": (
+                f"refusing to write a prompt pack over reserved SSoT filename "
+                f"{Path(out_path).name!r}; choose a different out_path"
+            ),
+        }
+
+    pm_path = _get_pm_path(project_path)
+    project = load_project(pm_path)
+    all_tasks = load_tasks(pm_path)
+    decisions = load_decisions(pm_path)
+
+    warnings: list[str] = []
+
+    # Selection. Explicit task_ids override the filters (and keep the caller's
+    # requested order); otherwise AND the filters and drop done tasks (a prompt
+    # for finished work is pointless).
+    if task_ids:
+        wanted = [tid.strip() for tid in task_ids]
+        by_id = {t.id: t for t in all_tasks}
+        selected = [by_id[tid] for tid in wanted if tid in by_id]
+        missing = [tid for tid in wanted if tid not in by_id]
+        if missing:
+            warnings.append(f"requested task_ids not found: {', '.join(missing)}")
+    else:
+        selected = []
+        for t in all_tasks:
+            if filter_tag and filter_tag not in t.tags:
+                continue
+            if filter_phase and t.phase != filter_phase:
+                continue
+            if filter_priority and t.priority.value != filter_priority:
+                continue
+            if t.status == TaskStatus.DONE:
+                continue
+            selected.append(t)
+
+    if not selected:
+        return {
+            "status": "ok",
+            "task_count": 0,
+            "task_ids": [],
+            "out_path": None,
+            "warnings": [*warnings, "no tasks matched the given filters"],
+        }
+
+    # Gather linked memories per task (read-only). _get_memory_store may open a
+    # read path; get_by_task never writes.
+    store = _get_memory_store(project_path)
+    memories_by_task = {t.id: store.get_by_task(t.id) for t in selected}
+    decisions_by_id = {d.id: d for d in decisions}
+    verify_commands = read_verify_commands(pm_path)
+
+    filter_label = _describe_prompt_pack_filter(filter_tag, filter_phase, filter_priority, task_ids)
+    md = build_prompt_pack_md(
+        selected,
+        project=project,
+        memories_by_task=memories_by_task,
+        decisions_by_id=decisions_by_id,
+        verify_commands=verify_commands,
+        filter_label=filter_label,
+    )
+
+    dest = (
+        Path(out_path)
+        if out_path
+        else pm_path / "exports" / f"prompt-pack-{_prompt_pack_slug(filter_label)}.md"
+    )
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(md, encoding="utf-8")
+
+    return {
+        "status": "ok",
+        "task_count": len(selected),
+        "task_ids": [t.id for t in selected],
+        "out_path": str(dest),
+        "format": "md",
+        "warnings": warnings,
+    }
 
 
 # ─── Discovery & Management ──────────────────────────
