@@ -737,6 +737,221 @@ class TestBranchAwareSummaries:
             store.close()
 
 
+class TestUpdatedAtNullRecallDefect:
+    """PMSERV-158 / ADR-028: on *migrated* DBs the ALTER-added
+    session_summaries.updated_at column is nullable with no default, so
+    save_session_summary's INSERT (which omitted updated_at) left single-saved
+    rows with updated_at=NULL. Read paths that ORDER BY / WHERE the raw column
+    then silently returned an older re-saved summary as the branch "latest"
+    (track_matched=true) and excluded NULL rows from the ambiguity window.
+
+    The default ``memory_store`` fixture is a *fresh* DB whose NOT NULL DEFAULT
+    masks the defect, so these tests inject the NULL leak explicitly (via raw
+    UPDATE, or a hand-built migrated schema) and lock the write + backfill +
+    effective-timestamp read fixes independently.
+    """
+
+    @pytest.fixture
+    def migrated_store(self, tmp_path: Path):
+        """A MemoryStore whose session_summaries.updated_at is nullable with no
+        default (the *migrated* shape). The fresh ``memory_store`` fixture's
+        NOT NULL DEFAULT forbids injecting the NULL leak, so the read-defense
+        tests need this shape to reproduce the defect."""
+        db_path = tmp_path / "migrated.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            """CREATE TABLE session_summaries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL UNIQUE, summary TEXT NOT NULL,
+                goals TEXT, tasks_done TEXT, decisions TEXT, pending TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                project TEXT NOT NULL, updated_at TEXT, branch TEXT
+            )"""
+        )
+        conn.commit()
+        conn.close()
+        store = MemoryStore(db_path, global_db_path=None)
+        yield store
+        store.close()
+
+    @staticmethod
+    def _stamp(store: MemoryStore, session_id: str, created_at: str, updated_at) -> None:
+        """Deterministically stamp a row's timestamps (updated_at=None simulates
+        the migrated leak) so ordering does not depend on wall-clock timing."""
+        store._conn.execute(
+            "UPDATE session_summaries SET created_at = ?, updated_at = ? WHERE session_id = ?",
+            (created_at, updated_at, session_id),
+        )
+        store._conn.commit()
+
+    # ── C1: get_latest_summary_by_branch ────────────────────
+    def test_branch_latest_prefers_newer_null_row_over_older_resaved(
+        self, migrated_store: MemoryStore
+    ):
+        """The genuinely newest summary on a branch (single-save → updated_at
+        NULL) must beat an older summary with a populated updated_at.
+        RED before fix: ORDER BY updated_at DESC sinks the NULL row to last."""
+        migrated_store.save_session_summary(
+            SessionSummary(session_id="sess-old", summary="old", project="p", branch="main")
+        )
+        migrated_store.save_session_summary(
+            SessionSummary(session_id="sess-new", summary="new", project="p", branch="main")
+        )
+        self._stamp(migrated_store, "sess-old", "2026-01-01 00:00:00", "2026-06-01 00:00:00")
+        self._stamp(migrated_store, "sess-new", "2026-07-01 00:00:00", None)
+        summary, matched = migrated_store.get_latest_summary_by_branch("main")
+        assert matched is True
+        assert summary is not None
+        assert summary.session_id == "sess-new"
+
+    # ── C2: get_latest_summary_in_branches (logical track) ──
+    def test_logical_track_latest_prefers_newer_null_row(self, migrated_store: MemoryStore):
+        migrated_store.save_session_summary(
+            SessionSummary(session_id="sess-a", summary="a", project="p", branch="feat/x")
+        )
+        migrated_store.save_session_summary(
+            SessionSummary(session_id="sess-b", summary="b", project="p", branch="feat/y")
+        )
+        self._stamp(migrated_store, "sess-a", "2026-01-01 00:00:00", "2026-06-01 00:00:00")
+        self._stamp(migrated_store, "sess-b", "2026-07-01 00:00:00", None)
+        summary, matched = migrated_store.get_latest_summary_in_branches(["feat/x", "feat/y"])
+        assert matched is True
+        assert summary is not None
+        assert summary.session_id == "sess-b"
+
+    # ── C3: ambiguity window must INCLUDE a recent NULL-updated_at row ──
+    def test_ambiguity_window_includes_recent_null_updated_at_row(
+        self, migrated_store: MemoryStore
+    ):
+        """``NULL >= datetime('now', ?)`` is false, so a recent single-save
+        summary was silently dropped from ambiguity detection. RED before fix."""
+        migrated_store.save_session_summary(
+            SessionSummary(session_id="sess-recent", summary="r", project="p", branch="main")
+        )
+        # Keep created_at ~now (fresh save), blank out updated_at (migrated leak).
+        migrated_store._conn.execute(
+            "UPDATE session_summaries SET updated_at = NULL WHERE session_id = 'sess-recent'"
+        )
+        migrated_store._conn.commit()
+        unscoped = migrated_store.list_summaries_within(window_minutes=60)
+        assert any(s.session_id == "sess-recent" for s in unscoped)
+        scoped = migrated_store.list_summaries_within(window_minutes=60, branches=["main"])
+        assert any(s.session_id == "sess-recent" for s in scoped)
+
+    # ── A: write site populates updated_at on a migrated-shape DB ──
+    def test_migrated_db_single_save_populates_updated_at(self, tmp_path: Path):
+        """On a migrated DB (updated_at nullable, no default) a first-time save
+        must still write a non-NULL updated_at. RED before the write-site fix:
+        the INSERT omitted updated_at so the row was left NULL. The backfill
+        migration runs at open (before the save) so it cannot mask this."""
+        db_path = tmp_path / "legacy.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            """CREATE TABLE session_summaries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL UNIQUE, summary TEXT NOT NULL,
+                goals TEXT, tasks_done TEXT, decisions TEXT, pending TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')), project TEXT NOT NULL
+            )"""
+        )
+        conn.commit()
+        conn.close()
+        store = MemoryStore(db_path, global_db_path=None)
+        try:
+            store.save_session_summary(
+                SessionSummary(session_id="sess-new", summary="x", project="p", branch="main")
+            )
+            row = store._conn.execute(
+                "SELECT updated_at FROM session_summaries WHERE session_id = 'sess-new'"
+            ).fetchone()
+            assert row["updated_at"] not in (None, "")
+        finally:
+            store.close()
+
+    # ── B: idempotent backfill heals post-migration NULL/empty, keeps non-empty ──
+    def test_migration_backfills_null_and_empty_updated_at_idempotently(self, tmp_path: Path):
+        db_path = tmp_path / "leaky.db"
+        conn = sqlite3.connect(str(db_path))
+        # Migrated shape: updated_at present but nullable, no default.
+        conn.execute(
+            """CREATE TABLE session_summaries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL UNIQUE, summary TEXT NOT NULL,
+                goals TEXT, tasks_done TEXT, decisions TEXT, pending TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                project TEXT NOT NULL, updated_at TEXT
+            )"""
+        )
+        conn.executescript(
+            """
+            INSERT INTO session_summaries (session_id, summary, created_at, updated_at, project)
+                VALUES ('r-null', 'n', '2026-01-01 00:00:00', NULL, 'p');
+            INSERT INTO session_summaries (session_id, summary, created_at, updated_at, project)
+                VALUES ('r-empty', 'e', '2026-02-01 00:00:00', '', 'p');
+            INSERT INTO session_summaries (session_id, summary, created_at, updated_at, project)
+                VALUES ('r-keep', 'k', '2026-03-01 00:00:00', '2026-09-09 09:09:09', 'p');
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        def _u(store: MemoryStore, sid: str):
+            return store._conn.execute(
+                "SELECT updated_at FROM session_summaries WHERE session_id = ?", (sid,)
+            ).fetchone()["updated_at"]
+
+        store = MemoryStore(db_path, global_db_path=None)
+        try:
+            assert _u(store, "r-null") == "2026-01-01 00:00:00"  # backfilled from created_at
+            assert _u(store, "r-empty") == "2026-02-01 00:00:00"  # backfilled from created_at
+            assert _u(store, "r-keep") == "2026-09-09 09:09:09"  # non-empty preserved
+        finally:
+            store.close()
+        # Idempotent: a second open must not change already-healed values.
+        store2 = MemoryStore(db_path, global_db_path=None)
+        try:
+            assert _u(store2, "r-null") == "2026-01-01 00:00:00"
+            assert _u(store2, "r-keep") == "2026-09-09 09:09:09"
+        finally:
+            store2.close()
+
+    # ── D: v0 readonly DB lacking updated_at must not crash ambiguity scan ──
+    def test_readonly_v0_db_without_updated_at_degrades_gracefully(self, tmp_path: Path):
+        db_path = tmp_path / "v0.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.executescript(
+            """
+            CREATE TABLE memories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL,
+                type TEXT NOT NULL, content TEXT NOT NULL, task_id TEXT,
+                decision_id TEXT, tags TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')), project TEXT NOT NULL
+            );
+            CREATE TABLE session_summaries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL UNIQUE,
+                summary TEXT NOT NULL, goals TEXT, tasks_done TEXT, decisions TEXT,
+                pending TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                project TEXT NOT NULL
+            );
+            INSERT INTO session_summaries (session_id, summary, goals, tasks_done,
+                decisions, pending, project)
+            VALUES ('sess-legacy', 'old', '', '[]', '[]', '[]', 'p');
+            """
+        )
+        conn.commit()
+        conn.close()
+        # readonly => _ensure_schema (and the updated_at migration) never runs,
+        # so the updated_at column stays absent.
+        store = MemoryStore(db_path, readonly=True)
+        try:
+            # RED before fix: "no such column: updated_at" OperationalError.
+            within = store.list_summaries_within(window_minutes=60)
+            assert any(s.session_id == "sess-legacy" for s in within)
+            assert store._has_updated_at_col is False
+        finally:
+            store.close()
+
+
 # ─── Server tool integration ───────────────────────────
 
 

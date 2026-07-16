@@ -285,6 +285,20 @@ class MemoryStore:
         # overall-latest fallback instead of raising OperationalError from an
         # allowlisted read-only tool (PMSERV-124/125).
         self._has_branch_col = self._column_exists("session_summaries", "branch")
+        # PMSERV-158: session_summaries.updated_at is NULL on migrated DBs (the
+        # ALTER-added column has no default) and absent entirely on pre-PMSERV-049
+        # DBs opened read-only (the migration is skipped). Probe once and derive
+        # the effective-timestamp expression every recency read uses: COALESCE
+        # heals NULL/empty (→ created_at); when the column is missing we fall back
+        # to created_at directly so read-only tools never hit
+        # "no such column: updated_at". _ts_expr is a fixed internal constant
+        # (one of two literals) — never interpolated from user input.
+        self._has_updated_at_col = self._column_exists("session_summaries", "updated_at")
+        self._ts_expr = (
+            "COALESCE(NULLIF(updated_at, ''), created_at)"
+            if self._has_updated_at_col
+            else "created_at"
+        )
 
     def _column_exists(self, table: str, column: str) -> bool:
         """Return True iff ``table`` has ``column`` (via PRAGMA table_info)."""
@@ -310,10 +324,14 @@ class MemoryStore:
     def _migrate_session_summaries_updated_at(self) -> None:
         """Add updated_at column for DBs created before PMSERV-049.
 
-        Idempotent: skips ALTER if the column already exists. Backfills
-        updated_at with created_at so pre-migration rows have a sane
-        latest-save timestamp. Always (re)creates the supporting index
-        — safe because the column is guaranteed to exist after this method.
+        Idempotent: skips ALTER if the column already exists. PMSERV-158: the
+        backfill (updated_at = created_at for any NULL/empty row) runs on EVERY
+        open, not only at ALTER time, because older binaries whose INSERT omitted
+        updated_at could leave post-migration rows NULL — which the original
+        one-shot backfill (nested inside the ``if``) never healed. The predicate
+        only touches NULL/empty rows, so it is a cheap no-op once healed. Always
+        (re)creates the supporting index — safe because the column is guaranteed
+        to exist after the ALTER guard.
         """
         cur = self._conn.cursor()
         cols = [
@@ -321,9 +339,10 @@ class MemoryStore:
         ]
         if "updated_at" not in cols:
             cur.execute("ALTER TABLE session_summaries ADD COLUMN updated_at TEXT")
-            cur.execute(
-                "UPDATE session_summaries SET updated_at = created_at WHERE updated_at IS NULL"
-            )
+        cur.execute(
+            "UPDATE session_summaries SET updated_at = created_at"
+            " WHERE updated_at IS NULL OR updated_at = ''"
+        )
         cur.execute(
             "CREATE INDEX IF NOT EXISTS idx_session_summaries_updated_at"
             " ON session_summaries(updated_at)"
@@ -503,14 +522,19 @@ class MemoryStore:
     def save_session_summary(self, summary: SessionSummary) -> int:
         """Save a session summary via UPSERT.
 
-        On first save: created_at and updated_at both default to datetime('now').
+        On first save: created_at defaults via the DDL; updated_at is written
+        explicitly as datetime('now') in the INSERT. PMSERV-158: the
+        migration-added updated_at column has no default (SQLite ``ALTER`` cannot
+        add ``NOT NULL DEFAULT datetime('now')``), so relying on the column
+        default left single-saved rows NULL on migrated DBs — always set it here.
         On re-save (same session_id): preserves created_at, refreshes updated_at.
         Returns the row id of the inserted-or-updated row.
         """
         self._conn.execute(
             """INSERT INTO session_summaries
-               (session_id, summary, goals, tasks_done, decisions, pending, project, branch)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+               (session_id, summary, goals, tasks_done, decisions, pending, project,
+                branch, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
                ON CONFLICT(session_id) DO UPDATE SET
                    summary = excluded.summary,
                    goals = excluded.goals,
@@ -560,10 +584,13 @@ class MemoryStore:
           ``branch IS NULL`` and would otherwise match nothing (PMSERV-124 /
           ADR-028).
 
-        The branch-scoped query orders by ``updated_at DESC, id DESC`` so
-        "latest on this line" means *most recently worked*, not highest insert
-        id — important because :meth:`save_session_summary` is an UPSERT that
-        preserves the original id on re-save.
+        The branch-scoped query orders by the effective timestamp
+        ``COALESCE(NULLIF(updated_at, ''), created_at) DESC, id DESC`` so "latest
+        on this line" means *most recently worked*, not highest insert id —
+        important because :meth:`save_session_summary` is an UPSERT that preserves
+        the original id on re-save. PMSERV-158: the COALESCE guards against
+        migrated-DB rows whose updated_at is NULL, which a bare ``updated_at
+        DESC`` would sink below an older re-saved row (silent stale recall).
         """
         if not self._has_branch_col:
             # Old DB opened read-only under PM_LENS (migration could not run):
@@ -571,8 +598,8 @@ class MemoryStore:
             # instead of raising OperationalError from a read-only tool.
             return self.get_latest_summary(), False
         row = self._conn.execute(
-            "SELECT * FROM session_summaries WHERE branch = ?"
-            " ORDER BY updated_at DESC, id DESC LIMIT 1",
+            f"SELECT * FROM session_summaries WHERE branch = ?"  # noqa: S608
+            f" ORDER BY {self._ts_expr} DESC, id DESC LIMIT 1",
             (branch,),
         ).fetchone()
         if row is not None:
@@ -604,14 +631,15 @@ class MemoryStore:
         overall-latest with ``track_matched=False`` when ``branches`` is empty
         or none match — mirroring :meth:`get_latest_summary_by_branch` so a
         logical track with no recorded work yet still yields useful context
-        (PMSERV-125 / ADR-028 / SynapticLedger ADR-035). Orders by
-        ``updated_at DESC, id DESC`` (most-recently-worked across the line).
+        (PMSERV-125 / ADR-028 / SynapticLedger ADR-035). Orders by the effective
+        timestamp ``COALESCE(NULLIF(updated_at, ''), created_at) DESC, id DESC``
+        (most-recently-worked across the line; PMSERV-158 NULL-safe).
         """
         if branches and self._has_branch_col:
             placeholders = ",".join("?" for _ in branches)
             row = self._conn.execute(
-                f"SELECT * FROM session_summaries WHERE branch IN ({placeholders})"
-                " ORDER BY updated_at DESC, id DESC LIMIT 1",
+                f"SELECT * FROM session_summaries WHERE branch IN ({placeholders})"  # noqa: S608
+                f" ORDER BY {self._ts_expr} DESC, id DESC LIMIT 1",
                 tuple(branches),
             ).fetchone()
             if row is not None:
@@ -635,11 +663,17 @@ class MemoryStore:
         """Return session summaries updated within the last N minutes (UTC).
 
         Window comparison uses SQLite ``datetime('now', '-N minutes')`` which
-        evaluates in UTC. ``updated_at`` reflects the latest save for each
-        session, so still-active sessions are captured even when their initial
-        summary was created long ago. Boundary is inclusive: a summary updated
-        exactly N minutes ago is included. Used by pm_recall ambiguity
-        detection (PMSERV-049).
+        evaluates in UTC. The effective timestamp
+        ``COALESCE(NULLIF(updated_at, ''), created_at)`` reflects the latest save
+        for each session, so still-active sessions are captured even when their
+        initial summary was created long ago. PMSERV-158: the COALESCE is
+        essential here — a bare ``updated_at >= …`` predicate EXCLUDES rows whose
+        updated_at is NULL (``NULL >= x`` is not true), silently dropping recent
+        single-save summaries on migrated DBs from ambiguity detection. When the
+        column is absent (pre-PMSERV-049 read-only DB) ``_ts_expr`` degrades to
+        ``created_at`` so no ``no such column`` error is raised. Boundary is
+        inclusive: a summary updated exactly N minutes ago is included. Used by
+        pm_recall ambiguity detection (PMSERV-049).
 
         ``branches`` (PMSERV-125): when given, restrict to summaries recorded on
         those branches — used to scope ambiguity detection to a single work line
@@ -653,16 +687,16 @@ class MemoryStore:
             placeholders = ",".join("?" for _ in branches)
             rows = self._conn.execute(
                 f"""SELECT * FROM session_summaries
-                    WHERE updated_at >= datetime('now', ?)
+                    WHERE {self._ts_expr} >= datetime('now', ?)
                       AND branch IN ({placeholders})
-                    ORDER BY updated_at DESC LIMIT ?""",
+                    ORDER BY {self._ts_expr} DESC LIMIT ?""",  # noqa: S608
                 (f"-{window_minutes} minutes", *branches, limit),
             ).fetchall()
             return [self._row_to_summary(r) for r in rows]
         rows = self._conn.execute(
-            """SELECT * FROM session_summaries
-               WHERE updated_at >= datetime('now', ?)
-               ORDER BY updated_at DESC LIMIT ?""",
+            f"""SELECT * FROM session_summaries
+               WHERE {self._ts_expr} >= datetime('now', ?)
+               ORDER BY {self._ts_expr} DESC LIMIT ?""",  # noqa: S608
             (f"-{window_minutes} minutes", limit),
         ).fetchall()
         return [self._row_to_summary(r) for r in rows]
