@@ -324,14 +324,23 @@ class MemoryStore:
     def _migrate_session_summaries_updated_at(self) -> None:
         """Add updated_at column for DBs created before PMSERV-049.
 
-        Idempotent: skips ALTER if the column already exists. PMSERV-158: the
-        backfill (updated_at = created_at for any NULL/empty row) runs on EVERY
-        open, not only at ALTER time, because older binaries whose INSERT omitted
-        updated_at could leave post-migration rows NULL — which the original
-        one-shot backfill (nested inside the ``if``) never healed. The predicate
-        only touches NULL/empty rows, so it is a cheap no-op once healed. Always
-        (re)creates the supporting index — safe because the column is guaranteed
-        to exist after the ALTER guard.
+        Idempotent: skips ALTER if the column already exists. Two heals then
+        run on EVERY open, each a cheap no-op once the data is clean:
+
+        - PMSERV-158 backfill: ``updated_at = created_at`` for NULL/empty rows.
+          Older binaries whose INSERT omitted updated_at could leave
+          post-migration rows NULL — which the original one-shot backfill
+          (nested inside the ``if``) never healed.
+        - PMSERV-160 clamp: a future ``updated_at`` (a save that ran while the
+          system clock was ahead — NTP skew, restored VM snapshot) is clamped
+          to now. Under the effective-timestamp order such a row would stay
+          "latest" until real time caught up, whereas the bare-id order it
+          replaced self-healed on the very next save; the clamp restores that
+          property at open time. Runs after the backfill so a future
+          created_at copied into updated_at is clamped in the same pass.
+
+        Always (re)creates the supporting index — safe because the column is
+        guaranteed to exist after the ALTER guard.
         """
         cur = self._conn.cursor()
         cols = [
@@ -342,6 +351,10 @@ class MemoryStore:
         cur.execute(
             "UPDATE session_summaries SET updated_at = created_at"
             " WHERE updated_at IS NULL OR updated_at = ''"
+        )
+        cur.execute(
+            "UPDATE session_summaries SET updated_at = datetime('now')"
+            " WHERE updated_at > datetime('now')"
         )
         cur.execute(
             "CREATE INDEX IF NOT EXISTS idx_session_summaries_updated_at"
@@ -357,8 +370,12 @@ class MemoryStore:
         legitimately have no branch (NULL), and
         ``get_latest_summary_by_branch`` falls back to the overall-latest for
         them so existing DBs keep working on day one. The composite index
-        ``(branch, updated_at DESC)`` serves the driving query
-        ``WHERE branch = ? ORDER BY updated_at DESC`` as an index-range top-1.
+        ``(branch, updated_at DESC)`` narrows the branch-scoped queries via its
+        equality prefix; since PMSERV-158 their ORDER BY is the effective-
+        timestamp *expression* (COALESCE), which no column index can order, so
+        SQLite finishes with a TEMP B-TREE sort over the per-branch slice —
+        measured negligible at this table's scale (PMSERV-159 review; an
+        expression index is tracked as PMSERV-162).
 
         The column is added as plain nullable ``TEXT`` (no NOT NULL / DEFAULT)
         because SQLite forbids ``ALTER ... ADD COLUMN NOT NULL`` without a
@@ -562,9 +579,22 @@ class MemoryStore:
         return row["id"]
 
     def get_latest_summary(self) -> SessionSummary | None:
-        """Get the most recent session summary (across all branches)."""
+        """Get the most recent session summary (across all branches).
+
+        "Most recent" means most recently *worked* — ordered by the effective
+        timestamp with an id tiebreak, exactly like the branch-scoped getters
+        (PMSERV-159). A bare ``id DESC`` would mean "most recently started":
+        :meth:`save_session_summary` is an UPSERT that preserves id, so an
+        older session re-saving after a newer one begins would be passed over
+        by every no-track consumer — pm_recall's default path, the track-miss
+        fallback, pm_session_summary get/list, and the context-inject CLI's
+        Layer-1 (recall.py). Effective-
+        timestamp ties keep the id DESC order, so single-save flows behave as
+        before.
+        """
         row = self._conn.execute(
-            "SELECT * FROM session_summaries ORDER BY id DESC LIMIT 1",
+            f"SELECT * FROM session_summaries"  # noqa: S608
+            f" ORDER BY {self._ts_expr} DESC, id DESC LIMIT 1",
         ).fetchone()
         if row is None:
             return None
@@ -647,9 +677,14 @@ class MemoryStore:
         return self.get_latest_summary(), False
 
     def list_summaries(self, limit: int = 10) -> list[SessionSummary]:
-        """List session summaries, newest first."""
+        """List session summaries, newest first.
+
+        Newest-first by the effective timestamp (id DESC tiebreak), matching
+        :meth:`get_latest_summary` — see there for the PMSERV-159 rationale.
+        """
         rows = self._conn.execute(
-            "SELECT * FROM session_summaries ORDER BY id DESC LIMIT ?",
+            f"SELECT * FROM session_summaries"  # noqa: S608
+            f" ORDER BY {self._ts_expr} DESC, id DESC LIMIT ?",
             (limit,),
         ).fetchall()
         return [self._row_to_summary(r) for r in rows]

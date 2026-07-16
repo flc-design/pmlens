@@ -614,8 +614,9 @@ class TestBranchAwareSummaries:
         summary, matched = memory_store.get_latest_summary_by_branch("main")
         assert matched is True
         assert summary.session_id == "sess-old"
-        # The plain (id-ordered) latest still returns the highest-id row.
-        assert memory_store.get_latest_summary().session_id == "sess-new"
+        # PMSERV-159: the overall latest agrees — most recently *worked* wins
+        # there too (it used to return the highest-id row, sess-new).
+        assert memory_store.get_latest_summary().session_id == "sess-old"
 
     def test_nondestructive_branch_on_transient_miss(self, memory_store: MemoryStore):
         """A re-save with empty branch must NOT clobber a recorded branch
@@ -737,6 +738,40 @@ class TestBranchAwareSummaries:
             store.close()
 
 
+@pytest.fixture
+def migrated_store(tmp_path: Path):
+    """A MemoryStore whose session_summaries.updated_at is nullable with no
+    default (the *migrated* shape). The fresh ``memory_store`` fixture's
+    NOT NULL DEFAULT forbids injecting the NULL leak, so the read-defense
+    tests need this shape to reproduce the defect (PMSERV-158/159)."""
+    db_path = tmp_path / "migrated.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        """CREATE TABLE session_summaries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL UNIQUE, summary TEXT NOT NULL,
+            goals TEXT, tasks_done TEXT, decisions TEXT, pending TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            project TEXT NOT NULL, updated_at TEXT, branch TEXT
+        )"""
+    )
+    conn.commit()
+    conn.close()
+    store = MemoryStore(db_path, global_db_path=None)
+    yield store
+    store.close()
+
+
+def _stamp_summary(store: MemoryStore, session_id: str, created_at: str, updated_at) -> None:
+    """Deterministically stamp a row's timestamps (updated_at=None simulates
+    the migrated leak) so ordering does not depend on wall-clock timing."""
+    store._conn.execute(
+        "UPDATE session_summaries SET created_at = ?, updated_at = ? WHERE session_id = ?",
+        (created_at, updated_at, session_id),
+    )
+    store._conn.commit()
+
+
 class TestUpdatedAtNullRecallDefect:
     """PMSERV-158 / ADR-028: on *migrated* DBs the ALTER-added
     session_summaries.updated_at column is nullable with no default, so
@@ -751,39 +786,6 @@ class TestUpdatedAtNullRecallDefect:
     effective-timestamp read fixes independently.
     """
 
-    @pytest.fixture
-    def migrated_store(self, tmp_path: Path):
-        """A MemoryStore whose session_summaries.updated_at is nullable with no
-        default (the *migrated* shape). The fresh ``memory_store`` fixture's
-        NOT NULL DEFAULT forbids injecting the NULL leak, so the read-defense
-        tests need this shape to reproduce the defect."""
-        db_path = tmp_path / "migrated.db"
-        conn = sqlite3.connect(str(db_path))
-        conn.execute(
-            """CREATE TABLE session_summaries (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id TEXT NOT NULL UNIQUE, summary TEXT NOT NULL,
-                goals TEXT, tasks_done TEXT, decisions TEXT, pending TEXT,
-                created_at TEXT NOT NULL DEFAULT (datetime('now')),
-                project TEXT NOT NULL, updated_at TEXT, branch TEXT
-            )"""
-        )
-        conn.commit()
-        conn.close()
-        store = MemoryStore(db_path, global_db_path=None)
-        yield store
-        store.close()
-
-    @staticmethod
-    def _stamp(store: MemoryStore, session_id: str, created_at: str, updated_at) -> None:
-        """Deterministically stamp a row's timestamps (updated_at=None simulates
-        the migrated leak) so ordering does not depend on wall-clock timing."""
-        store._conn.execute(
-            "UPDATE session_summaries SET created_at = ?, updated_at = ? WHERE session_id = ?",
-            (created_at, updated_at, session_id),
-        )
-        store._conn.commit()
-
     # ── C1: get_latest_summary_by_branch ────────────────────
     def test_branch_latest_prefers_newer_null_row_over_older_resaved(
         self, migrated_store: MemoryStore
@@ -797,8 +799,8 @@ class TestUpdatedAtNullRecallDefect:
         migrated_store.save_session_summary(
             SessionSummary(session_id="sess-new", summary="new", project="p", branch="main")
         )
-        self._stamp(migrated_store, "sess-old", "2026-01-01 00:00:00", "2026-06-01 00:00:00")
-        self._stamp(migrated_store, "sess-new", "2026-07-01 00:00:00", None)
+        _stamp_summary(migrated_store, "sess-old", "2026-01-01 00:00:00", "2026-06-01 00:00:00")
+        _stamp_summary(migrated_store, "sess-new", "2026-07-01 00:00:00", None)
         summary, matched = migrated_store.get_latest_summary_by_branch("main")
         assert matched is True
         assert summary is not None
@@ -812,8 +814,8 @@ class TestUpdatedAtNullRecallDefect:
         migrated_store.save_session_summary(
             SessionSummary(session_id="sess-b", summary="b", project="p", branch="feat/y")
         )
-        self._stamp(migrated_store, "sess-a", "2026-01-01 00:00:00", "2026-06-01 00:00:00")
-        self._stamp(migrated_store, "sess-b", "2026-07-01 00:00:00", None)
+        _stamp_summary(migrated_store, "sess-a", "2026-01-01 00:00:00", "2026-06-01 00:00:00")
+        _stamp_summary(migrated_store, "sess-b", "2026-07-01 00:00:00", None)
         summary, matched = migrated_store.get_latest_summary_in_branches(["feat/x", "feat/y"])
         assert matched is True
         assert summary is not None
@@ -889,7 +891,7 @@ class TestUpdatedAtNullRecallDefect:
             INSERT INTO session_summaries (session_id, summary, created_at, updated_at, project)
                 VALUES ('r-empty', 'e', '2026-02-01 00:00:00', '', 'p');
             INSERT INTO session_summaries (session_id, summary, created_at, updated_at, project)
-                VALUES ('r-keep', 'k', '2026-03-01 00:00:00', '2026-09-09 09:09:09', 'p');
+                VALUES ('r-keep', 'k', '2026-03-01 00:00:00', '2026-03-09 09:09:09', 'p');
             """
         )
         conn.commit()
@@ -904,14 +906,14 @@ class TestUpdatedAtNullRecallDefect:
         try:
             assert _u(store, "r-null") == "2026-01-01 00:00:00"  # backfilled from created_at
             assert _u(store, "r-empty") == "2026-02-01 00:00:00"  # backfilled from created_at
-            assert _u(store, "r-keep") == "2026-09-09 09:09:09"  # non-empty preserved
+            assert _u(store, "r-keep") == "2026-03-09 09:09:09"  # non-empty (past) preserved
         finally:
             store.close()
         # Idempotent: a second open must not change already-healed values.
         store2 = MemoryStore(db_path, global_db_path=None)
         try:
             assert _u(store2, "r-null") == "2026-01-01 00:00:00"
-            assert _u(store2, "r-keep") == "2026-09-09 09:09:09"
+            assert _u(store2, "r-keep") == "2026-03-09 09:09:09"
         finally:
             store2.close()
 
@@ -948,6 +950,197 @@ class TestUpdatedAtNullRecallDefect:
             within = store.list_summaries_within(window_minutes=60)
             assert any(s.session_id == "sess-legacy" for s in within)
             assert store._has_updated_at_col is False
+        finally:
+            store.close()
+
+
+class TestNoTrackLatestSemanticAlignment:
+    """PMSERV-159 (PMSERV-158 follow-up): the no-track / fallback recency reads
+    must use the same effective-timestamp semantics as the branch-scoped
+    getters.
+
+    ``get_latest_summary`` / ``list_summaries`` ordered by bare ``id DESC``,
+    i.e. "most recently *started*" — but save_session_summary is an UPSERT
+    that preserves id, so an older session that saves again (= most recently
+    *worked*) was passed over by pm_recall's no-track path, pm_session_summary
+    get/list, and the track-miss fallback. Rows whose effective timestamps tie
+    (the common single-save-per-second flow) keep the old order via the
+    ``id DESC`` tiebreak, so only the UPSERT-reorder case changes behaviour.
+    """
+
+    def test_overall_latest_is_most_recently_worked_not_highest_id(self, memory_store: MemoryStore):
+        """Mirror of the branch-scoped UPSERT-reorder test for the overall
+        getter. RED before fix: ORDER BY id DESC returned sess-new."""
+        memory_store.save_session_summary(
+            SessionSummary(session_id="sess-old", summary="old", project="p", branch="main")
+        )
+        memory_store.save_session_summary(
+            SessionSummary(session_id="sess-new", summary="new", project="p", branch="main")
+        )
+        _stamp_summary(memory_store, "sess-old", "2026-01-01 00:00:00", "2026-07-01 00:00:00")
+        _stamp_summary(memory_store, "sess-new", "2026-02-01 00:00:00", "2026-02-01 00:00:00")
+        latest = memory_store.get_latest_summary()
+        assert latest is not None
+        assert latest.session_id == "sess-old"
+
+    def test_overall_latest_coalesces_null_updated_at(self, migrated_store: MemoryStore):
+        """On a migrated DB a single-save row (updated_at NULL) competes via its
+        created_at; an older re-saved row must not win just because its id is
+        higher. RED before fix: id DESC returned sess-early."""
+        migrated_store.save_session_summary(
+            SessionSummary(session_id="sess-late", summary="l", project="p", branch="main")
+        )
+        migrated_store.save_session_summary(
+            SessionSummary(session_id="sess-early", summary="e", project="p", branch="main")
+        )
+        # id 1 = sess-late, effective ts 2026-07-01 (created_at, NULL leak).
+        # id 2 = sess-early, effective ts 2026-03-01 (re-saved).
+        _stamp_summary(migrated_store, "sess-late", "2026-07-01 00:00:00", None)
+        _stamp_summary(migrated_store, "sess-early", "2026-02-01 00:00:00", "2026-03-01 00:00:00")
+        latest = migrated_store.get_latest_summary()
+        assert latest is not None
+        assert latest.session_id == "sess-late"
+
+    def test_list_summaries_orders_by_effective_timestamp(self, migrated_store: MemoryStore):
+        """Newest-first must mean effective timestamp, NULL-safe. Expected order
+        differs from both id ASC and id DESC so the assertion cannot pass by
+        accident. RED before fix: id DESC gave [s3, s2, s1]."""
+        for sid in ("s1", "s2", "s3"):
+            migrated_store.save_session_summary(
+                SessionSummary(session_id=sid, summary=sid, project="p", branch="main")
+            )
+        _stamp_summary(migrated_store, "s1", "2026-01-01 00:00:00", "2026-06-01 00:00:00")
+        _stamp_summary(migrated_store, "s2", "2026-07-01 00:00:00", None)
+        _stamp_summary(migrated_store, "s3", "2026-02-01 00:00:00", "2026-02-15 00:00:00")
+        ordered = [s.session_id for s in migrated_store.list_summaries()]
+        assert ordered == ["s2", "s1", "s3"]
+
+    def test_track_miss_fallback_uses_effective_timestamp(self, memory_store: MemoryStore):
+        """The branch/track getters fall back to the overall latest on a miss —
+        that fallback must carry the same most-recently-worked semantics.
+        RED before fix: both fallbacks returned sess-new (highest id)."""
+        memory_store.save_session_summary(
+            SessionSummary(session_id="sess-old", summary="old", project="p", branch="main")
+        )
+        memory_store.save_session_summary(
+            SessionSummary(session_id="sess-new", summary="new", project="p", branch="main")
+        )
+        _stamp_summary(memory_store, "sess-old", "2026-01-01 00:00:00", "2026-07-01 00:00:00")
+        _stamp_summary(memory_store, "sess-new", "2026-02-01 00:00:00", "2026-02-01 00:00:00")
+
+        summary, matched = memory_store.get_latest_summary_by_branch("does-not-exist")
+        assert matched is False
+        assert summary is not None
+        assert summary.session_id == "sess-old"
+
+        summary, matched = memory_store.get_latest_summary_in_branches(["nope-1", "nope-2"])
+        assert matched is False
+        assert summary is not None
+        assert summary.session_id == "sess-old"
+
+    def test_same_timestamp_ties_break_by_id_desc(self, memory_store: MemoryStore):
+        """Compatibility pin: rows whose effective timestamps tie keep the old
+        id DESC order, so the common single-save flow is unchanged."""
+        memory_store.save_session_summary(
+            SessionSummary(session_id="sess-1", summary="a", project="p", branch="main")
+        )
+        memory_store.save_session_summary(
+            SessionSummary(session_id="sess-2", summary="b", project="p", branch="main")
+        )
+        for sid in ("sess-1", "sess-2"):
+            _stamp_summary(memory_store, sid, "2026-05-01 00:00:00", "2026-05-01 00:00:00")
+        latest = memory_store.get_latest_summary()
+        assert latest is not None
+        assert latest.session_id == "sess-2"
+        assert [s.session_id for s in memory_store.list_summaries()] == ["sess-2", "sess-1"]
+
+    def test_open_clamps_future_updated_at_restoring_self_healing(self, tmp_path: Path):
+        """PMSERV-160: a row saved while the system clock was ahead (NTP skew,
+        restored VM snapshot) carries a future updated_at and would stay
+        "latest" under the effective-timestamp order until real time catches
+        up — the bare-id order it replaced self-healed on the very next save.
+        The open-time heal clamps future values to now so the next save wins
+        again. RED before fix: 'poisoned' keeps winning even after re-open."""
+        db_path = tmp_path / "skewed.db"
+        store = MemoryStore(db_path, global_db_path=None)
+        try:
+            store.save_session_summary(
+                SessionSummary(session_id="poisoned", summary="p", project="p", branch="main")
+            )
+            # Simulate that save having run a year ahead of real time.
+            store._conn.execute(
+                "UPDATE session_summaries SET updated_at = datetime('now', '+1 year')"
+                " WHERE session_id = 'poisoned'"
+            )
+            store._conn.commit()
+            store.save_session_summary(
+                SessionSummary(session_id="real-1", summary="r1", project="p", branch="main")
+            )
+            # The poison is live within this (pre-heal) open.
+            assert store.get_latest_summary().session_id == "poisoned"
+            real1_before = store._conn.execute(
+                "SELECT updated_at FROM session_summaries WHERE session_id = 'real-1'"
+            ).fetchone()["updated_at"]
+        finally:
+            store.close()
+
+        reopened = MemoryStore(db_path, global_db_path=None)
+        try:
+            row = reopened._conn.execute(
+                "SELECT updated_at, updated_at <= datetime('now') AS clamped"
+                " FROM session_summaries WHERE session_id = 'poisoned'"
+            ).fetchone()
+            assert row["clamped"] == 1  # future value healed to now
+            # Healthy rows are untouched by the clamp (heal is a no-op there).
+            real1_after = reopened._conn.execute(
+                "SELECT updated_at FROM session_summaries WHERE session_id = 'real-1'"
+            ).fetchone()["updated_at"]
+            assert real1_after == real1_before
+            # Self-healing parity with id DESC: the very next save wins.
+            reopened.save_session_summary(
+                SessionSummary(session_id="real-2", summary="r2", project="p", branch="main")
+            )
+            assert reopened.get_latest_summary().session_id == "real-2"
+        finally:
+            reopened.close()
+
+    def test_v0_readonly_db_latest_and_list_degrade_to_created_at(self, tmp_path: Path):
+        """On a pre-updated_at DB opened read-only ``_ts_expr`` degrades to
+        created_at: the getters must not raise "no such column" and must order
+        by created_at. RED before fix for the ordering half: id DESC returned
+        r-newer-id despite its older created_at."""
+        db_path = tmp_path / "v0.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.executescript(
+            """
+            CREATE TABLE memories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL,
+                type TEXT NOT NULL, content TEXT NOT NULL, task_id TEXT,
+                decision_id TEXT, tags TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')), project TEXT NOT NULL
+            );
+            CREATE TABLE session_summaries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL UNIQUE,
+                summary TEXT NOT NULL, goals TEXT, tasks_done TEXT, decisions TEXT,
+                pending TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                project TEXT NOT NULL
+            );
+            INSERT INTO session_summaries (session_id, summary, created_at, project)
+                VALUES ('r-newer-created', 'a', '2026-06-01 00:00:00', 'p');
+            INSERT INTO session_summaries (session_id, summary, created_at, project)
+                VALUES ('r-newer-id', 'b', '2026-01-01 00:00:00', 'p');
+            """
+        )
+        conn.commit()
+        conn.close()
+        store = MemoryStore(db_path, readonly=True)
+        try:
+            assert store._has_updated_at_col is False
+            latest = store.get_latest_summary()
+            assert latest is not None
+            assert latest.session_id == "r-newer-created"
+            ordered = [s.session_id for s in store.list_summaries()]
+            assert ordered == ["r-newer-created", "r-newer-id"]
         finally:
             store.close()
 

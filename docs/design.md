@@ -329,13 +329,24 @@ worktree ごとに独立するため、**1 ライン = 1 worktree** にすれば
 - 既存行は `branch IS NULL`。`get_latest_summary_by_branch(branch)` は無マッチ時に
   overall-latest へ graceful fallback し `(summary, track_matched=False)` を返すため、
   既存 DB でも初日から壊れない。
-- ブランチ別「最新」は `ORDER BY updated_at DESC, id DESC`（UPSERT で id が据え置かれる
-  ため「最後に触ったライン」を id 順では表せない）。
+- 「最新」=「最後に**作業した**行」。実効タイムスタンプ
+  `COALESCE(NULLIF(updated_at, ''), created_at) DESC, id DESC`（`_ts_expr`）で順序付ける
+  （UPSERT で id が据え置かれるため「最後に触った」を id 順では表せない。COALESCE は
+  migrated DB で ALTER 追加列の updated_at が NULL に残る問題への防御 = PMSERV-158）。
+  PMSERV-159 で branch 系 getter だけでなく overall の `get_latest_summary` /
+  `list_summaries`（pm_recall の no-track 経路・track ミス時 fallback・
+  pm_session_summary get/list・`pmlens context-inject` の Layer-1）も同じ順序に統一
+  （同値タイは id DESC で従来順を維持）。未来 updated_at（時計進み下の保存）は
+  毎オープンの heal で now にクランプし、「次の保存が勝つ」自己回復性を維持する
+  （PMSERV-160）。
 - UPSERT の branch 更新は `COALESCE(NULLIF(excluded.branch, ''), ...)` で非破壊化
   （検出失敗時の '' で既知ブランチを潰さない／実際の checkout 先には更新する）。
 - `track` は `pm_recall` レスポンスのトップレベルキー（`track` / `track_matched` /
   マッチ時 `track_branch`）として追加し、`last_session` の形（6 キー）は不変に保つ。
-  `track` 未指定時の応答は従来とバイト一致。
+  `track` 未指定時の応答は従来とバイト一致（PMSERV-124 導入時点。PMSERV-159 以降は
+  no-track の「最新」も effective-timestamp 順のため、作業順（実効タイムスタンプ順）と
+  id 順が食い違う場合 — 典型は UPSERT 再保存、まれに保存間の時計逆行 — に選ばれる行が
+  変わりうる。応答の形は不変）。
 
 #### logical track ラベル (PMSERV-125 / SynapticLedger ADR-035)
 
@@ -353,7 +364,7 @@ tracks:
 - **解決はクエリ時**（`server._resolve_track`）。`pm_recall(track="論文")` は
   `storage.load_tracks()` でラベル→glob を引き、`memory.list_distinct_branches()` の
   記録済みブランチを `fnmatch.fnmatchcase` で照合、マッチ集合の最新を
-  `memory.get_latest_summary_in_branches()`（`updated_at DESC, id DESC`）で返す。
+  `memory.get_latest_summary_in_branches()`（`_ts_expr DESC, id DESC`）で返す。
   → ライン内のブランチ rename/追加が継続性履歴を切らない（rename 耐性）。
 - **ラベル優先**: `track` が `tracks.yaml` のラベルなら glob 解決、そうでなければ raw
   branch として照合（v1 挙動）。マッピング未定義（ファイル無し）なら全て raw branch
