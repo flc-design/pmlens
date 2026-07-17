@@ -37,6 +37,32 @@
   Directory resolution enumerates-and-matches the drifting `~/.claude/projects`
   encoding, with an explicit `auto_memory_path` override. Physical
   cross-project ingest + Lens cross-project search are deferred to PMSERV-156.
+- **Recency-read expression indexes + session-summary pruning (PMSERV-162,
+  ADR-043)**: two expression indexes matching the effective-timestamp order
+  (`(COALESCE(...) DESC, id DESC)` and its branch-prefixed sibling) now
+  supply the recency reads directly instead of a full SCAN + TEMP B-TREE
+  sort. Created in the RW migration path only (never on read-only Lens
+  opens, ADR-028); they add no new writer requirement (the store already
+  needs SQLite >= 3.24 for UPSERT and creates FTS5, which shipped with
+  expression indexes in 3.9), but once created the DB file requires
+  SQLite >= 3.9 of any reader. `session_summaries` — the one table that
+  was never DELETEd — can now be pruned:
+  `pm_memory_cleanup(summaries_keep_latest=N)` keeps the newest N rows by
+  the same effective-timestamp order (never `MAX(id)`, which would
+  reintroduce the PMSERV-158 bug class on the pruning path) and always
+  additionally protects the newest row per branch group (`NULL`/`''` as
+  one pseudo-group) so branch-aware recall and `tracks.yaml` glob
+  resolution keep every line's last context — including on non-git
+  projects. The delete set is one SQL predicate evaluated atomically with
+  its counts in a `BEGIN IMMEDIATE` transaction (an adversarial review
+  reproduced a concurrent save being deleted by the snapshot-then-DELETE
+  draft, and a `too many SQL variables` abort on variable-limit-999
+  builds). `N >= 1` is enforced, deletions inside the ambiguity window
+  (the same env-configurable width pm_recall's detection uses) surface a
+  `summaries_pruned_recent` warning, and results nest under a `summaries`
+  key (memories results stay top-level; the one shape change is that a
+  zero-match non-dry-run now honestly reports `{"deleted": 0, "dry_run":
+  false}` instead of the legacy `{"would_delete": 0, "dry_run": true}`).
 - **Prompt Pack v2 — HTML output (PMSERV-155, ADR-041)**: `pm_prompt_pack`
   gains `format="html"` — a single, CDN-free (CSP-safe) file with a lane
   progress diagram (priority + `suggested_model` chips, `blocked_by` hard-dep
@@ -63,6 +89,42 @@
 
 ### Fixed
 
+- **Branch-aware recall returned a stale summary on migrated DBs
+  (PMSERV-158, ADR-028)**: the ALTER-added `session_summaries.updated_at`
+  column has no default, so single-saved rows were left `NULL` and every
+  read that ordered or filtered on the raw column silently skipped them —
+  `pm_recall(track=...)` returned an older re-saved summary as the branch
+  "latest" and ambiguity detection dropped recent sessions. Fixed with a
+  three-layer defense: the INSERT now always writes `updated_at`
+  explicitly, the open-time migration backfills `NULL`/empty values from
+  `created_at` idempotently on every RW open, and all recency reads order
+  by the effective timestamp `COALESCE(NULLIF(updated_at, ''),
+  created_at)` (`_ts_expr`), which also degrades to `created_at` when the
+  column is absent (pre-migration DB under read-only Lens).
+- **"Latest" semantics unified across all recency reads (PMSERV-159/160,
+  ADR-042)**: the no-track reads (`pm_recall` default path, track-miss
+  fallback, `pm_session_summary` get/list, context-inject Layer-1) ordered
+  by bare `id DESC` — "most recently *started*" — which diverges from
+  "most recently *worked*" under the id-preserving UPSERT. All recency
+  reads now order by `_ts_expr DESC, id DESC` (ties keep the legacy order).
+  Because real-time ordering loses the id order's implicit self-healing
+  against forward clock skew, a future `updated_at` (NTP skew, restored VM
+  snapshot) is now clamped to now by an idempotent open-time heal
+  (PMSERV-160) so the very next save wins again.
+- **Same-second saves no longer degrade to insertion order (PMSERV-161,
+  ADR-043)**: `session_summaries` timestamps are written with millisecond
+  precision (`strftime('%Y-%m-%d %H:%M:%f','now')`); second-precision
+  `datetime('now')` made saves within one wall-clock second tie on the
+  effective timestamp and fall back to the id tiebreak. The PMSERV-160
+  future-clamp compares and writes at the same precision (a
+  second-precision comparator would spuriously clamp legitimate ms rows
+  healed within their own second), and `list_summaries_within` gained the
+  `, id DESC` tiebreak the other recency reads already had. Legacy
+  second-precision values order correctly against new ms values
+  lexicographically, so no data migration is needed. Known accepted
+  residual while an old binary shares the DB: its second-precision saves
+  and clamp can invert/flatten ordering within a single second
+  (self-healing, gone once the old binary is redeployed).
 - **`pm_outbox_merge` implicit `.pm/memory.db` creation defect (PMSERV-147,
   ADR-039 T4)**: merging a pending outbox entry whose resolved project
   (`target_project` or the row's `source_project`) had not been `pm_init`'d

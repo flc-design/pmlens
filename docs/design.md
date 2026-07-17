@@ -338,7 +338,43 @@ worktree ごとに独立するため、**1 ライン = 1 worktree** にすれば
   pm_session_summary get/list・`pmlens context-inject` の Layer-1）も同じ順序に統一
   （同値タイは id DESC で従来順を維持）。未来 updated_at（時計進み下の保存）は
   毎オープンの heal で now にクランプし、「次の保存が勝つ」自己回復性を維持する
-  （PMSERV-160）。
+  （PMSERV-160）。ADR-042 に決定を記録。
+- タイムスタンプ精度（PMSERV-161）: 書き込みは
+  `strftime('%Y-%m-%d %H:%M:%f','now')`（ミリ秒・固定幅 `SS.SSS`）。
+  `datetime('now')` の秒精度では同一秒内の複数保存がタイになり「最後に作業」が
+  id DESC（=最後に開始）へ退化していた。旧行（秒精度）との比較は
+  `'HH:MM:SS'` が `'HH:MM:SS.mmm'` の真の接頭辞のため辞書式で正しく順序付く
+  （migration 不要の混在共存）。PMSERV-160 の future-clamp は**両辺**を同じ
+  ms 式に揃える（秒精度の比較子だと同一秒内の正当な ms 行を「未来」と誤判定して
+  spurious clamp → 同一秒内の順序破壊）。`list_summaries_within` にも id DESC
+  タイブレークを追加し、全 recency read で順序契約を完全統一。
+  **受容済み残余（新旧バイナリ併存時のみ）**: 旧バイナリの秒精度 save は同一秒内の
+  新バイナリ ms save より後でも下に順序付く（タイでなく真の逆転）。また旧バイナリの
+  秒精度 clamp は自オープン秒内の ms 行を秒精度に平坦化する（タイ化 → id DESC 退化
+  = 161 以前の挙動に一時退行）。いずれも1秒に有界・次の保存で自己回復し、
+  旧バイナリ再デプロイで消滅する（ADR-043）。
+- recency read の index（PMSERV-162）: `_ts_expr` は式のため列 index では順序供給
+  できず SCAN+TEMP B-TREE になっていた。式 index
+  `idx_session_summaries_effective_ts (COALESCE(...) DESC, id DESC)` と
+  `idx_session_summaries_branch_ts (branch, COALESCE(...) DESC, id DESC)` を
+  RW migration 経路のみで作成（readonly では作らない = RO 不変条件、ADR-028）。
+  旧 `(branch, updated_at DESC)` index は旧バイナリ併存時の drop/recreate churn を
+  避けるため当面残置。式 index の要求 SQLite ≥ 3.9 は書き手側には新規要求ゼロ
+  （FTS5 仮想テーブル = 3.9 導入を無条件作成済み、UPSERT = 3.24 要求のため、
+  ここに到達するビルドは構成上 3.9 を満たす。ランタイムガードは敵対的レビューで
+  死にコードと反証され不採用）。ただし作成後は **DB ファイル自体の最低リーダーが
+  SQLite ≥ 3.9 になる**（file-format commitment、ADR-043）。
+  `branch IN (...)`（logical track 解決）は index があっても TEMP B-TREE が残る
+  （SQLite は IN 分割横断のソートマージ不可）— per-branch スライスに有界で許容。
+- summaries 剪定（PMSERV-162）: `pm_memory_cleanup(summaries_keep_latest=N)` →
+  `cleanup_summaries()`。「最新 N」は recency read と同じ `_ts_expr DESC, id DESC`
+  順（MAX(id) 実装だと 158/159 のバグ類型が剪定経路で再発するため禁止）。保護規則:
+  branch グループ（NULL/'' は1擬似グループ）ごとの最新1行は常に残す（track= recall
+  と tracks.yaml glob 解決の生存保証。非 git プロジェクト = 全行 NULL branch でも
+  最新行が残る）。`keep_latest >= 1` 強制。30分 ambiguity window 内の行を消す場合は
+  warnings[] (`summaries_pruned_recent`) で通知。剪定は不可逆（UPSERT 対象の
+  session_id が後で再 save されると新 id で再 INSERT = 履歴リセット）。VACUUM は
+  しない（ファイルサイズは縮まない）。
 - UPSERT の branch 更新は `COALESCE(NULLIF(excluded.branch, ''), ...)` で非破壊化
   （検出失敗時の '' で既知ブランチを潰さない／実際の checkout 先には更新する）。
 - `track` は `pm_recall` レスポンスのトップレベルキー（`track` / `track_matched` /

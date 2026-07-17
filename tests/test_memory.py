@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import multiprocessing as mp
+import re
 import sqlite3
 import time
 from pathlib import Path
@@ -1087,7 +1088,11 @@ class TestNoTrackLatestSemanticAlignment:
         reopened = MemoryStore(db_path, global_db_path=None)
         try:
             row = reopened._conn.execute(
-                "SELECT updated_at, updated_at <= datetime('now') AS clamped"
+                # ms-precision comparator: the clamp writes HH:MM:SS.mmm, which
+                # lexicographically exceeds second-precision datetime('now')
+                # within the same second (PMSERV-161).
+                "SELECT updated_at,"
+                " updated_at <= strftime('%Y-%m-%d %H:%M:%f','now') AS clamped"
                 " FROM session_summaries WHERE session_id = 'poisoned'"
             ).fetchone()
             assert row["clamped"] == 1  # future value healed to now
@@ -1143,6 +1148,437 @@ class TestNoTrackLatestSemanticAlignment:
             assert ordered == ["r-newer-created", "r-newer-id"]
         finally:
             store.close()
+
+
+# ─── PMSERV-161: millisecond precision + within tiebreak ──
+
+_MS_FORMAT = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}$")
+
+
+class TestMillisecondPrecisionWrites:
+    """PMSERV-161: ``datetime('now')`` is second-precision, so several saves
+    within one wall-clock second tie on the effective timestamp and "most
+    recently worked" degrades to id DESC (= most recently *started*). The
+    write path switches to ``strftime('%Y-%m-%d %H:%M:%f','now')`` — fixed
+    width ``YYYY-MM-DD HH:MM:SS.SSS`` — which orders correctly against legacy
+    second-precision values under SQLite's lexicographic TEXT comparison
+    ('HH:MM:SS' is a strict prefix of 'HH:MM:SS.mmm')."""
+
+    def test_insert_writes_millisecond_updated_at(self, memory_store: MemoryStore):
+        """RED before fix: the INSERT wrote datetime('now') (no fraction)."""
+        memory_store.save_session_summary(
+            SessionSummary(session_id="sess-ms", summary="x", project="p")
+        )
+        row = memory_store._conn.execute(
+            "SELECT updated_at FROM session_summaries WHERE session_id = 'sess-ms'"
+        ).fetchone()
+        assert _MS_FORMAT.match(row["updated_at"]), row["updated_at"]
+
+    def test_upsert_refresh_writes_millisecond_updated_at(self, memory_store: MemoryStore):
+        """RED before fix: ON CONFLICT refreshed with datetime('now')."""
+        memory_store.save_session_summary(
+            SessionSummary(session_id="sess-ms", summary="x", project="p")
+        )
+        _stamp_summary(memory_store, "sess-ms", "2026-01-01 00:00:00", "2026-01-01 00:00:00")
+        memory_store.save_session_summary(
+            SessionSummary(session_id="sess-ms", summary="y", project="p")
+        )
+        row = memory_store._conn.execute(
+            "SELECT updated_at FROM session_summaries WHERE session_id = 'sess-ms'"
+        ).fetchone()
+        assert _MS_FORMAT.match(row["updated_at"]), row["updated_at"]
+
+    def test_resave_within_same_second_beats_newer_id(self, memory_store: MemoryStore):
+        """The semantic payoff: an older session re-saving after a newer
+        session started must win "latest" even when all saves land within the
+        same wall-clock second. Before the fix this tied at second precision
+        and id DESC picked the newer session (statistically RED — a save
+        sequence crossing a second boundary passed by luck, the flake seed the
+        PMSERV-159 review flagged). After the fix the 2ms sleeps guarantee
+        strictly increasing ms timestamps, so it is deterministically green."""
+        memory_store.save_session_summary(
+            SessionSummary(session_id="older", summary="a", project="p", branch="main")
+        )
+        time.sleep(0.002)
+        memory_store.save_session_summary(
+            SessionSummary(session_id="newer", summary="b", project="p", branch="main")
+        )
+        time.sleep(0.002)
+        memory_store.save_session_summary(
+            SessionSummary(session_id="older", summary="a-resaved", project="p", branch="main")
+        )
+        latest = memory_store.get_latest_summary()
+        assert latest is not None
+        assert latest.session_id == "older"
+
+
+class TestFutureClampMillisecondParity:
+    """PMSERV-161 × PMSERV-160: the open-time future-clamp must compare AND
+    write at the same millisecond precision as the write path. With the old
+    second-precision comparator, a legitimate row saved at HH:MM:SS.mmm and
+    healed within the same second compares '...SS.mmm' > '...SS' = TRUE and is
+    spuriously clamped — destroying its sub-second ordering and potentially
+    inverting order against an earlier save in the same second."""
+
+    def test_clamped_value_carries_millisecond_precision(self, tmp_path: Path):
+        """RED before fix: the clamp SET datetime('now') (second precision),
+        so healed rows fell back out of the ms format the write path uses."""
+        db_path = tmp_path / "skewed-ms.db"
+        store = MemoryStore(db_path, global_db_path=None)
+        try:
+            store.save_session_summary(
+                SessionSummary(session_id="poisoned", summary="p", project="p")
+            )
+            store._conn.execute(
+                "UPDATE session_summaries"
+                " SET updated_at = strftime('%Y-%m-%d %H:%M:%f','now','+1 year')"
+                " WHERE session_id = 'poisoned'"
+            )
+            store._conn.commit()
+        finally:
+            store.close()
+        reopened = MemoryStore(db_path, global_db_path=None)
+        try:
+            row = reopened._conn.execute(
+                "SELECT updated_at,"
+                " updated_at <= strftime('%Y-%m-%d %H:%M:%f','now') AS clamped"
+                " FROM session_summaries WHERE session_id = 'poisoned'"
+            ).fetchone()
+            assert row["clamped"] == 1
+            assert _MS_FORMAT.match(row["updated_at"]), row["updated_at"]
+        finally:
+            reopened.close()
+
+    def test_fresh_same_second_row_survives_heal_unclamped(self, tmp_path: Path):
+        """A row written milliseconds ago must survive the open-time heal
+        untouched. RED before fix whenever the reopen lands in the same second
+        as the write (the old comparator sees '...SS.mmm' > '...SS' and
+        clamps). The loop retries the rare boundary-crossing run — attempts
+        where the write and the heal fall in different seconds prove nothing
+        either way and are discarded."""
+        for _attempt in range(5):
+            db_path = tmp_path / f"fresh-{_attempt}.db"
+            store = MemoryStore(db_path, global_db_path=None)
+            try:
+                store.save_session_summary(
+                    SessionSummary(session_id="fresh", summary="f", project="p")
+                )
+                before = store._conn.execute(
+                    "SELECT updated_at FROM session_summaries WHERE session_id = 'fresh'"
+                ).fetchone()["updated_at"]
+            finally:
+                store.close()
+            reopened = MemoryStore(db_path, global_db_path=None)
+            try:
+                after_row = reopened._conn.execute(
+                    "SELECT updated_at, strftime('%Y-%m-%d %H:%M:%S','now') AS now_sec"
+                    " FROM session_summaries WHERE session_id = 'fresh'"
+                ).fetchone()
+            finally:
+                reopened.close()
+            same_second = before[:19] == after_row["now_sec"]
+            if not same_second:
+                continue  # boundary crossed — inconclusive, retry
+            assert after_row["updated_at"] == before
+            return
+        pytest.skip("could not land write+reopen in the same second after 5 attempts")
+
+
+class TestWithinWindowTiebreak:
+    """PMSERV-161: ``list_summaries_within`` was the only recency read missing
+    the ``, id DESC`` tiebreak, so same-timestamp ties came back in scan order
+    (id ASC in practice). RED before fix: ascending order."""
+
+    def _seed_tied_pair(self, store: MemoryStore) -> None:
+        for sid in ("sess-1", "sess-2"):
+            store.save_session_summary(
+                SessionSummary(session_id=sid, summary=sid, project="p", branch="main")
+            )
+        now = store._conn.execute("SELECT datetime('now') AS n").fetchone()["n"]
+        for sid in ("sess-1", "sess-2"):
+            _stamp_summary(store, sid, now, now)
+
+    def test_unscoped_window_ties_break_by_id_desc(self, memory_store: MemoryStore):
+        self._seed_tied_pair(memory_store)
+        ordered = [s.session_id for s in memory_store.list_summaries_within(window_minutes=30)]
+        assert ordered == ["sess-2", "sess-1"]
+
+    def test_branch_scoped_window_ties_break_by_id_desc(self, memory_store: MemoryStore):
+        self._seed_tied_pair(memory_store)
+        ordered = [
+            s.session_id
+            for s in memory_store.list_summaries_within(window_minutes=30, branches=["main"])
+        ]
+        assert ordered == ["sess-2", "sess-1"]
+
+
+# ─── PMSERV-162: expression indexes for recency reads ──
+
+
+class TestRecencyExpressionIndexes:
+    """PMSERV-162: the COALESCE ORDER BY cannot use the plain column indexes,
+    so every recall did a full SCAN + TEMP B-TREE sort. Two expression indexes
+    (created in the RW migration path only) supply the order directly."""
+
+    def test_expression_indexes_created_on_open(
+        self, memory_store: MemoryStore, migrated_store: MemoryStore
+    ):
+        """RED before fix: neither index exists (fresh AND migrated shapes)."""
+        for store in (memory_store, migrated_store):
+            names = {
+                r["name"]
+                for r in store._conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'index'"
+                ).fetchall()
+            }
+            assert "idx_session_summaries_effective_ts" in names
+            assert "idx_session_summaries_branch_ts" in names
+
+    def test_production_recency_sql_avoids_temp_btree(self, memory_store: MemoryStore):
+        """Traces the ACTUAL SQL the production getters execute and EXPLAINs
+        that — an earlier version EXPLAIN'd SQL rebuilt inside the test,
+        which could silently drift from the code under test (adversarial
+        review). Only the single-probe reads are asserted: ``branch IN``
+        queries keep a bounded TEMP B-TREE by design (SQLite cannot merge
+        index order across IN probes; documented in the migration)."""
+        memory_store.save_session_summary(
+            SessionSummary(session_id="s", summary="x", project="p", branch="main")
+        )
+        captured: list[str] = []
+        memory_store._conn.set_trace_callback(captured.append)
+        memory_store.get_latest_summary()
+        memory_store.get_latest_summary_by_branch("main")
+        memory_store.list_summaries_within(window_minutes=30)
+        memory_store._conn.set_trace_callback(None)
+        selects = [
+            q
+            for q in captured
+            if q.lstrip().upper().startswith("SELECT")
+            and "session_summaries" in q
+            and "ORDER BY" in q
+        ]
+        assert len(selects) >= 3, captured
+        for q in selects:
+            plan = " | ".join(
+                row["detail"]
+                for row in memory_store._conn.execute("EXPLAIN QUERY PLAN " + q).fetchall()
+            )
+            assert "USE TEMP B-TREE FOR ORDER BY" not in plan, (q, plan)
+            assert "idx_session_summaries" in plan, (q, plan)
+
+    def test_readonly_v0_open_creates_no_indexes_and_no_error(self, tmp_path: Path):
+        """The indexes reference updated_at, which pre-PMSERV-049 DBs lack;
+        creation lives in the RW-only migration path so a readonly open must
+        neither create them nor raise (RO invariant, ADR-028)."""
+        db_path = tmp_path / "v0-ro.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.executescript(
+            """
+            CREATE TABLE memories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL,
+                type TEXT NOT NULL, content TEXT NOT NULL, task_id TEXT,
+                decision_id TEXT, tags TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')), project TEXT NOT NULL
+            );
+            CREATE TABLE session_summaries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL UNIQUE,
+                summary TEXT NOT NULL, goals TEXT, tasks_done TEXT, decisions TEXT,
+                pending TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                project TEXT NOT NULL
+            );
+            """
+        )
+        conn.commit()
+        conn.close()
+        store = MemoryStore(db_path, readonly=True)
+        try:
+            names = {
+                r["name"]
+                for r in store._conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'index'"
+                ).fetchall()
+            }
+            assert "idx_session_summaries_effective_ts" not in names
+            assert "idx_session_summaries_branch_ts" not in names
+            assert store.get_latest_summary() is None
+        finally:
+            store.close()
+
+
+# ─── PMSERV-162: session_summaries pruning ─────────────
+
+
+class TestSummariesPruning:
+    """PMSERV-162: session_summaries was the only table never DELETEd, so it
+    grows without bound. ``cleanup_summaries`` prunes to the newest
+    ``keep_latest`` rows by the SAME effective-timestamp order the recency
+    reads use, with protection rules that keep branch-aware recall intact."""
+
+    def _seed(self, store: MemoryStore, rows: list[tuple[str, str | None, str, str]]) -> None:
+        for sid, branch, created, updated in rows:
+            store.save_session_summary(
+                SessionSummary(session_id=sid, summary=sid, project="p", branch=branch or "")
+            )
+            _stamp_summary(store, sid, created, updated)
+
+    def test_keep_latest_orders_by_effective_timestamp_not_id(self, migrated_store: MemoryStore):
+        """ "Newest" must be the ``(ts_expr DESC, id DESC)`` order — a MAX(id)
+        or bare-updated_at implementation would reintroduce the
+        PMSERV-158/159 bug class on the pruning path: an UPSERT-resaved row
+        (low id, recent updated_at) would be deleted in favor of a stale
+        higher-id row, and pm_recall(track=) would return week-old context."""
+        self._seed(
+            migrated_store,
+            [
+                ("resaved-old-id", "main", "2026-01-01 00:00:00", "2026-07-01 00:00:00"),
+                ("stale-new-id", "main", "2026-02-01 00:00:00", "2026-03-01 00:00:00"),
+            ],
+        )
+        result = migrated_store.cleanup_summaries(keep_latest=1, dry_run=False)
+        assert result["deleted"] == 1
+        remaining = [s.session_id for s in migrated_store.list_summaries()]
+        assert remaining == ["resaved-old-id"]
+
+    def test_newest_per_branch_group_protected(self, migrated_store: MemoryStore):
+        """keep_latest may retain MORE than N rows: the newest row of every
+        branch group survives — branch NULL/'' counts as one pseudo-group —
+        so tracks.yaml glob resolution (list_distinct_branches) and non-git
+        projects (all rows NULL branch) never lose a line's last context."""
+        self._seed(
+            migrated_store,
+            [
+                ("main-new", "main", "2026-01-01 00:00:00", "2026-07-10 00:00:00"),
+                ("main-old", "main", "2026-01-01 00:00:00", "2026-06-01 00:00:00"),
+                ("feat-old", "feat/x", "2026-01-01 00:00:00", "2026-01-05 00:00:00"),
+                ("nobranch-old", None, "2026-01-01 00:00:00", "2026-01-02 00:00:00"),
+            ],
+        )
+        result = migrated_store.cleanup_summaries(keep_latest=1, dry_run=False)
+        assert result["deleted"] == 1
+        remaining = {s.session_id for s in migrated_store.list_summaries()}
+        assert remaining == {"main-new", "feat-old", "nobranch-old"}
+        # The protected per-branch rows keep glob-based track resolution alive.
+        assert "feat/x" in migrated_store.list_distinct_branches()
+
+    def test_keep_latest_below_one_rejected(self, migrated_store: MemoryStore):
+        """On a non-git project every row has branch NULL, so the per-branch
+        protection is a single pseudo-group and keep_latest=0 would delete
+        EVERY summary — pm_recall context gone permanently. Reject it."""
+        self._seed(
+            migrated_store,
+            [("only", None, "2026-01-01 00:00:00", "2026-01-02 00:00:00")],
+        )
+        result = migrated_store.cleanup_summaries(keep_latest=0, dry_run=False)
+        assert "error" in result
+        assert migrated_store.get_latest_summary() is not None
+
+    def test_dry_run_counts_without_deleting(self, migrated_store: MemoryStore):
+        self._seed(
+            migrated_store,
+            [
+                ("s1", "main", "2026-01-01 00:00:00", "2026-03-01 00:00:00"),
+                ("s2", "main", "2026-01-01 00:00:00", "2026-04-01 00:00:00"),
+                ("s3", "main", "2026-01-01 00:00:00", "2026-05-01 00:00:00"),
+            ],
+        )
+        result = migrated_store.cleanup_summaries(keep_latest=1, dry_run=True)
+        assert result["dry_run"] is True
+        assert result["would_delete"] == 2
+        assert len(migrated_store.list_summaries()) == 3
+
+    def test_recent_deletions_counted_for_ambiguity_warning(self, memory_store: MemoryStore):
+        """Pruning rows still inside the 30-minute ambiguity window silently
+        disables concurrent-session detection (list_summaries_within), so the
+        count is surfaced for the tool layer to turn into a warnings[] entry."""
+        now = memory_store._conn.execute("SELECT datetime('now') AS n").fetchone()["n"]
+        self._seed(
+            memory_store,
+            [
+                ("active-1", "main", now, now),
+                ("active-2", "main", now, now),
+                ("ancient", "main", "2026-01-01 00:00:00", "2026-01-01 00:00:00"),
+            ],
+        )
+        result = memory_store.cleanup_summaries(keep_latest=1, dry_run=False)
+        # active-2 survives (top-1 = newest by id tiebreak within the tie);
+        # active-1 (recent) and ancient are deleted → exactly 1 recent deletion.
+        assert result["deleted"] == 2
+        assert result["recent_deleted"] == 1
+
+    def test_counts_and_delete_share_one_write_transaction(self, migrated_store: MemoryStore):
+        """TOCTOU guard (adversarial review, confirmed via cross-process
+        repro): the snapshot-then-DELETE implementation computed keep_ids in
+        autocommit mode, so a concurrent process's save committed between the
+        snapshot and the DELETE was itself deleted — even when it was a new
+        branch's only row, breaking the per-branch survival guarantee. The
+        fix evaluates counts and DELETE inside one BEGIN IMMEDIATE
+        transaction; this pins that the count queries already run inside an
+        open transaction (the old code showed in_transaction=False there)."""
+        self._seed(
+            migrated_store,
+            [
+                ("s1", "main", "2026-01-01 00:00:00", "2026-03-01 00:00:00"),
+                ("s2", "main", "2026-01-01 00:00:00", "2026-04-01 00:00:00"),
+            ],
+        )
+        conn = migrated_store._conn
+        in_txn_at_count: list[bool] = []
+
+        def trace(sql: str) -> None:
+            if sql.lstrip().upper().startswith("SELECT COUNT"):
+                in_txn_at_count.append(conn.in_transaction)
+
+        conn.set_trace_callback(trace)
+        try:
+            migrated_store.cleanup_summaries(keep_latest=1, dry_run=False)
+        finally:
+            conn.set_trace_callback(None)
+        assert in_txn_at_count and all(in_txn_at_count), in_txn_at_count
+
+    def test_prune_binds_one_variable_regardless_of_scale(self, migrated_store: MemoryStore):
+        """Variable-limit guard (adversarial review, confirmed): expanding
+        keep_ids into ``id NOT IN (?,...,?)`` aborted with 'too many SQL
+        variables' once keep_latest + branch protection exceeded
+        SQLITE_MAX_VARIABLE_NUMBER (999 on pre-3.32 builds) — even the
+        dry-run count crashed. The predicate now binds exactly one variable
+        (the LIMIT), pinned here by clamping the connection's variable limit
+        far below keep_latest."""
+        for i in range(30):
+            migrated_store.save_session_summary(
+                SessionSummary(session_id=f"s{i}", summary="x", project="p", branch="main")
+            )
+            _stamp_summary(
+                migrated_store, f"s{i}", "2026-01-01 00:00:00", f"2026-03-01 00:00:{i % 60:02d}"
+            )
+        conn = migrated_store._conn
+        old_limit = conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 5)
+        try:
+            result = migrated_store.cleanup_summaries(keep_latest=20, dry_run=True)
+        finally:
+            conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, old_limit)
+        assert result["would_delete"] == 10
+
+    def test_window_minutes_widens_recent_detection(self, memory_store: MemoryStore):
+        """The recent-deletion count must honor the caller's ambiguity window
+        (adversarial review: a hardcoded 30 minutes diverged from the
+        env-configurable window pm_recall's detection actually uses, so the
+        tool's warning silently missed covered deletions)."""
+        row = memory_store._conn.execute(
+            "SELECT datetime('now', '-45 minutes') AS m45, datetime('now') AS now"
+        ).fetchone()
+        self._seed(
+            memory_store,
+            [
+                ("mid-aged", "main", row["m45"], row["m45"]),
+                ("ancient", "main", "2026-01-01 00:00:00", "2026-01-01 00:00:00"),
+                ("newest", "main", "2026-01-02 00:00:00", row["now"]),
+            ],
+        )
+        narrow = memory_store.cleanup_summaries(keep_latest=1, dry_run=True, window_minutes=30)
+        wide = memory_store.cleanup_summaries(keep_latest=1, dry_run=True, window_minutes=120)
+        assert narrow["would_delete"] == wide["would_delete"] == 2
+        assert narrow["recent_would_delete"] == 0
+        assert wide["recent_would_delete"] == 1
 
 
 # ─── Server tool integration ───────────────────────────

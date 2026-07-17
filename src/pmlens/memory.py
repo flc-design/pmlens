@@ -170,6 +170,19 @@ CREATE TABLE IF NOT EXISTS session_summaries (
 );
 """
 
+# Millisecond-precision "now" for session_summaries timestamps (PMSERV-161).
+# SQLite's %f is "SS.SSS", so the format has no %S; output is fixed-width
+# "YYYY-MM-DD HH:MM:SS.SSS". Lexicographic TEXT comparison stays correct
+# against legacy second-precision values because 'HH:MM:SS' is a strict
+# prefix of 'HH:MM:SS.mmm'. datetime('now') is second-precision, which made
+# same-second saves tie on the effective timestamp and degrade "most
+# recently worked" to id DESC (= most recently started). The DDL defaults
+# above deliberately stay at datetime('now'): save_session_summary always
+# writes updated_at explicitly so the default never orders anything, and
+# keeping the DDL text identical avoids schema-text drift between DBs
+# created by old and new binaries (design review, PMSERV-161).
+_MS_NOW_SQL = "strftime('%Y-%m-%d %H:%M:%f','now')"
+
 _FTS_SCHEMA_SQL = """\
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
     content,
@@ -320,6 +333,7 @@ class MemoryStore:
         self._conn.commit()
         self._migrate_session_summaries_updated_at()
         self._migrate_session_summaries_branch()
+        self._migrate_session_summaries_recency_indexes()
 
     def _migrate_session_summaries_updated_at(self) -> None:
         """Add updated_at column for DBs created before PMSERV-049.
@@ -338,6 +352,11 @@ class MemoryStore:
           replaced self-healed on the very next save; the clamp restores that
           property at open time. Runs after the backfill so a future
           created_at copied into updated_at is clamped in the same pass.
+          Both sides of the clamp use the millisecond ``_MS_NOW_SQL``
+          (PMSERV-161): with a second-precision comparator a legitimate row
+          written at HH:MM:SS.mmm and healed within the same second compares
+          ``'...SS.mmm' > '...SS'`` = TRUE and would be spuriously clamped,
+          destroying its sub-second ordering.
 
         Always (re)creates the supporting index — safe because the column is
         guaranteed to exist after the ALTER guard.
@@ -353,8 +372,8 @@ class MemoryStore:
             " WHERE updated_at IS NULL OR updated_at = ''"
         )
         cur.execute(
-            "UPDATE session_summaries SET updated_at = datetime('now')"
-            " WHERE updated_at > datetime('now')"
+            f"UPDATE session_summaries SET updated_at = {_MS_NOW_SQL}"
+            f" WHERE updated_at > {_MS_NOW_SQL}"
         )
         cur.execute(
             "CREATE INDEX IF NOT EXISTS idx_session_summaries_updated_at"
@@ -371,11 +390,12 @@ class MemoryStore:
         ``get_latest_summary_by_branch`` falls back to the overall-latest for
         them so existing DBs keep working on day one. The composite index
         ``(branch, updated_at DESC)`` narrows the branch-scoped queries via its
-        equality prefix; since PMSERV-158 their ORDER BY is the effective-
-        timestamp *expression* (COALESCE), which no column index can order, so
-        SQLite finishes with a TEMP B-TREE sort over the per-branch slice —
-        measured negligible at this table's scale (PMSERV-159 review; an
-        expression index is tracked as PMSERV-162).
+        equality prefix; order is supplied by the expression indexes of
+        :meth:`_migrate_session_summaries_recency_indexes` (PMSERV-162). This
+        older index is deliberately KEPT: older binaries sharing the DB
+        recreate it IF NOT EXISTS on every open, so dropping it here would
+        churn (drop/recreate per alternating open) until the fleet is
+        single-version.
 
         The column is added as plain nullable ``TEXT`` (no NOT NULL / DEFAULT)
         because SQLite forbids ``ALTER ... ADD COLUMN NOT NULL`` without a
@@ -391,6 +411,53 @@ class MemoryStore:
         cur.execute(
             "CREATE INDEX IF NOT EXISTS idx_session_summaries_branch"
             " ON session_summaries(branch, updated_at DESC)"
+        )
+        self._conn.commit()
+
+    def _migrate_session_summaries_recency_indexes(self) -> None:
+        """Expression indexes matching the effective-timestamp order (PMSERV-162).
+
+        The recency reads order by ``COALESCE(NULLIF(updated_at, ''),
+        created_at) DESC, id DESC`` (``_ts_expr``; PMSERV-158/159), which no
+        plain column index can supply — without these, every recall does a
+        full SCAN + TEMP B-TREE sort (measured 74.6µs @ 66 rows, 2.1ms @ 50k
+        rows; session_summaries has no automatic pruning, so it only grows).
+        SQLite matches indexed expressions structurally, so the reads use
+        these by construction — the branch-prefixed one serves the
+        ``branch =`` getter, the bare one serves the overall getters and the
+        window query.
+
+        Residual sorts are accepted: ``branch IN (...)`` queries
+        (logical-track resolution) still finish with a TEMP B-TREE because
+        SQLite cannot merge index-ordered output across IN probes — bounded
+        to the per-branch slices, negligible (design review, PMSERV-162).
+
+        Must run AFTER both column migrations (the expressions reference
+        updated_at and branch). Runs only via ``_ensure_schema``, i.e. never
+        on readonly opens — pre-updated_at DBs under Lens keep degrading
+        ``_ts_expr`` to created_at and never see these indexes (ADR-028).
+        Write amplification: two extra index updates per save — one UPSERT
+        per session, negligible.
+
+        Version floor: expression indexes need SQLite >= 3.9.0, which adds
+        NOTHING for this store's writer — _ensure_schema already creates an
+        FTS5 virtual table unconditionally (FTS5 shipped in the same 3.9.0)
+        and save_session_summary uses UPSERT (>= 3.24), so any build that
+        reaches this point clears 3.9 by construction (adversarial review
+        refuted an earlier <3.9 runtime guard here as dead code). The real
+        commitment is for READERS of the file: once these indexes exist,
+        any tool linking SQLite < 3.9 fails with "malformed database
+        schema" on the whole DB — recorded in ADR-043.
+        """
+        cur = self._conn.cursor()
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_session_summaries_effective_ts"
+            " ON session_summaries(COALESCE(NULLIF(updated_at, ''), created_at) DESC, id DESC)"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_session_summaries_branch_ts"
+            " ON session_summaries"
+            "(branch, COALESCE(NULLIF(updated_at, ''), created_at) DESC, id DESC)"
         )
         self._conn.commit()
 
@@ -540,26 +607,29 @@ class MemoryStore:
         """Save a session summary via UPSERT.
 
         On first save: created_at defaults via the DDL; updated_at is written
-        explicitly as datetime('now') in the INSERT. PMSERV-158: the
-        migration-added updated_at column has no default (SQLite ``ALTER`` cannot
-        add ``NOT NULL DEFAULT datetime('now')``), so relying on the column
-        default left single-saved rows NULL on migrated DBs — always set it here.
+        explicitly in the INSERT. PMSERV-158: the migration-added updated_at
+        column has no default (SQLite ``ALTER`` cannot add ``NOT NULL DEFAULT``
+        with a non-constant), so relying on the column default left
+        single-saved rows NULL on migrated DBs — always set it here. Both
+        writes use the millisecond ``_MS_NOW_SQL`` (PMSERV-161) so saves
+        landing within the same wall-clock second still order by actual save
+        time instead of degrading to the id tiebreak.
         On re-save (same session_id): preserves created_at, refreshes updated_at.
         Returns the row id of the inserted-or-updated row.
         """
         self._conn.execute(
-            """INSERT INTO session_summaries
+            f"""INSERT INTO session_summaries
                (session_id, summary, goals, tasks_done, decisions, pending, project,
                 branch, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, {_MS_NOW_SQL})
                ON CONFLICT(session_id) DO UPDATE SET
                    summary = excluded.summary,
                    goals = excluded.goals,
                    tasks_done = excluded.tasks_done,
                    decisions = excluded.decisions,
                    pending = excluded.pending,
-                   updated_at = datetime('now'),
-                   branch = COALESCE(NULLIF(excluded.branch, ''), session_summaries.branch)""",
+                   updated_at = {_MS_NOW_SQL},
+                   branch = COALESCE(NULLIF(excluded.branch, ''), session_summaries.branch)""",  # noqa: S608
             (
                 summary.session_id,
                 summary.summary,
@@ -715,6 +785,10 @@ class MemoryStore:
         under ``pm_recall(track=...)``. An empty list matches nothing (returns
         ``[]``); ``None`` (default) is unscoped. Ignored if the branch column is
         absent (old DB under read-only Lens).
+
+        Ties on the effective timestamp break by ``id DESC`` like every other
+        recency read (PMSERV-161 — this was the one site missing the tiebreak,
+        leaving same-second ties in scan order).
         """
         if branches is not None:
             if not branches or not self._has_branch_col:
@@ -724,14 +798,14 @@ class MemoryStore:
                 f"""SELECT * FROM session_summaries
                     WHERE {self._ts_expr} >= datetime('now', ?)
                       AND branch IN ({placeholders})
-                    ORDER BY {self._ts_expr} DESC LIMIT ?""",  # noqa: S608
+                    ORDER BY {self._ts_expr} DESC, id DESC LIMIT ?""",  # noqa: S608
                 (f"-{window_minutes} minutes", *branches, limit),
             ).fetchall()
             return [self._row_to_summary(r) for r in rows]
         rows = self._conn.execute(
             f"""SELECT * FROM session_summaries
                WHERE {self._ts_expr} >= datetime('now', ?)
-               ORDER BY {self._ts_expr} DESC LIMIT ?""",  # noqa: S608
+               ORDER BY {self._ts_expr} DESC, id DESC LIMIT ?""",  # noqa: S608
             (f"-{window_minutes} minutes", limit),
         ).fetchall()
         return [self._row_to_summary(r) for r in rows]
@@ -895,14 +969,139 @@ class MemoryStore:
             params,  # noqa: S608
         ).fetchone()[0]
 
-        if dry_run or count == 0:
+        if dry_run:
             return {"would_delete": count, "dry_run": True}
+        if count == 0:
+            # Honest flag even when nothing matched: this used to return
+            # dry_run=True, which made the composite pm_memory_cleanup
+            # response claim "dry-run" while the summaries path had actually
+            # deleted rows (PMSERV-162 adversarial review).
+            return {"deleted": 0, "dry_run": False}
 
         # Delete from FTS first (triggers handle this, but be explicit for cleanup)
         cur.execute(f"DELETE FROM memories WHERE {where}", params)  # noqa: S608
         self._conn.commit()
 
         return {"deleted": count, "dry_run": False}
+
+    def cleanup_summaries(
+        self,
+        keep_latest: int,
+        dry_run: bool = False,
+        window_minutes: int = 30,
+    ) -> dict:
+        """Prune session_summaries down to the newest ``keep_latest`` rows.
+
+        session_summaries was the only table never DELETEd (memories has
+        :meth:`cleanup`), so it grows one row per session forever
+        (PMSERV-162). "Newest" is the effective-timestamp order every recency
+        read uses — ``(_ts_expr DESC, id DESC)``, NOT bare id or updated_at,
+        which would reintroduce the PMSERV-158/159 bug class on the pruning
+        path (an UPSERT-resaved row deleted in favor of a stale higher-id
+        row).
+
+        Protection rules — the call may therefore retain MORE than
+        ``keep_latest`` rows:
+
+        - The newest row of every branch group survives, with NULL/'' branch
+          as one pseudo-group. This keeps branch-aware recall (track=) and
+          tracks.yaml glob resolution (:meth:`list_distinct_branches`) able
+          to return each line's last context, including on non-git projects
+          where every row has no branch.
+        - ``keep_latest < 1`` is rejected: on an all-NULL-branch DB the
+          per-branch protection is a single pseudo-group, so 0 would delete
+          every summary and permanently erase pm_recall's context.
+
+        Deletion is irreversible in a subtle way: session_id is UNIQUE and
+        :meth:`save_session_summary` is an id-preserving UPSERT, so a pruned
+        session that later re-saves is re-INSERTed with a fresh id and
+        created_at — its history restarts. The DB file does not shrink (no
+        VACUUM here).
+
+        Returns counts plus ``recent_deleted`` / ``recent_would_delete`` —
+        deletions whose effective timestamp falls inside the ambiguity
+        window (``window_minutes``, the tool layer passes the same
+        env-configurable value pm_recall's detection uses): pruning those
+        silently disables concurrent-session detection, so the tool layer
+        surfaces a warnings[] entry.
+
+        Concurrency (adversarial review of PMSERV-162): the delete set is a
+        single SQL predicate (top-N subquery + correlated branch-latest
+        EXISTS, one bound variable total) evaluated inside one
+        ``BEGIN IMMEDIATE`` transaction with the counts. A snapshot-then-
+        ``DELETE ... id NOT IN (<ids>)`` implementation had two confirmed
+        defects: a concurrent process's save landing between the snapshot
+        and the DELETE was itself deleted (breaking the per-branch survival
+        guarantee), and the id list could exceed
+        SQLITE_MAX_VARIABLE_NUMBER (999 on pre-3.32 builds) and abort every
+        query including the dry-run count.
+        """
+        count_key = "would_delete" if dry_run else "deleted"
+        recent_key = "recent_would_delete" if dry_run else "recent_deleted"
+        if keep_latest < 1:
+            return {
+                count_key: 0,
+                recent_key: 0,
+                "protected": 0,
+                "dry_run": dry_run,
+                "error": "keep_latest must be >= 1 (0 would delete every summary)",
+            }
+        ts = self._ts_expr
+
+        def ts_of(alias: str) -> str:
+            if self._has_updated_at_col:
+                return f"COALESCE(NULLIF({alias}.updated_at, ''), {alias}.created_at)"
+            return f"{alias}.created_at"
+
+        # Delete-eligible = NOT in the newest keep_latest rows AND NOT the
+        # newest row of its branch group (a strictly newer same-group row
+        # exists). Exactly one bound variable (the LIMIT) regardless of
+        # table size or keep_latest.
+        predicate = (
+            f"id NOT IN (SELECT id FROM session_summaries ORDER BY {ts} DESC, id DESC LIMIT ?)"
+        )
+        if self._has_branch_col:
+            ts_outer = ts_of("session_summaries")
+            ts_inner = ts_of("t")
+            predicate += (
+                f" AND EXISTS (SELECT 1 FROM session_summaries AS t"
+                f" WHERE COALESCE(NULLIF(t.branch, ''), '') ="
+                f" COALESCE(NULLIF(session_summaries.branch, ''), '')"
+                f" AND ({ts_inner} > {ts_outer}"
+                f" OR ({ts_inner} = {ts_outer} AND t.id > session_summaries.id)))"
+            )
+        cur = self._conn.cursor()
+        # BEGIN IMMEDIATE takes the write lock up front so the counts and
+        # the DELETE see one consistent state and no concurrent save can
+        # slip in between them; the dry-run path uses a plain transaction
+        # for a consistent read snapshot without blocking writers.
+        cur.execute("BEGIN" if dry_run else "BEGIN IMMEDIATE")
+        try:
+            total = cur.execute("SELECT COUNT(*) FROM session_summaries").fetchone()[0]
+            count = cur.execute(
+                f"SELECT COUNT(*) FROM session_summaries WHERE {predicate}",  # noqa: S608
+                (keep_latest,),
+            ).fetchone()[0]
+            recent = cur.execute(
+                f"SELECT COUNT(*) FROM session_summaries"  # noqa: S608
+                f" WHERE {predicate} AND {ts} >= datetime('now', ?)",
+                (keep_latest, f"-{window_minutes} minutes"),
+            ).fetchone()[0]
+            if not dry_run:
+                cur.execute(
+                    f"DELETE FROM session_summaries WHERE {predicate}",  # noqa: S608
+                    (keep_latest,),
+                )
+            self._conn.commit()
+        except BaseException:
+            self._conn.rollback()
+            raise
+        return {
+            count_key: count,
+            recent_key: recent,
+            "protected": total - count,
+            "dry_run": dry_run,
+        }
 
     def search_global_ex(
         self,

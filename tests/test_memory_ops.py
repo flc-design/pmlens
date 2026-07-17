@@ -126,8 +126,12 @@ class TestMemoryCleanup:
 
     def test_cleanup_empty_db(self, memory_store: MemoryStore):
         result = memory_store.cleanup(keep_latest=5, dry_run=False)
-        # count==0 triggers the early return with would_delete key
-        assert result["would_delete"] == 0
+        # Zero matches must still report honestly as a non-dry-run: the old
+        # {"would_delete": 0, "dry_run": True} shape made the composite
+        # pm_memory_cleanup response claim "dry-run" while its summaries
+        # path had actually deleted rows (PMSERV-162 adversarial review).
+        assert result["deleted"] == 0
+        assert result["dry_run"] is False
 
 
 # ─── Server tool integration ─────────────────────────
@@ -211,6 +215,121 @@ class TestServerToolMemoryCleanup:
         stats = pm_memory_stats()
         assert stats["total_memories"] == 2
 
+    # ── PMSERV-162: summaries pruning via the tool layer ──
+
+    def _seed_summaries(self, tmp_path, rows):
+        """Pre-populate .pm/memory.db with stamped summaries (the tool will
+        reopen the same file through _get_memory_store)."""
+        from pmlens.models import SessionSummary
+
+        store = MemoryStore(tmp_path / ".pm" / "memory.db", global_db_path=None)
+        try:
+            for sid, updated in rows:
+                store.save_session_summary(
+                    SessionSummary(session_id=sid, summary=sid, project="p", branch="main")
+                )
+                store._conn.execute(
+                    "UPDATE session_summaries SET created_at = ?, updated_at = ?"
+                    " WHERE session_id = ?",
+                    ("2026-01-01 00:00:00", updated, sid),
+                )
+            store._conn.commit()
+        finally:
+            store.close()
+
+    def test_summaries_only_call_is_a_valid_criterion(self, tmp_path, monkeypatch):
+        """summaries_keep_latest alone must NOT hit the 'No cleanup criteria'
+        error (that check lives in the memories path). RED before fix: the
+        parameter does not exist."""
+        self._setup_project(tmp_path, monkeypatch)
+        from pmlens.server import pm_memory_cleanup
+
+        self._seed_summaries(
+            tmp_path,
+            [("s1", "2026-03-01 00:00:00"), ("s2", "2026-04-01 00:00:00")],
+        )
+        result = pm_memory_cleanup(summaries_keep_latest=1, dry_run=True)
+        assert "error" not in result
+        assert result["summaries"]["would_delete"] == 1
+        assert result["summaries"]["dry_run"] is True
+
+    def test_summaries_prune_composes_with_memories_cleanup(self, tmp_path, monkeypatch):
+        """Namespacing: memories result stays top-level (backward compat),
+        summaries result nests under 'summaries'."""
+        self._setup_project(tmp_path, monkeypatch)
+        from pmlens.server import pm_memory_cleanup, pm_remember
+
+        for i in range(3):
+            pm_remember(content=f"Memory {i}")
+        self._seed_summaries(
+            tmp_path,
+            [("s1", "2026-03-01 00:00:00"), ("s2", "2026-04-01 00:00:00")],
+        )
+        result = pm_memory_cleanup(keep_latest=1, summaries_keep_latest=1, dry_run=False)
+        assert result["deleted"] == 2
+        assert result["summaries"]["deleted"] == 1
+
+    def test_summaries_recent_prune_surfaces_warning(self, tmp_path, monkeypatch):
+        """Deleting a summary still inside the 30-minute ambiguity window
+        silently disables concurrent-session detection — the tool must say so
+        via warnings[] (repo convention: never silent side effects)."""
+        self._setup_project(tmp_path, monkeypatch)
+        from pmlens.server import pm_memory_cleanup
+
+        store = MemoryStore(tmp_path / ".pm" / "memory.db", global_db_path=None)
+        now = store._conn.execute("SELECT datetime('now') AS n").fetchone()["n"]
+        store.close()
+        self._seed_summaries(tmp_path, [("active-1", now), ("active-2", now)])
+        result = pm_memory_cleanup(summaries_keep_latest=1, dry_run=False)
+        assert result["summaries"]["deleted"] == 1
+        codes = [w["code"] for w in result.get("warnings", [])]
+        assert "summaries_pruned_recent" in codes
+
+    def test_summaries_keep_latest_below_one_errors_without_deleting(self, tmp_path, monkeypatch):
+        self._setup_project(tmp_path, monkeypatch)
+        from pmlens.server import pm_memory_cleanup
+
+        self._seed_summaries(tmp_path, [("only", "2026-03-01 00:00:00")])
+        result = pm_memory_cleanup(summaries_keep_latest=0, dry_run=False)
+        assert "error" in result["summaries"]
+
+    def test_summaries_warning_honors_env_ambiguity_window(self, tmp_path, monkeypatch):
+        """The warning must use the same env-configurable window pm_recall's
+        ambiguity detection uses (adversarial review: the hardcoded 30 made
+        the warning silently miss deletions inside a widened window)."""
+        self._setup_project(tmp_path, monkeypatch)
+        monkeypatch.setenv("PM_SERVER_RECALL_AMBIGUITY_WINDOW_MIN", "120")
+        from pmlens.server import pm_memory_cleanup
+
+        store = MemoryStore(tmp_path / ".pm" / "memory.db", global_db_path=None)
+        minus45 = store._conn.execute("SELECT datetime('now','-45 minutes') AS t").fetchone()["t"]
+        now = store._conn.execute("SELECT datetime('now') AS t").fetchone()["t"]
+        store.close()
+        self._seed_summaries(tmp_path, [("mid-aged", minus45), ("newest", now)])
+        result = pm_memory_cleanup(summaries_keep_latest=1, dry_run=False)
+        assert result["summaries"]["recent_deleted"] == 1
+        warning = next(w for w in result["warnings"] if w["code"] == "summaries_pruned_recent")
+        assert "120分" in warning["message"]
+
+    def test_composite_zero_match_memories_reports_honest_dry_run(self, tmp_path, monkeypatch):
+        """Composite-response contradiction (adversarial review, confirmed):
+        with dry_run=False, zero matching memories used to return the legacy
+        {"would_delete": 0, "dry_run": True} at top level while the summaries
+        path had ACTUALLY deleted rows — the response claimed a dry-run it
+        did not perform."""
+        self._setup_project(tmp_path, monkeypatch)
+        from pmlens.server import pm_memory_cleanup
+
+        self._seed_summaries(
+            tmp_path,
+            [("s1", "2026-03-01 00:00:00"), ("s2", "2026-04-01 00:00:00")],
+        )
+        result = pm_memory_cleanup(keep_latest=5, summaries_keep_latest=1, dry_run=False)
+        assert result["dry_run"] is False
+        assert result["deleted"] == 0
+        assert result["summaries"]["deleted"] == 1
+        assert result["summaries"]["dry_run"] is False
+
 
 # ─── PMSERV-049: session_summaries upsert / list_within / migration ─────
 
@@ -251,8 +370,11 @@ class TestSessionSummaryUpsert:
         original = memory_store.get_latest_summary()
         assert original is not None
         first_updated = original.updated_at
-        # On first save created_at == updated_at (both default datetime('now'))
-        assert original.updated_at == original.created_at
+        # On first save both stamp the same instant: created_at via the DDL
+        # default (second precision) and updated_at via the INSERT's ms
+        # expression (PMSERV-161) — 'now' is stable within one statement, so
+        # the second-precision value prefixes the millisecond one.
+        assert original.updated_at.startswith(original.created_at)
 
         import time
 

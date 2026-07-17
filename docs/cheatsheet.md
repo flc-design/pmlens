@@ -55,7 +55,7 @@ Claude Code session:
 | `pm_recall` | Recall memories / last session | `query?`, `task_id?`, `limit=5` |
 | `pm_memory_search` | Advanced search with filters | `query`, `type?`, `tags?`, `cross_project?` |
 | `pm_memory_stats` | Memory DB statistics | `project_path?` |
-| `pm_memory_cleanup` | Delete old memories | `older_than_days?`, `keep_latest?`, `dry_run=True` |
+| `pm_memory_cleanup` | Delete old memories / prune session summaries | `older_than_days?`, `keep_latest?`, `summaries_keep_latest?`, `dry_run=True` |
 | `pm_session_summary` | Save/get/list session summaries | `action="save"`, `summary?` |
 
 ### Recording

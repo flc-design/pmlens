@@ -1580,25 +1580,75 @@ def pm_memory_cleanup(
     keep_latest: int | None = None,
     session_id: str | None = None,
     dry_run: bool = True,
+    summaries_keep_latest: int | None = None,
     project_path: str | None = None,
 ) -> dict:
-    """Clean up old memories.
+    """Clean up old memories and/or prune session summaries.
 
     Specify at least one criterion:
       older_than_days: Delete memories older than N days.
       keep_latest: Keep only the latest N memories, delete rest.
       session_id: Delete all memories from a specific session.
+      summaries_keep_latest: Prune session summaries to the newest N
+        (PMSERV-162). N >= 1. May retain MORE than N rows: the newest row
+        per branch group (branch NULL/'' = one group) is always protected so
+        branch-aware recall keeps each line's last context. Note the two
+        "latest" definitions differ by design: memories' keep_latest is
+        id-ordered (insert-only table) while summaries prune by the
+        last-worked order the recency reads use (_ts_expr). The DB file does
+        not shrink on delete (no VACUUM).
 
     dry_run (default True): Preview what would be deleted without deleting.
     Set dry_run=False to actually delete.
+
+    Memories results stay top-level (backward compatible); summaries results
+    nest under "summaries". Pruning summaries still inside the 30-minute
+    ambiguity window adds a warnings[] entry (it disables concurrent-session
+    detection for those sessions).
     """
     store = _get_memory_store(project_path)
-    return store.cleanup(
-        older_than_days=older_than_days,
-        keep_latest=keep_latest,
-        session_id=session_id,
-        dry_run=dry_run,
+    memories_criteria = any(
+        value is not None for value in (older_than_days, keep_latest, session_id)
     )
+    result: dict = {}
+    if memories_criteria or summaries_keep_latest is None:
+        # Preserves the "No cleanup criteria specified" error on empty calls.
+        result = store.cleanup(
+            older_than_days=older_than_days,
+            keep_latest=keep_latest,
+            session_id=session_id,
+            dry_run=dry_run,
+        )
+    if summaries_keep_latest is not None:
+        # Same env-configurable window pm_recall's ambiguity detection uses
+        # (PM_SERVER_RECALL_AMBIGUITY_WINDOW_MIN) — a hardcoded 30 here made
+        # the warning silently miss deletions that the actual detection
+        # window still covered (PMSERV-162 adversarial review).
+        window = _get_ambiguity_window()
+        summaries_result = store.cleanup_summaries(
+            summaries_keep_latest, dry_run=dry_run, window_minutes=window
+        )
+        result["summaries"] = summaries_result
+        recent = summaries_result.get("recent_deleted") or summaries_result.get(
+            "recent_would_delete"
+        )
+        if recent:
+            result.setdefault("warnings", []).append(
+                _build_warning(
+                    level="warning",
+                    code="summaries_pruned_recent",
+                    message=(
+                        f"直近{window}分の ambiguity window 内のセッション要約 {recent} 件が"
+                        f"剪定対象です。該当セッションの並行セッション検知"
+                        f"（pm_recall の ambiguity 検出）が働かなくなります。"
+                    ),
+                    remediation=(
+                        "アクティブなセッションがある間は summaries_keep_latest を"
+                        "大きくするか、剪定を後で実行してください。"
+                    ),
+                )
+            )
+    return result
 
 
 # ─── Recording ───────────────────────────────────────
