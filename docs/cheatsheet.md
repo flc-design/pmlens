@@ -1,7 +1,7 @@
 # PM Lens Cheatsheet
 
 > **43 MCP tools** for Claude Code + Codex CLI project management.
-> Version 0.12.0 | Python 3.11+ | PyPI: `pmlens`
+> Version 0.12.1 | Python 3.11+ | PyPI: `pmlens`
 
 ---
 

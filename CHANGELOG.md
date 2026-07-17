@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-07-17
+
 ### Added
 
 - **Desktop outbox read surface (ADR-039 T1-T3, PMSERV-142/145/146)**:
