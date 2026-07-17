@@ -43,7 +43,7 @@ flip tasks to `in_progress`, surface `warnings[]`, …) is therefore re-homed to
 
 > **Prerequisite:** `uvx` (from [uv](https://docs.astral.sh/uv/)) on PATH. The
 > bundled MCP pulls `pm-server` from PyPI automatically (published — latest
-> 0.12.0), so no prior `pip install` is needed.
+> 0.12.1), so no prior `pip install` is needed.
 
 ### ⚠️ Existing manual-registration users — migrate first
 
@@ -100,8 +100,8 @@ hooks/MCP need the reload).
 
 ## Release vs dev `.mcp.json`
 
-- **Committed (`.mcp.json`)** — release form: `uvx pm-server@0.12.0`. Pinned for
-  reproducibility; `uvx --from "pm-server>=0.12.0" pm-server` for a floor instead.
+- **Committed (`.mcp.json`)** — release form: `uvx pm-server@0.12.1`. Pinned for
+  reproducibility; `uvx --from "pm-server>=0.12.1" pm-server` for a floor instead.
 - **Dev** — local source via `uv run --project <repo> pmlens serve`, supplied
   through `--mcp-config` in the isolation harness above (not committed).
 
