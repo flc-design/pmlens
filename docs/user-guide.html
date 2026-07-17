@@ -431,7 +431,10 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
 
   <h3>6.4 cleanup (定期メンテ)</h3>
 <pre><span class="prompt">&gt;</span> 30 日以上前の memory を dry-run で出して
-<span class="comment"># → pm_memory_cleanup(days=30, dry_run=True)</span>
+<span class="comment"># → pm_memory_cleanup(older_than_days=30, dry_run=True)</span>
+<span class="comment"># セッション要約の剪定: pm_memory_cleanup(summaries_keep_latest=20, dry_run=True)</span>
+<span class="comment">#   branch ごとの最新 1 行は常に保護（track= recall と tracks.yaml 解決の生存保証）</span>
+<span class="comment">#   直近の ambiguity window 内の要約が対象に入ると warnings[] で通知。VACUUM はしない</span>
 <span class="comment"># 危険なので default dry_run=True、actual=True で実削除</span></pre>
 </section>
 
@@ -625,7 +628,7 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
   <p class="faq-q">Q. <code>pm_recall</code> が前回 session を返さない</p>
   <p class="faq-a">A. 前回 <code>pm_session_summary</code> が呼ばれていない可能性。
      CLAUDE.md rule に「<code>/clear</code> 前に <code>pm_session_summary</code>」とあるが、
-     クラッシュ等で呼ばれない時は <code>~/.pm/memory.db</code> に session が残っているか
+     クラッシュ等で呼ばれない時は、プロジェクトの <code>.pm/memory.db</code> に session が残っているか
      <code>sqlite3 ... "select session_id from session_summaries"</code> で直接確認できる。</p>
 
   <p class="faq-q">Q. Desktop で <code>pm_outbox_remember</code> がない</p>
@@ -647,7 +650,7 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
 
   <p class="faq-q">Q. cross-project 検索が遅い</p>
   <p class="faq-a">A. <code>~/.pm/memory.db</code> が大きくなりすぎている可能性。
-     <code>pm_memory_stats</code> でサイズ確認後、<code>pm_memory_cleanup(days=180)</code> で古い observation を整理。</p>
+     <code>pm_memory_stats</code> でサイズ確認後、<code>pm_memory_cleanup(older_than_days=180)</code> で古い observation を整理。</p>
 
   <h3>13.1 もっと深く知りたい時</h3>
   <ul>

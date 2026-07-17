@@ -34,6 +34,20 @@ PM Lens は Claude Code のプロジェクト管理を自動化する MCP Server
 ### 分析
 - `pm_velocity` — ベロシティ計算（週次トレンド付き）
 - `pm_risks` — リスク・ブロッカー一覧
+
+### メモリ・セッション継続
+
+- `pm_remember` / `pm_recall` — セッションを跨ぐ記憶の保存・想起（`pm_recall(track=...)` で branch/作業ライン単位の前回文脈を復元、ADR-028。「最新 = 最後に作業したセッション」= ミリ秒精度の実効タイムスタンプ順、ADR-042/043）
+- `pm_session_summary` — セッション要約の保存・取得・一覧（/clear 前に必ず実行）
+- `pm_memory_search` / `pm_memory_stats` — 高度検索・統計
+- `pm_memory_cleanup` — 古い記憶の削除 / セッション要約の剪定（`summaries_keep_latest=N`。branch ごとの最新要約は常に保護）
+
+### 知識・ワークフロー・可視化
+
+- `pm_add_issue` — 親タスク配下の defect/enhancement 追加（defect は親を review に auto-revert）
+- `pm_record` / `pm_knowledge` / `pm_knowledge_query` — 構造化ナレッジレコード
+- `pm_workflow_start` / `pm_workflow_advance` / `pm_workflow_status` / `pm_workflow_list` / `pm_workflow_templates` / `pm_workflow_abandon` — テンプレートベースの開発ワークフロー
+- `pm_prompt_pack` — バックログを自己完結プロンプト集として書き出し（1タスク=1セッション、md/HTML）
 - `pm_blockers` — blocked タスク一覧
 
 ### 可視化
@@ -74,7 +88,7 @@ PM Lens は Claude Code のプロジェクト管理を自動化する MCP Server
 
 1. タスクを `blocked` に変更
 2. `blocked_by` に原因タスクを記録
-3. `pm_risks` に追加
+3. `pm_risks` で検知状況を確認する（読み取り専用の一覧ツール。blocked タスクは自動でリスクとして検出される）
 
 ## カレントプロジェクト検出
 

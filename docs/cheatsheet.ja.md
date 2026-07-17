@@ -1,6 +1,6 @@
 # PM Lens チートシート
 
-> Claude Code + Codex CLI 用プロジェクト管理 MCP Server — **42 ツール**
+> Claude Code + Codex CLI 用プロジェクト管理 MCP Server — **43 ツール**
 > Version 0.12.0 | Python 3.11+ | PyPI: `pmlens`
 
 ---
@@ -35,6 +35,7 @@ Claude Code セッション:
 | `pm_update_rules` | CLAUDE.md / AGENTS.md のルールを更新（multi-host、ADR-008） | `project_path?, target?, dry_run?` |
 | `pm_update_claudemd` | レガシー alias: `pm_update_rules(target="claude-code")` (v0.6.0 以降 deprecated) | `project_path?` |
 | `pm_dashboard` | HTML/テキスト ダッシュボード生成 | `format="html"` |
+| `pm_prompt_pack` | バックログを自己完結プロンプト集として書き出し（1タスク=1セッション） | `format="md"\|"html"`, `group_by?`, `filter_*?`, `task_ids?` |
 
 ### タスク管理
 
@@ -52,11 +53,32 @@ Claude Code セッション:
 | ツール | 説明 | 主要パラメータ |
 |--------|------|----------------|
 | `pm_remember` | 記憶を保存（作業中タスクに自動紐付け） | `content`, `type="observation"`, `tags?` |
-| `pm_recall` | 記憶を想起 / 前回セッション取得 | `query?`, `task_id?`, `limit=5` |
+| `pm_recall` | 記憶を想起 / 前回セッション取得（`track=` でブランチ/作業ライン単位） | `query?`, `task_id?`, `track?`, `limit=5` |
 | `pm_memory_search` | 詳細検索（複数フィルタ対応） | `query`, `type?`, `tags?`, `cross_project?` |
 | `pm_memory_stats` | メモリDB統計情報 | `project_path?` |
-| `pm_memory_cleanup` | 古い記憶の削除 | `older_than_days?`, `keep_latest?`, `dry_run=True` |
+| `pm_memory_cleanup` | 古い記憶の削除 / セッション要約の剪定 | `older_than_days?`, `keep_latest?`, `summaries_keep_latest?`, `dry_run=True` |
 | `pm_session_summary` | セッション要約の保存/取得/一覧 | `action="save"`, `summary?` |
+
+> **「最新」の定義（ADR-042/043）:** 全 recency read で「最新 = 最後に**作業した**セッション」。実効タイムスタンプ・ミリ秒精度で順序付けるため、再保存（UPSERT）や同一秒内の連続保存でも正しく最新が選ばれる。`track=` にはブランチ名または `.pm/tracks.yaml` の論理ラベルを渡せる（未一致時は `track_matched: false` で overall-latest にフォールバック）。
+
+### Desktop Outbox (ADR-019/039)
+
+| ツール | 説明 | 主要パラメータ |
+|------|-------------|------------|
+| `pm_outbox_remember` | Desktop outbox へ記憶を保存（クロスホストブリッジ） | `content`, `type?`, `tags?` |
+| `pm_outbox_log` | Desktop outbox へログを保存 | `entry`, `category?` |
+| `pm_outbox_pending` | 未マージ outbox エントリの一覧（read-pure） | `filter_project?` |
+| `pm_outbox_merge` | outbox エントリをプロジェクトストアへ昇格 | `ids?`, `target_project?` |
+| `pm_outbox_reject` | outbox エントリを却下 | `ids` |
+
+### X コンテンツパイプライン (ADR-024)
+
+| ツール | 説明 | 主要パラメータ |
+|------|-------------|------------|
+| `pm_draft_x` | 記録済み知見から build-in-public X スレッドを下書き | `source?`, `angle?` |
+| `pm_redact_draft` | 下書きを redact（手動投稿前の唯一の安全層） | `draft_id` |
+| `pm_reject_draft` | 下書きを却下 | `draft_id` |
+| `pm_x_drafts_pending` | redact 済みで人手レビュー待ちの下書き一覧 | _(なし)_ |
 
 ### 記録・分析
 
@@ -73,6 +95,7 @@ Claude Code セッション:
 |--------|------|----------------|
 | `pm_record` | 構造化された知識を記録 | `category`, `title`, `findings?`, `confidence="medium"` |
 | `pm_knowledge` | 知識レコードの検索・更新 | `action="list"`, `category?`, `status?`, `tag?` |
+| `pm_knowledge_query` | 読み取り専用のナレッジクエリ（Lens 対応、ADR-018） | `action="list"`, `category?`, `status?`, `tag?` |
 
 ### ワークフロー
 
@@ -273,7 +296,8 @@ Claude:   → pm_workflow_advance(skip=True)
 ユーザー: どんなワークフローテンプレートがある？
 Claude:   → pm_workflow_templates()
           brainstorming (8 steps, builtin), discovery (5 steps, builtin),
-          development (9 steps, builtin), super-research (6 steps, builtin)
+          development (9 steps, builtin), super-research (6 steps, builtin),
+          content-pipeline (4 steps, builtin), docker-dev (6 steps, builtin)
 ```
 
 ### カスタムテンプレート

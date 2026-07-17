@@ -89,7 +89,7 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
 <header class="hero">
   <h1>PM Lens — Architecture &amp; Behavior</h1>
   <div class="subtitle">Claude Code 用プロジェクト管理 MCP サーバーの全体機能・データフロー・状態遷移マップ</div>
-  <div class="meta">バージョン 0.12.0 (2026-06-15 時点) · 42 MCP tools · 15 RO + 2 outbox-RW + 25 full-RW · 1,033 tests · MIT</div>
+  <div class="meta">バージョン 0.12.0 (2026-07-17 時点) · 43 MCP tools · 15 RO + 2 outbox-RW + 26 full-RW · 1,336 tests · MIT</div>
   <div class="meta">関連ドキュメント: <a href="user-guide.html">User Guide (CLI &amp; UX Tips)</a> · <a href="workflow-guide.html">Workflow Guide (作り方)</a> · <a href="cheatsheet.ja.md">Cheatsheet (ja)</a></div>
 </header>
 
@@ -257,7 +257,7 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
 
 <section class="card" id="tools">
   <h2>3. MCP Tool Catalog</h2>
-  <p>42 個の MCP ツールがカテゴリ別に提供される。配布モードによって登録される ツール集合が異なる:
+  <p>43 個の MCP ツールがカテゴリ別に提供される。配布モードによって登録される ツール集合が異なる:
      <span class="badge badge-ro">RO</span> は Lens モード (<code>PM_LENS=1</code>) で利用可能、
      <span class="badge" style="background:#ede9fe;color:#6d28d9">OUTBOX</span> は Lens + <code>PM_DESKTOP_WRITE=1</code> で追加開放される Desktop Outbox 書込み tool、
      <span class="badge badge-rw">RW</span> は full PM Lens (Claude Code / Codex 配布) のみ。</p>
@@ -295,7 +295,8 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
     <tr><td><code>pm_recall</code></td><td>last session + recent memories + FTS5 検索</td><td><span class="badge badge-ro">RO</span></td></tr>
     <tr><td><code>pm_memory_search</code></td><td>tags / type / task_id / cross_project 検索</td><td><span class="badge badge-ro">RO</span></td></tr>
     <tr><td><code>pm_memory_stats</code></td><td>type 別カウント・最古/最新タイムスタンプ</td><td><span class="badge badge-ro">RO</span></td></tr>
-    <tr><td><code>pm_memory_cleanup</code></td><td>古い memory の dry-run / actual 削除</td><td><span class="badge badge-rw">RW</span></td></tr>
+    <tr><td><code>pm_memory_cleanup</code></td><td>古い memory の削除 + <code>summaries_keep_latest=N</code> でセッション要約を剪定（branch ごとの最新 1 行は常に保護・dry-run 対応。recency 式 index は RW open でのみ作成され、作成後は memory.db の読み手にも SQLite ≥ 3.9 が必要 — ADR-043）</td><td><span class="badge badge-rw">RW</span></td></tr>
+    <tr><td><code>pm_prompt_pack</code></td><td>バックログタスク → 自己完結セッションプロンプト生成（md/HTML、レーン進捗図 + カード毎 Copy、ADR-041。読み経路 RO・出力は .pm/exports/ のみ）</td><td><span class="badge badge-rw">RW</span></td></tr>
     <tr><td><code>pm_log</code></td><td>daily log エントリ追記 (progress/decision/blocker/milestone)</td><td><span class="badge badge-rw">RW</span></td></tr>
     <tr><td><code>pm_session_summary</code></td><td>session summary の save/get/list</td><td><span class="badge badge-rw">RW</span></td></tr>
 
@@ -322,7 +323,7 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
     <tr><td><code>pm_workflow_list</code></td><td>active/completed/paused/abandoned 一覧</td><td><span class="badge badge-ro">RO</span></td></tr>
     <tr><td><code>pm_workflow_templates</code></td><td>builtin + custom テンプレート一覧</td><td><span class="badge badge-ro">RO</span></td></tr>
   </table>
-  <p class="muted">15 RO + 2 OUTBOX-RW + 25 Full-RW = 42 ツール (2026-06-15, v0.12.0)。Lens 配布では RO_ALLOWLIST 外の
+  <p class="muted">15 RO + 2 OUTBOX-RW + 26 Full-RW = 43 ツール (2026-07-17, v0.12.0)。Lens 配布では RO_ALLOWLIST 外の
      ツールが FastMCP に未登録 = 構造的不変条件 (ADR-015/017/018)。OUTBOX 2 ツールは <code>PM_DESKTOP_WRITE=1</code>
      が追加で立った時のみ登録され、main <code>.pm/memory.db</code> は touch しない (ADR-019)。</p>
 </section>
@@ -392,7 +393,7 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
     <text x="260" y="264" text-anchor="middle" fill="#666" font-size="10">pm_memory_search, pm_dashboard, pm_workflow_status …</text>
 
     <rect x="460" y="210" width="320" height="60" rx="6" fill="#fee2e2" stroke="#dc2626" stroke-width="1.5"/>
-    <text x="620" y="232" text-anchor="middle" font-weight="700">FastMCP 未登録 (27 tools)</text>
+    <text x="620" y="232" text-anchor="middle" font-weight="700">FastMCP 未登録 (28 tools)</text>
     <text x="620" y="250" text-anchor="middle" fill="#666" font-size="10">pm_add_task, pm_update_task, pm_log, pm_remember,</text>
     <text x="620" y="264" text-anchor="middle" fill="#666" font-size="10">pm_init, pm_cleanup, pm_workflow_start, pm_outbox_pending …</text>
 
@@ -631,7 +632,7 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
     <tr><th></th><th>PyPI <code>pmlens</code></th><th>.mcpb bundle (Lens)</th><th>.mcpb + PM_DESKTOP_WRITE</th></tr>
     <tr><td><strong>対象 host</strong></td><td>Claude Code (CLI) / Codex CLI</td><td>Claude Cowork / その他 viewer</td><td>Claude Desktop (Phase 2 bridge)</td></tr>
     <tr><td><strong>インストール</strong></td><td><code>pip install pm-server</code> &rarr; <code>pmlens install</code></td><td>.mcpb ファイルを host に drag &amp; drop</td><td>.mcpb + manifest が <code>PM_DESKTOP_WRITE=1</code> を auto-propagate (PMSERV-100)</td></tr>
-    <tr><td><strong>登録 tools</strong></td><td>Full RW (42 tools)</td><td>Lens RO (15 tools)</td><td>RO 15 + OUTBOX-RW 2 = 17 tools</td></tr>
+    <tr><td><strong>登録 tools</strong></td><td>Full RW (43 tools)</td><td>Lens RO (15 tools)</td><td>RO 15 + OUTBOX-RW 2 = 17 tools</td></tr>
     <tr><td><strong>環境変数</strong></td><td>未設定</td><td><code>PM_LENS=1</code></td><td><code>PM_LENS=1, PM_DESKTOP_WRITE=1</code></td></tr>
     <tr><td><strong>SQLite モード</strong></td><td>RW main + outbox</td><td><code>?mode=ro&amp;immutable=1</code> main / outbox 不触</td><td>main は RO 不変、outbox <code>~/.pm/desktop/desktop.db</code> は append-only RW</td></tr>
     <tr><td><strong>同一バイナリ?</strong></td><td>はい — 配布物は 1 種類、env で role gating</td><td colspan="2" style="text-align:center">←</td></tr>
@@ -751,7 +752,7 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
 </section>
 
 <footer style="text-align: center; color: var(--muted); font-size: 12px; margin: 24px 0;">
-  Generated 2026-06-15 · PM Lens v0.12.0 · Phase 2 Desktop Outbox (ADR-019) shipped · 1,033 tests · 42 MCP tools
+  Generated 2026-06-15, counts refreshed 2026-07-17 · PM Lens v0.12.0 · Phase 2 Desktop Outbox (ADR-019) shipped · 1,336 tests · 43 MCP tools
 </footer>
 
 </main>

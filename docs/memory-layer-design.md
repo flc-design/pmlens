@@ -6,6 +6,11 @@
 **Status**: Implemented (実装完了)
 **Based on**: claude-mem (50K stars) の機能分析 + PM Lens 既存基盤の活用
 
+> **注**: 本書は v0.4.0 実装時点の設計スナップショット。`session_summaries` はその後
+> `updated_at` / `branch` 列・ミリ秒精度タイムスタンプ・recency 式 index が追加されている
+> (PMSERV-158〜162)。現行スキーマと recency 意味論（「最新 = 最後に作業した行」）は
+> `docs/design.md` の ADR-028/042/043 節と CHANGELOG を参照。
+
 ---
 
 ## 変更履歴

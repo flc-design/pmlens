@@ -36,11 +36,11 @@ Track tasks, visualize progress, record decisions — through natural language i
 ## Features
 
 - **🔌 Multi-host first** — registers in **Claude Code AND Codex CLI** with one command (`pmlens install --target=auto`). Project rules sync to both `CLAUDE.md` and `AGENTS.md` automatically (ADR-008). Switch hosts mid-project without losing context — same `.pm/` data, same workflows
-- **42 MCP tools** — task CRUD, child issues, status, blockers, velocity, dashboard, ADR, session memory, workflows, knowledge records, multi-host rules injection, cross-host outbox bridge, build-in-public X drafts, and more
+- **43 MCP tools** — task CRUD, child issues, status, blockers, velocity, dashboard, prompt packs, ADR, session memory, workflows, knowledge records, multi-host rules injection, cross-host outbox bridge, build-in-public X drafts, and more
 - **Workflow engine** — template-based development workflows with loops, user gates, and chaining (Discovery → Development)
 - **Knowledge records** — structured findings between casual memory and formal ADR (research, tradeoff, spec, etc.)
 - **Super Research skill** — 3 parallel agents (Domain Expert, Critical Analyst, Lateral Thinker) + Depth Check (6 dimensions) + Fact Check + Cross-Check
-- **Session memory** — SQLite + FTS5 full-text search. Memories persist across sessions and link to tasks/decisions
+- **Session memory** — SQLite + FTS5 full-text search. Memories persist across sessions and link to tasks/decisions. Branch-aware recall (`pm_recall(track=...)`, ADR-028) restores the last context of a specific work line; "latest" always means *most recently worked* — millisecond-precision, index-backed, and self-healing against clock skew (ADR-042/043)
 - **Cross-project search** — search memories across all projects via a global index
 - **Natural language** — say "進捗は？" or "what's next?" instead of memorizing commands
 - **Zero configuration** — `pip install` + `pmlens install`, then just say "PM初期化して"
@@ -229,7 +229,7 @@ dataclasses, atomic-write helpers).
 
 ---
 
-## MCP Tools (42 tools)
+## MCP Tools (43 tools)
 
 ### Project Management
 
@@ -263,6 +263,7 @@ dataclasses, atomic-write helpers).
 | Tool | Description |
 |---|---|
 | `pm_dashboard` | HTML dashboard with workflow progress + knowledge map (single project or portfolio) |
+| `pm_prompt_pack` | Export backlog tasks as a self-contained Markdown/HTML prompt pack — 1 task = 1 fresh implementation session, with linked lessons and ADRs inlined (ADR-041) |
 
 ### Discovery
 
@@ -277,11 +278,32 @@ dataclasses, atomic-write helpers).
 | Tool | Description |
 |---|---|
 | `pm_remember` | Save a memory with auto task linking (observation / insight / lesson) |
-| `pm_recall` | Recall memories — FTS5 search, by task, or cross-project |
+| `pm_recall` | Recall memories — FTS5 search, by task, cross-project, or branch-aware (`track=` restores a specific work line's last session, ADR-028) |
 | `pm_session_summary` | Save / get / list session summaries for continuity |
 | `pm_memory_search` | Advanced search with type, tag, and task filters |
 | `pm_memory_stats` | Memory DB statistics (total, by type, DB size) |
-| `pm_memory_cleanup` | Clean up old memories (dry-run supported) |
+| `pm_memory_cleanup` | Clean up old memories / prune session summaries (`summaries_keep_latest=N`, keeps every branch's latest context; dry-run supported) |
+
+**What "latest" means (ADR-042/043).** Every recency read — `pm_recall` (with or
+without `track`), `pm_session_summary` get/list, and the CLI context injection —
+returns the session you last **worked on**, not the one you last started.
+Re-saving an existing summary moves it back to the top, and timestamps are
+recorded with millisecond precision, so multiple saves within the same second
+stay correctly ordered. A summary saved while the system clock was ahead (NTP
+skew, restored VM snapshot) is clamped back to now on the next open, so "the
+next save wins" always self-heals — nothing to configure. Recency lookups are
+index-backed and stay fast as summaries accumulate; the indexes are created
+only on read-write opens (never by read-only Lens viewers) and require
+SQLite >= 3.9 of any reader of the DB file — a bar already cleared by anything
+that reads the FTS5 tables.
+
+**Pruning session summaries.** `pm_memory_cleanup(summaries_keep_latest=N)`
+keeps the newest N summaries (same last-worked order recall uses) and always
+additionally keeps the newest summary of every branch group — so `track=`
+recall and `tracks.yaml` glob resolution never lose a line's last context,
+even on non-git projects. `N >= 1` is enforced, dry-run is the default, and
+deleting summaries still inside the recent ambiguity window surfaces a
+`warnings[]` entry. Pruning is irreversible and does not shrink the DB file.
 
 ### Knowledge Records
 
@@ -591,6 +613,9 @@ pmlens serve               # Start MCP server (called by Claude Code automatical
 pmlens discover .          # Scan for projects with .pm/ directories
 pmlens status              # Show project status from terminal
 pmlens context-inject      # Print session context to stdout (for hook integration)
+pmlens prompt-pack         # Export backlog tasks as a paste-ready prompt pack (ADR-041)
+                           # --tag/--phase/--priority/--task-id/--format {markdown,html}
+                           # --group-by {none,phase,track} / --out / --project
 pmlens migrate             # Migrate from pm-agent (rename transition)
 pmlens update-rules        # Inject PM Lens rules into CLAUDE.md and/or AGENTS.md (ADR-008).
                            # --target {auto,all,claude-code,codex} (default: auto)
@@ -620,8 +645,8 @@ Claude Code Session
   └── MCP Server (stdio)
         └── pmlens serve
               │
-              ├── server.py    → 42 MCP tools (FastMCP)
-              ├── models.py    → Pydantic v2 data models (17 models, 15 enums)
+              ├── server.py    → 43 MCP tools (FastMCP)
+              ├── models.py    → Pydantic v2 data models (18 models, 16 enums)
               ├── storage.py   → YAML read/write
               ├── workflow.py  → Workflow engine (state machine)
               ├── memory.py    → SQLite memory store + FTS5 search

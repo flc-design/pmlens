@@ -184,7 +184,7 @@ Claude Code に「docs/prompts/next-task.md を読んで実行して」と言う
 マーカー（`<!-- pm-server:begin -->` / `<!-- pm-server:end -->`）で囲まれるため、
 他のセクションに影響しない。
 
-PM Lens のバージョンアップ後は `pmlens update-claudemd --all` で全プロジェクトのルールを一括更新できる。
+PM Lens のバージョンアップ後は `pmlens update-rules --all` で全プロジェクトのルール（CLAUDE.md / AGENTS.md）を一括更新できる（`update-claudemd` は deprecated なレガシー alias）。
 
 ### PM Lens チートシート
 

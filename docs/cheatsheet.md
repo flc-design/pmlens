@@ -1,6 +1,6 @@
 # PM Lens Cheatsheet
 
-> **42 MCP tools** for Claude Code + Codex CLI project management.
+> **43 MCP tools** for Claude Code + Codex CLI project management.
 > Version 0.12.0 | Python 3.11+ | PyPI: `pmlens`
 
 ---
@@ -35,6 +35,7 @@ Claude Code session:
 | `pm_update_rules` | Update CLAUDE.md and/or AGENTS.md rules (multi-host, ADR-008) | `project_path?, target?, dry_run?` |
 | `pm_update_claudemd` | Legacy alias: `pm_update_rules(target="claude-code")` (deprecated since v0.6.0) | `project_path?` |
 | `pm_dashboard` | Generate HTML/text dashboard | `format="html"` |
+| `pm_prompt_pack` | Export backlog tasks as a self-contained prompt pack (1 task = 1 session) | `format="md"\|"html"`, `group_by?`, `filter_*?`, `task_ids?` |
 
 ### Tasks
 
@@ -52,11 +53,32 @@ Claude Code session:
 | Tool | Description | Key Params |
 |------|-------------|------------|
 | `pm_remember` | Save a memory (auto-links to active task) | `content`, `type="observation"`, `tags?` |
-| `pm_recall` | Recall memories / last session | `query?`, `task_id?`, `limit=5` |
+| `pm_recall` | Recall memories / last session (branch-aware with `track=`) | `query?`, `task_id?`, `track?`, `limit=5` |
 | `pm_memory_search` | Advanced search with filters | `query`, `type?`, `tags?`, `cross_project?` |
 | `pm_memory_stats` | Memory DB statistics | `project_path?` |
 | `pm_memory_cleanup` | Delete old memories / prune session summaries | `older_than_days?`, `keep_latest?`, `summaries_keep_latest?`, `dry_run=True` |
 | `pm_session_summary` | Save/get/list session summaries | `action="save"`, `summary?` |
+
+> **"Latest" semantics (ADR-042/043):** every recency read returns the session you last *worked on*, not the last one started — ordered by the effective timestamp at millisecond precision, so re-saved (UPSERT) summaries and same-second saves resolve correctly. `track=` accepts a branch name or a `.pm/tracks.yaml` label; on no match it falls back to overall-latest with `track_matched: false`.
+
+### Desktop Outbox (ADR-019/039)
+
+| Tool | Description | Key Params |
+|------|-------------|------------|
+| `pm_outbox_remember` | Save a memory into the Desktop outbox (cross-host bridge) | `content`, `type?`, `tags?` |
+| `pm_outbox_log` | Save a log entry into the Desktop outbox | `entry`, `category?` |
+| `pm_outbox_pending` | List unmerged outbox entries (read-pure) | `filter_project?` |
+| `pm_outbox_merge` | Promote outbox entries into the project store | `ids?`, `target_project?` |
+| `pm_outbox_reject` | Reject outbox entries without merging | `ids` |
+
+### X Content Pipeline (ADR-024)
+
+| Tool | Description | Key Params |
+|------|-------------|------------|
+| `pm_draft_x` | Draft a build-in-public X thread from recorded knowledge | `source?`, `angle?` |
+| `pm_redact_draft` | Redact a draft (the only safety layer before manual posting) | `draft_id` |
+| `pm_reject_draft` | Reject a draft | `draft_id` |
+| `pm_x_drafts_pending` | List redacted drafts awaiting human review | _(none)_ |
 
 ### Recording
 
@@ -73,6 +95,7 @@ Claude Code session:
 |------|-------------|------------|
 | `pm_record` | Record structured knowledge | `category`, `title`, `findings?`, `confidence="medium"` |
 | `pm_knowledge` | Query/update knowledge records | `action="list"`, `category?`, `status?`, `tag?` |
+| `pm_knowledge_query` | Read-only knowledge query (Lens-safe, ADR-018) | `action="list"`, `category?`, `status?`, `tag?` |
 
 ### Workflow
 
@@ -273,7 +296,8 @@ Claude: → pm_workflow_advance(skip=True)
 User:   What workflow templates are available?
 Claude: → pm_workflow_templates()
         brainstorming (8 steps, builtin), discovery (5 steps, builtin),
-        development (9 steps, builtin), super-research (6 steps, builtin)
+        development (9 steps, builtin), super-research (6 steps, builtin),
+        content-pipeline (4 steps, builtin), docker-dev (6 steps, builtin)
 ```
 
 ### Custom Templates
