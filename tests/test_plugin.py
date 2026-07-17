@@ -242,3 +242,26 @@ class TestPluginVersionSync:
             f"plugin/README.md has version pins {sorted(set(pinned))} disagreeing "
             f"with pyproject {ver}; bump all in lockstep (PMSERV-133)"
         )
+
+    def test_wrapper_metapackage_version_matches_pyproject(self):
+        """The pm-server compat wrapper must move in lockstep with pyproject.
+
+        This was the one version pin the sync guards did not cover: the
+        v0.12.1 tag rebuilt the wrapper at its committed 0.12.0 and PyPI
+        rejected the upload with '400 File already exists', leaving the
+        plugin's fresh `uvx pm-server@0.12.1` pin unresolvable until a
+        manual wrapper re-release. The dependency floor must also track the
+        same version so the wrapper installs the matching pmlens.
+        """
+        ver = _pyproject_version()
+        wrapper = (
+            REPO_ROOT / "packaging" / "pm-server-wrapper" / "pyproject.toml"
+        ).read_text(encoding="utf-8")
+        assert f'version = "{ver}"' in wrapper, (
+            f"packaging/pm-server-wrapper/pyproject.toml is not at {ver}; the "
+            "wrapper metapackage drifted from pyproject.toml"
+        )
+        assert f'dependencies = ["pmlens>={ver}"]' in wrapper, (
+            f"wrapper dependency floor must be pmlens>={ver} so "
+            f"`uvx pm-server@{ver}` installs the matching pmlens"
+        )
