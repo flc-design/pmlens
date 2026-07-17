@@ -62,6 +62,11 @@ jobs:
 
       - name: Publish to PyPI via Trusted Publisher
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b  # v1.14.0
+        with:
+          # Idempotent republish: a re-fired tag run must not fail on files
+          # already uploaded (e.g. re-tagging to republish the pm-server
+          # wrapper after its version-lockstep miss at v0.12.1).
+          skip-existing: true
 
   pack-mcpb:
     name: Pack Claude Desktop/Cowork .mcpb bundle (PMSERV-083)

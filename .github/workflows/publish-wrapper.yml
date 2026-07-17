@@ -84,3 +84,7 @@ jobs:
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b  # v1.14.0
         with:
           packages-dir: wrapper-dist/
+          # Idempotent republish (see release.yml) — the pypi environment
+          # only deploys from v* tags, so wrapper-only fixes re-fire BOTH
+          # workflows via a new tag; the pmlens side then no-ops.
+          skip-existing: true
