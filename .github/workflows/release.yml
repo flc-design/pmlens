@@ -94,3 +94,43 @@ jobs:
           name: mcpb-bundle
           path: dist/pmlens-*.mcpb
           if-no-files-found: error
+
+  github-release:
+    name: Create GitHub Release
+    # Release-page automation (2026-07-20): v0.11.0–v0.12.1 shipped to PyPI
+    # with no Release page entry, leaving "Latest v0.10.0" stale for weeks.
+    # Runs only after the PyPI publish succeeded, and only for plain vX.Y.Z
+    # tags — wrapper-republish tags (e.g. v0.12.1-wrapper.1) also match the
+    # v* trigger but must not get a Release entry.
+    if: ${{ !contains(github.ref_name, '-') }}
+    needs: [publish, pack-mcpb]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Download .mcpb bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: mcpb-bundle
+          path: mcpb/
+
+      - name: Create Release from the annotated tag (idempotent)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          git fetch --force origin "refs/tags/$TAG:refs/tags/$TAG"
+          title="$(git tag -l --format='%(contents:subject)' "$TAG")"
+          git tag -l --format='%(contents:body)' "$TAG" > notes.md
+          test -s notes.md || echo "See CHANGELOG.md for details." > notes.md
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG already exists — skipping"
+          else
+            gh release create "$TAG" mcpb/pmlens-*.mcpb --verify-tag --latest \
+              --title "${title:-$TAG}" --notes-file notes.md
+          fi
