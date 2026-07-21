@@ -254,9 +254,9 @@ class TestPluginVersionSync:
         same version so the wrapper installs the matching pmlens.
         """
         ver = _pyproject_version()
-        wrapper = (
-            REPO_ROOT / "packaging" / "pm-server-wrapper" / "pyproject.toml"
-        ).read_text(encoding="utf-8")
+        wrapper = (REPO_ROOT / "packaging" / "pm-server-wrapper" / "pyproject.toml").read_text(
+            encoding="utf-8"
+        )
         assert f'version = "{ver}"' in wrapper, (
             f"packaging/pm-server-wrapper/pyproject.toml is not at {ver}; the "
             "wrapper metapackage drifted from pyproject.toml"
