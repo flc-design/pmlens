@@ -40,7 +40,7 @@ PM Lens は Claude Code のプロジェクト管理を自動化する MCP Server
 - `pm_remember` / `pm_recall` — セッションを跨ぐ記憶の保存・想起（`pm_recall(track=...)` で branch/作業ライン単位の前回文脈を復元、ADR-028。「最新 = 最後に作業したセッション」= ミリ秒精度の実効タイムスタンプ順、ADR-042/043）
 - `pm_session_summary` — セッション要約の保存・取得・一覧（/clear 前に必ず実行）
 - `pm_memory_search` / `pm_memory_stats` — 高度検索・統計
-- `pm_memory_cleanup` — 古い記憶の削除 / セッション要約の剪定（`summaries_keep_latest=N`。branch ごとの最新要約は常に保護）
+- `pm_memory_cleanup` — 古い記憶の削除 / セッション要約の剪定（`summaries_keep_latest=N`。branch ごとの最新要約は常に保護。直近 ambiguity window の要約が対象に入ると拒否される → `summaries_force=true` で強制）
 
 ### 知識・ワークフロー・可視化
 

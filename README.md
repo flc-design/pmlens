@@ -301,9 +301,15 @@ that reads the FTS5 tables.
 keeps the newest N summaries (same last-worked order recall uses) and always
 additionally keeps the newest summary of every branch group — so `track=`
 recall and `tracks.yaml` glob resolution never lose a line's last context,
-even on non-git projects. `N >= 1` is enforced, dry-run is the default, and
-deleting summaries still inside the recent ambiguity window surfaces a
-`warnings[]` entry. Pruning is irreversible and does not shrink the DB file.
+even on non-git projects. `N >= 1` is enforced, dry-run is the default, and a
+prune whose delete set reaches into the recent ambiguity window is refused
+rather than merely reported — it would disable concurrent-session detection
+for a session that may still be live, so the call returns
+`summaries.blocked=true` with nothing deleted and a `warnings[]` entry (a
+dry-run predicts this via `summaries.would_block`). Pass
+`summaries_force=true` to execute it anyway. The same `N >= 1` floor applies
+to `keep_latest` for memories. Pruning is irreversible and does not shrink the
+DB file.
 
 ### Knowledge Records
 

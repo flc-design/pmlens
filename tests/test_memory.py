@@ -1499,7 +1499,9 @@ class TestSummariesPruning:
                 ("ancient", "main", "2026-01-01 00:00:00", "2026-01-01 00:00:00"),
             ],
         )
-        result = memory_store.cleanup_summaries(keep_latest=1, dry_run=False)
+        # force=True: the recent deletion is now gated (PMSERV-163), and this
+        # test is about the COUNT, not the gate.
+        result = memory_store.cleanup_summaries(keep_latest=1, dry_run=False, force=True)
         # active-2 survives (top-1 = newest by id tiebreak within the tie);
         # active-1 (recent) and ancient are deleted → exactly 1 recent deletion.
         assert result["deleted"] == 2
@@ -1579,6 +1581,93 @@ class TestSummariesPruning:
         assert narrow["would_delete"] == wide["would_delete"] == 2
         assert narrow["recent_would_delete"] == 0
         assert wide["recent_would_delete"] == 1
+
+    # ─── PMSERV-163: the ambiguity warning becomes a gate ───
+
+    def _seed_two_active_plus_ancient(self, store: MemoryStore) -> None:
+        now = store._conn.execute("SELECT datetime('now') AS n").fetchone()["n"]
+        self._seed(
+            store,
+            [
+                ("active-1", "main", now, now),
+                ("active-2", "main", now, now),
+                ("ancient", "main", "2026-01-01 00:00:00", "2026-01-01 00:00:00"),
+            ],
+        )
+
+    def test_recent_prune_is_blocked_without_force(self, memory_store: MemoryStore):
+        """PMSERV-163: the recent-deletion warning was POST-hoc — a direct
+        dry_run=False call destroyed a concurrent session's context and only
+        then said so. A warning that arrives after the irreversible act is
+        not a safeguard, so recent deletions now refuse to run by default."""
+        self._seed_two_active_plus_ancient(memory_store)
+        result = memory_store.cleanup_summaries(keep_latest=1, dry_run=False)
+        assert result["blocked"] is True
+        assert result["deleted"] == 0
+        assert result["recent_blocking"] == 1
+        assert result["blocked_would_delete"] == 2
+        assert result["dry_run"] is False
+        # Nothing was destroyed — including the ancient row that was NOT the
+        # blocking reason: the delete set is one predicate, so the gate is
+        # all-or-nothing rather than a partial prune.
+        assert len(memory_store.list_summaries()) == 3
+
+    def test_force_executes_the_gated_prune(self, memory_store: MemoryStore):
+        """force=True is the explicit override; it must behave exactly like
+        the pre-gate call (same counts, same protection rules)."""
+        self._seed_two_active_plus_ancient(memory_store)
+        result = memory_store.cleanup_summaries(keep_latest=1, dry_run=False, force=True)
+        assert result.get("blocked", False) is False
+        assert result["deleted"] == 2
+        assert result["recent_deleted"] == 1
+        assert len(memory_store.list_summaries()) == 1
+
+    def test_gate_does_not_fire_without_recent_deletions(self, migrated_store: MemoryStore):
+        """The gate is scoped to the ambiguity window: pruning only old rows
+        must stay a plain, unforced call (no new friction for the normal
+        maintenance case)."""
+        self._seed(
+            migrated_store,
+            [
+                ("s1", "main", "2026-01-01 00:00:00", "2026-03-01 00:00:00"),
+                ("s2", "main", "2026-01-01 00:00:00", "2026-04-01 00:00:00"),
+            ],
+        )
+        result = migrated_store.cleanup_summaries(keep_latest=1, dry_run=False)
+        assert result.get("blocked", False) is False
+        assert result["deleted"] == 1
+
+    def test_dry_run_predicts_the_block(self, memory_store: MemoryStore):
+        """A preview that does not reveal the gate would send the caller into
+        a surprise refusal, so dry_run reports would_block alongside the
+        counts (and still never deletes)."""
+        self._seed_two_active_plus_ancient(memory_store)
+        result = memory_store.cleanup_summaries(keep_latest=1, dry_run=True)
+        assert result["would_block"] is True
+        assert result["would_delete"] == 2
+        assert result["recent_would_delete"] == 1
+        assert len(memory_store.list_summaries()) == 3
+        forced = memory_store.cleanup_summaries(keep_latest=1, dry_run=True, force=True)
+        assert forced["would_block"] is False
+
+    def test_gate_uses_the_callers_window(self, memory_store: MemoryStore):
+        """The gate and the warning must share one window definition — a gate
+        on a hardcoded 30 while pm_recall's detection ran on an env-widened
+        window would block (or fail to block) on the wrong set."""
+        row = memory_store._conn.execute(
+            "SELECT datetime('now', '-45 minutes') AS m45, datetime('now') AS now"
+        ).fetchone()
+        self._seed(
+            memory_store,
+            [
+                ("mid-aged", "main", row["m45"], row["m45"]),
+                ("ancient", "main", "2026-01-01 00:00:00", "2026-01-01 00:00:00"),
+                ("newest", "main", "2026-01-02 00:00:00", row["now"]),
+            ],
+        )
+        narrow = memory_store.cleanup_summaries(keep_latest=1, dry_run=False, window_minutes=30)
+        assert narrow.get("blocked", False) is False
+        assert narrow["deleted"] == 2
 
 
 # ─── Server tool integration ───────────────────────────

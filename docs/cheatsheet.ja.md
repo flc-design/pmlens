@@ -56,7 +56,7 @@ Claude Code セッション:
 | `pm_recall` | 記憶を想起 / 前回セッション取得（`track=` でブランチ/作業ライン単位） | `query?`, `task_id?`, `track?`, `limit=5` |
 | `pm_memory_search` | 詳細検索（複数フィルタ対応） | `query`, `type?`, `tags?`, `cross_project?` |
 | `pm_memory_stats` | メモリDB統計情報 | `project_path?` |
-| `pm_memory_cleanup` | 古い記憶の削除 / セッション要約の剪定 | `older_than_days?`, `keep_latest?`, `summaries_keep_latest?`, `dry_run=True` |
+| `pm_memory_cleanup` | 古い記憶の削除 / セッション要約の剪定 | `older_than_days?`, `keep_latest?` (>=1), `summaries_keep_latest?` (>=1), `summaries_force=False`, `dry_run=True` |
 | `pm_session_summary` | セッション要約の保存/取得/一覧 | `action="save"`, `summary?` |
 
 > **「最新」の定義（ADR-042/043）:** 全 recency read で「最新 = 最後に**作業した**セッション」。実効タイムスタンプ・ミリ秒精度で順序付けるため、再保存（UPSERT）や同一秒内の連続保存でも正しく最新が選ばれる。`track=` にはブランチ名または `.pm/tracks.yaml` の論理ラベルを渡せる（未一致時は `track_matched: false` で overall-latest にフォールバック）。

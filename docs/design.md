@@ -371,10 +371,23 @@ worktree ごとに独立するため、**1 ライン = 1 worktree** にすれば
   順（MAX(id) 実装だと 158/159 のバグ類型が剪定経路で再発するため禁止）。保護規則:
   branch グループ（NULL/'' は1擬似グループ）ごとの最新1行は常に残す（track= recall
   と tracks.yaml glob 解決の生存保証。非 git プロジェクト = 全行 NULL branch でも
-  最新行が残る）。`keep_latest >= 1` 強制。30分 ambiguity window 内の行を消す場合は
-  warnings[] (`summaries_pruned_recent`) で通知。剪定は不可逆（UPSERT 対象の
+  最新行が残る）。`keep_latest >= 1` 強制。剪定は不可逆（UPSERT 対象の
   session_id が後で再 save されると新 id で再 INSERT = 履歴リセット）。VACUUM は
   しない（ファイルサイズは縮まない）。
+- ambiguity window の gate 化（PMSERV-163）: 削除集合が ambiguity window
+  （`_get_ambiguity_window()`、env 可変）に掛かる場合、`force=False`（既定）の実行は
+  **削除せず拒否**する（`blocked: True` / `deleted: 0` / `recent_blocking` /
+  `blocked_would_delete`、tool 層は warnings[] `summaries_prune_blocked_recent`）。
+  事後 warnings[] (`summaries_pruned_recent`) は不可逆操作に対して事後通知であり
+  安全装置になっていなかった（並行セッションの文脈を消してから通知が届く）。
+  gate は削除と同一トランザクション内・同一 window で評価し（TOCTOU 回避）、
+  削除集合が単一述語のため all-or-nothing。`force=True` で従来動作（事後 warning
+  経路）。`dry_run` は決してブロックせず `would_block` で予告する（プレビューが
+  gate を隠すと本実行で不意打ちになる）。2つの warning code は排他。
+- memories 側 floor の対称化（PMSERV-164）: `cleanup(keep_latest=...)` も `>= 1` を
+  強制する。0 は `id NOT IN (SELECT ... LIMIT 0)` = 空の keep 集合となり**全メモリ削除**、
+  負値は SQLite が「無制限」と解釈するため**削除ゼロなのに成功に見える** — どちらも
+  有用な入力ではなく罠。他条件との併用時（AND 合成）も同様に拒否する。
 - UPSERT の branch 更新は `COALESCE(NULLIF(excluded.branch, ''), ...)` で非破壊化
   （検出失敗時の '' で既知ブランチを潰さない／実際の checkout 先には更新する）。
 - `track` は `pm_recall` レスポンスのトップレベルキー（`track` / `track_matched` /

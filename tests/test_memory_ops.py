@@ -124,6 +124,39 @@ class TestMemoryCleanup:
         result_none = memory_store.cleanup(older_than_days=365, dry_run=True)
         assert result_none["would_delete"] == 0
 
+    def test_cleanup_keep_latest_below_one_rejected(self, memory_store: MemoryStore):
+        """PMSERV-164 (floor asymmetry): cleanup_summaries rejects
+        keep_latest < 1, but the memories path interpolated it straight into
+        ``id NOT IN (SELECT ... LIMIT 0)`` — an empty keep-set, so EVERY
+        memory matched and a single typo wiped the ledger. Negative values
+        are the mirror-image trap: SQLite reads a negative LIMIT as
+        "no limit", so keep_latest=-1 silently deleted nothing while looking
+        like it had pruned. Both are now rejected, not guessed at."""
+        self._seed(memory_store, 5)
+        for bad in (0, -1):
+            result = memory_store.cleanup(keep_latest=bad, dry_run=False)
+            assert "error" in result, bad
+            assert result["deleted"] == 0
+            assert result["dry_run"] is False
+            assert memory_store.get_stats()["total_memories"] == 5
+
+    def test_cleanup_keep_latest_below_one_rejected_in_dry_run(self, memory_store: MemoryStore):
+        """The preview must refuse too: a dry_run reporting would_delete=5
+        would read as a legitimate plan and invite the caller to confirm it."""
+        self._seed(memory_store, 5)
+        result = memory_store.cleanup(keep_latest=0, dry_run=True)
+        assert "error" in result
+        assert "would_delete" not in result
+
+    def test_cleanup_rejects_zero_floor_even_with_other_criteria(self, memory_store: MemoryStore):
+        """Criteria are ANDed, so keep_latest=0 next to a narrow filter still
+        means "keep nothing" for everything that filter matches. The floor is
+        a property of the parameter, not of the call shape."""
+        self._seed(memory_store, 9)  # 3 sessions × 3
+        result = memory_store.cleanup(keep_latest=0, session_id="sess-000", dry_run=False)
+        assert "error" in result
+        assert memory_store.get_stats()["total_memories"] == 9
+
     def test_cleanup_empty_db(self, memory_store: MemoryStore):
         result = memory_store.cleanup(keep_latest=5, dry_run=False)
         # Zero matches must still report honestly as a non-dry-run: the old
@@ -280,10 +313,56 @@ class TestServerToolMemoryCleanup:
         now = store._conn.execute("SELECT datetime('now') AS n").fetchone()["n"]
         store.close()
         self._seed_summaries(tmp_path, [("active-1", now), ("active-2", now)])
-        result = pm_memory_cleanup(summaries_keep_latest=1, dry_run=False)
+        result = pm_memory_cleanup(summaries_keep_latest=1, dry_run=False, summaries_force=True)
         assert result["summaries"]["deleted"] == 1
         codes = [w["code"] for w in result.get("warnings", [])]
         assert "summaries_pruned_recent" in codes
+
+    def test_summaries_recent_prune_is_blocked_and_warned(self, tmp_path, monkeypatch):
+        """PMSERV-163: without summaries_force the same call must refuse and
+        say why — the pre-gate version deleted the concurrent session's
+        context first and warned afterwards."""
+        self._setup_project(tmp_path, monkeypatch)
+        from pmlens.server import pm_memory_cleanup
+
+        store = MemoryStore(tmp_path / ".pm" / "memory.db", global_db_path=None)
+        now = store._conn.execute("SELECT datetime('now') AS n").fetchone()["n"]
+        store.close()
+        self._seed_summaries(tmp_path, [("active-1", now), ("active-2", now)])
+        result = pm_memory_cleanup(summaries_keep_latest=1, dry_run=False)
+        assert result["summaries"]["blocked"] is True
+        assert result["summaries"]["deleted"] == 0
+        warning = next(
+            w for w in result["warnings"] if w["code"] == "summaries_prune_blocked_recent"
+        )
+        assert "summaries_force" in warning["remediation"]
+        # The two codes are mutually exclusive: nothing was pruned, so the
+        # post-hoc "pruned" warning must not also fire.
+        assert "summaries_pruned_recent" not in [w["code"] for w in result["warnings"]]
+
+    def test_summaries_dry_run_warns_that_the_real_call_would_block(self, tmp_path, monkeypatch):
+        self._setup_project(tmp_path, monkeypatch)
+        from pmlens.server import pm_memory_cleanup
+
+        store = MemoryStore(tmp_path / ".pm" / "memory.db", global_db_path=None)
+        now = store._conn.execute("SELECT datetime('now') AS n").fetchone()["n"]
+        store.close()
+        self._seed_summaries(tmp_path, [("active-1", now), ("active-2", now)])
+        result = pm_memory_cleanup(summaries_keep_latest=1, dry_run=True)
+        assert result["summaries"]["would_block"] is True
+        assert [w["code"] for w in result["warnings"]] == ["summaries_prune_blocked_recent"]
+
+    def test_memories_keep_latest_below_one_errors_without_deleting(self, tmp_path, monkeypatch):
+        """PMSERV-164 at the tool layer: the floor summaries already enforced
+        (summaries_keep_latest >= 1) now applies to memories' keep_latest."""
+        self._setup_project(tmp_path, monkeypatch)
+        from pmlens.server import pm_memory_cleanup, pm_memory_stats, pm_remember
+
+        for i in range(3):
+            pm_remember(content=f"Memory {i}")
+        result = pm_memory_cleanup(keep_latest=0, dry_run=False)
+        assert "error" in result
+        assert pm_memory_stats()["total_memories"] == 3
 
     def test_summaries_keep_latest_below_one_errors_without_deleting(self, tmp_path, monkeypatch):
         self._setup_project(tmp_path, monkeypatch)
@@ -306,7 +385,7 @@ class TestServerToolMemoryCleanup:
         now = store._conn.execute("SELECT datetime('now') AS t").fetchone()["t"]
         store.close()
         self._seed_summaries(tmp_path, [("mid-aged", minus45), ("newest", now)])
-        result = pm_memory_cleanup(summaries_keep_latest=1, dry_run=False)
+        result = pm_memory_cleanup(summaries_keep_latest=1, dry_run=False, summaries_force=True)
         assert result["summaries"]["recent_deleted"] == 1
         warning = next(w for w in result["warnings"] if w["code"] == "summaries_pruned_recent")
         assert "120分" in warning["message"]

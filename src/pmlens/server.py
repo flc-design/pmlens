@@ -1581,13 +1581,17 @@ def pm_memory_cleanup(
     session_id: str | None = None,
     dry_run: bool = True,
     summaries_keep_latest: int | None = None,
+    summaries_force: bool = False,
     project_path: str | None = None,
 ) -> dict:
     """Clean up old memories and/or prune session summaries.
 
     Specify at least one criterion:
       older_than_days: Delete memories older than N days.
-      keep_latest: Keep only the latest N memories, delete rest.
+      keep_latest: Keep only the latest N memories, delete rest. N >= 1;
+        0 (which would delete every memory) and negative values (which
+        SQLite reads as "no limit", deleting none) are rejected — the same
+        floor summaries_keep_latest enforces (PMSERV-164).
       session_id: Delete all memories from a specific session.
       summaries_keep_latest: Prune session summaries to the newest N
         (PMSERV-162). N >= 1. May retain MORE than N rows: the newest row
@@ -1597,14 +1601,21 @@ def pm_memory_cleanup(
         id-ordered (insert-only table) while summaries prune by the
         last-worked order the recency reads use (_ts_expr). The DB file does
         not shrink on delete (no VACUUM).
+      summaries_force: Override the ambiguity-window gate below. Only pass
+        it after confirming no other session is live.
 
     dry_run (default True): Preview what would be deleted without deleting.
     Set dry_run=False to actually delete.
 
     Memories results stay top-level (backward compatible); summaries results
-    nest under "summaries". Pruning summaries still inside the 30-minute
-    ambiguity window adds a warnings[] entry (it disables concurrent-session
-    detection for those sessions).
+    nest under "summaries". A summaries prune whose delete set reaches into
+    the ambiguity window (it would disable concurrent-session detection for
+    those sessions) is REFUSED rather than merely reported: the response
+    carries summaries.blocked=True with nothing deleted plus a
+    summaries_prune_blocked_recent warning, and dry_run predicts it via
+    summaries.would_block (PMSERV-163). Re-run with summaries_force=True to
+    execute it anyway — that path keeps the post-hoc
+    summaries_pruned_recent warning.
     """
     store = _get_memory_store(project_path)
     memories_criteria = any(
@@ -1626,13 +1637,39 @@ def pm_memory_cleanup(
         # window still covered (PMSERV-162 adversarial review).
         window = _get_ambiguity_window()
         summaries_result = store.cleanup_summaries(
-            summaries_keep_latest, dry_run=dry_run, window_minutes=window
+            summaries_keep_latest,
+            dry_run=dry_run,
+            window_minutes=window,
+            force=summaries_force,
         )
         result["summaries"] = summaries_result
+        blocked = summaries_result.get("blocked") or summaries_result.get("would_block")
         recent = summaries_result.get("recent_deleted") or summaries_result.get(
             "recent_would_delete"
         )
-        if recent:
+        if blocked:
+            # The gate fired (PMSERV-163): the deletion did NOT happen. Kept
+            # mutually exclusive with summaries_pruned_recent so the code
+            # alone tells "refused" from "done, and here is the fallout".
+            n = summaries_result.get("recent_blocking") or recent
+            executed = "実行するとブロックされます" if dry_run else "剪定を中止しました"
+            result.setdefault("warnings", []).append(
+                _build_warning(
+                    level="warning",
+                    code="summaries_prune_blocked_recent",
+                    message=(
+                        f"直近{window}分の ambiguity window 内のセッション要約 {n} 件が"
+                        f"剪定対象のため、{executed}（削除は行われていません）。"
+                        f"該当セッションは並行実行中の可能性があり、剪定すると"
+                        f"pm_recall の ambiguity 検出が働かなくなります。"
+                    ),
+                    remediation=(
+                        "並行セッションが無いことを確認した上で summaries_force=True を"
+                        "渡すか、summaries_keep_latest を大きくして後で再実行してください。"
+                    ),
+                )
+            )
+        elif recent:
             result.setdefault("warnings", []).append(
                 _build_warning(
                     level="warning",

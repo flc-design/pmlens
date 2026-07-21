@@ -933,13 +933,34 @@ class MemoryStore:
 
         Args:
             older_than_days: Delete memories older than N days.
-            keep_latest: Keep only the latest N memories, delete rest.
+            keep_latest: Keep only the latest N memories, delete rest. Must be
+                >= 1 (see below).
             session_id: Delete all memories from a specific session.
             dry_run: If True, return what would be deleted without deleting.
+
+        ``keep_latest < 1`` is rejected rather than executed (PMSERV-164 —
+        the floor :meth:`cleanup_summaries` already enforced was missing
+        here). Both out-of-range values are traps rather than useful inputs:
+        0 builds ``id NOT IN (SELECT ... LIMIT 0)``, an empty keep-set that
+        matches EVERY memory and wipes the ledger, while SQLite reads a
+        negative LIMIT as "no limit", so -1 quietly deletes nothing while
+        reporting a successful prune. The check applies even alongside other
+        criteria: they are ANDed, so keep_latest=0 still means "keep none of
+        what the other filters matched".
 
         Returns:
             Dict with count of deleted (or would-be-deleted) memories.
         """
+        if keep_latest is not None and keep_latest < 1:
+            return {
+                "deleted": 0,
+                "dry_run": dry_run,
+                "error": (
+                    "keep_latest must be >= 1 (0 would delete every memory; "
+                    "a negative value is read as 'no limit' by SQLite and deletes none)"
+                ),
+            }
+
         cur = self._conn.cursor()
         conditions: list[str] = []
         params: list[object] = []
@@ -989,6 +1010,7 @@ class MemoryStore:
         keep_latest: int,
         dry_run: bool = False,
         window_minutes: int = 30,
+        force: bool = False,
     ) -> dict:
         """Prune session_summaries down to the newest ``keep_latest`` rows.
 
@@ -1024,6 +1046,22 @@ class MemoryStore:
         env-configurable value pm_recall's detection uses): pruning those
         silently disables concurrent-session detection, so the tool layer
         surfaces a warnings[] entry.
+
+        Those recent deletions are also a **gate**, not just a notice
+        (PMSERV-163): with ``force=False`` (the default) a real run whose
+        delete set touches the window refuses entirely — ``blocked: True``,
+        ``deleted: 0``, nothing removed — and reports ``recent_blocking`` /
+        ``blocked_would_delete``. The warning alone was post-hoc: a direct
+        ``dry_run=False`` call destroyed a concurrent session's context and
+        only then said so, which is no safeguard for an irreversible act.
+        The refusal is all-or-nothing because the delete set is one
+        predicate; ``force=True`` executes it unchanged (the warning then
+        applies as before). ``dry_run`` never blocks — it reports
+        ``would_block`` so a preview predicts the refusal instead of
+        walking the caller into a surprise. The gate is evaluated on the
+        same ``window_minutes`` as the count, inside the same transaction as
+        the DELETE it guards, so a save landing mid-call cannot slip past
+        the check.
 
         Concurrency (adversarial review of PMSERV-162): the delete set is a
         single SQL predicate (top-N subquery + correlated branch-latest
@@ -1087,7 +1125,10 @@ class MemoryStore:
                 f" WHERE {predicate} AND {ts} >= datetime('now', ?)",
                 (keep_latest, f"-{window_minutes} minutes"),
             ).fetchone()[0]
-            if not dry_run:
+            # Gate inside the same transaction as the DELETE it guards, so a
+            # concurrent save cannot land between the check and the write.
+            blocked = bool(recent) and not force and not dry_run
+            if not dry_run and not blocked:
                 cur.execute(
                     f"DELETE FROM session_summaries WHERE {predicate}",  # noqa: S608
                     (keep_latest,),
@@ -1096,12 +1137,32 @@ class MemoryStore:
         except BaseException:
             self._conn.rollback()
             raise
-        return {
+        if blocked:
+            return {
+                count_key: 0,
+                recent_key: 0,
+                "protected": total,
+                "dry_run": False,
+                "blocked": True,
+                "recent_blocking": recent,
+                "blocked_would_delete": count,
+                "error": (
+                    f"{recent} summary/summaries inside the {window_minutes}-minute "
+                    "ambiguity window would be pruned; nothing was deleted. "
+                    "Pass force=True to override."
+                ),
+            }
+        result = {
             count_key: count,
             recent_key: recent,
             "protected": total - count,
             "dry_run": dry_run,
         }
+        if dry_run:
+            result["would_block"] = bool(recent) and not force
+        else:
+            result["blocked"] = False
+        return result
 
     def search_global_ex(
         self,

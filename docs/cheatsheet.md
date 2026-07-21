@@ -56,7 +56,7 @@ Claude Code session:
 | `pm_recall` | Recall memories / last session (branch-aware with `track=`) | `query?`, `task_id?`, `track?`, `limit=5` |
 | `pm_memory_search` | Advanced search with filters | `query`, `type?`, `tags?`, `cross_project?` |
 | `pm_memory_stats` | Memory DB statistics | `project_path?` |
-| `pm_memory_cleanup` | Delete old memories / prune session summaries | `older_than_days?`, `keep_latest?`, `summaries_keep_latest?`, `dry_run=True` |
+| `pm_memory_cleanup` | Delete old memories / prune session summaries | `older_than_days?`, `keep_latest?` (>=1), `summaries_keep_latest?` (>=1), `summaries_force=False`, `dry_run=True` |
 | `pm_session_summary` | Save/get/list session summaries | `action="save"`, `summary?` |
 
 > **"Latest" semantics (ADR-042/043):** every recency read returns the session you last *worked on*, not the last one started — ordered by the effective timestamp at millisecond precision, so re-saved (UPSERT) summaries and same-second saves resolve correctly. `track=` accepts a branch name or a `.pm/tracks.yaml` label; on no match it falls back to overall-latest with `track_matched: false`.

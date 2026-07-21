@@ -2,6 +2,36 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **Session-summary pruning now gates on the ambiguity window instead of
+  reporting after the fact (PMSERV-163)**: `pm_memory_cleanup(
+  summaries_keep_latest=N, dry_run=False)` refuses to run when its delete set
+  reaches into the recent ambiguity window — the rows whose removal disables
+  `pm_recall`'s concurrent-session detection. The call returns
+  `summaries.blocked=true` with `deleted=0` (all-or-nothing: the delete set is
+  one predicate), reports `recent_blocking` / `blocked_would_delete`, and
+  raises a `summaries_prune_blocked_recent` warning; a dry-run predicts the
+  refusal via `summaries.would_block`. The previous `summaries_pruned_recent`
+  warning was post-hoc — it arrived only after a concurrent session's context
+  had already been destroyed. The new `summaries_force=true` parameter
+  executes the prune anyway and keeps the original post-hoc warning (the two
+  warning codes are mutually exclusive). The gate is evaluated on the same
+  env-configurable window as the count, inside the same `BEGIN IMMEDIATE`
+  transaction as the DELETE it guards, so a concurrent save cannot slip
+  between the check and the write.
+
+### Fixed
+
+- **`pm_memory_cleanup(keep_latest=...)` floor asymmetry (PMSERV-164)**: the
+  memories path accepted values the summaries path had rejected since
+  PMSERV-162, and both out-of-range values were traps rather than useful
+  inputs — `0` produced `id NOT IN (SELECT ... LIMIT 0)`, an empty keep-set
+  matching every row, so a single typo wiped the entire memory ledger, while a
+  negative value is read by SQLite as "no limit" and silently deleted nothing
+  while reporting a prune. `keep_latest < 1` is now rejected without deleting,
+  including in dry-run and when combined with other (ANDed) criteria.
+
 ## [0.12.1] - 2026-07-17
 
 ### Added
