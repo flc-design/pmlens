@@ -36,7 +36,7 @@ Track tasks, visualize progress, record decisions — through natural language i
 ## Features
 
 - **🔌 Multi-host first** — registers in **Claude Code AND Codex CLI** with one command (`pmlens install --target=auto`). Project rules sync to both `CLAUDE.md` and `AGENTS.md` automatically (ADR-008). Switch hosts mid-project without losing context — same `.pm/` data, same workflows
-- **43 MCP tools** — task CRUD, child issues, status, blockers, velocity, dashboard, prompt packs, ADR, session memory, workflows, knowledge records, multi-host rules injection, cross-host outbox bridge, build-in-public X drafts, and more
+- **44 MCP tools** — task CRUD, child issues, status, blockers, velocity, dashboard, prompt packs, ADR, session memory, workflows, knowledge records, multi-host rules injection, cross-host outbox bridge, build-in-public X drafts, and more
 - **Workflow engine** — template-based development workflows with loops, user gates, and chaining (Discovery → Development)
 - **Knowledge records** — structured findings between casual memory and formal ADR (research, tradeoff, spec, etc.)
 - **Super Research skill** — 3 parallel agents (Domain Expert, Critical Analyst, Lateral Thinker) + Depth Check (6 dimensions) + Fact Check + Cross-Check
@@ -282,7 +282,7 @@ dataclasses, atomic-write helpers).
 | `pm_session_summary` | Save / get / list session summaries for continuity |
 | `pm_memory_search` | Advanced search with type, tag, and task filters |
 | `pm_memory_stats` | Memory DB statistics (total, by type, DB size) |
-| `pm_memory_ingest` | Index Claude Code auto-memory notes into the cross-project index (`scope="project"` by default, `scope="all"` opts into every project, `purge=true` undoes it) |
+| `pm_memory_ingest` | Index Claude Code auto-memory notes into the cross-project index (`scope="project"` by default; a run that would index notes beyond this project's own store — `scope="all"` or an `auto_memory_path` override — is refused unless `force=true`; `purge=true` undoes it) |
 | `pm_memory_cleanup` | Clean up old memories / prune session summaries (`summaries_keep_latest=N`, keeps every branch's latest context; dry-run supported) |
 
 **What "latest" means (ADR-042/043).** Every recency read — `pm_recall` (with or
@@ -652,7 +652,7 @@ Claude Code Session
   └── MCP Server (stdio)
         └── pmlens serve
               │
-              ├── server.py    → 43 MCP tools (FastMCP)
+              ├── server.py    → 44 MCP tools (FastMCP)
               ├── models.py    → Pydantic v2 data models (18 models, 16 enums)
               ├── storage.py   → YAML read/write
               ├── workflow.py  → Workflow engine (state machine)

@@ -218,16 +218,24 @@ class TestReadOnlyConnection:
         finally:
             store.close()
 
-    def test_readonly_store_ignores_global_db_path(self, tmp_path: Path):
-        # readonly=True must force global sync off — Lens host cannot write
-        # to the cross-project index either.
+    def test_readonly_store_keeps_global_path_but_never_writes_it(self, tmp_path: Path):
+        # PMSERV-156: a readonly (Lens) store KEEPS global_db_path so
+        # cross-project SEARCH works (it opens mode=ro&immutable=1 — no
+        # sidecars), but every global WRITE is refused via global_readonly.
+        # The old `None if readonly` wiring silently killed Lens
+        # cross-project search entirely (adversarial review, confirmed).
         db_path = tmp_path / "ro.db"
         self._seed(db_path)
         bogus_global = tmp_path / "should_not_appear" / "memory.db"
         store = MemoryStore(db_path, global_db_path=bogus_global, readonly=True)
         try:
-            assert store.global_db_path is None
+            assert store.global_db_path == bogus_global
             assert store.readonly is True
+            assert store.global_readonly is True
+            # Search degrades to empty on the missing file, and sync_to_global
+            # is a guarded no-op — neither may create the DB as a side effect.
+            assert store.search_global_ex("anything") == ([], "fts")
+            store.sync_to_global(Memory(session_id="s", content="x", project="p"), memory_id=1)
         finally:
             store.close()
         assert not bogus_global.exists()

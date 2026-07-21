@@ -24,12 +24,19 @@
   external-content with only after-insert and after-delete triggers, so an
   `UPDATE` would leave the previous text searchable and the new text missing,
   silently. Pruning of vanished notes is scoped to the directories the call
-  actually scanned, so a project-scoped run can never delete another project's
-  rows. `memory_index` gains `source` / `source_file` / `content_hash` via
+  actually scanned SUCCESSFULLY, so a project-scoped run can never delete
+  another project's rows and an unreadable directory is skipped-and-reported
+  instead of masquerading as empty (which used to prune every row under it).
+  `memory_index` gains `source` / `source_path` / `content_hash` via
   backward-compatible `ADD COLUMN` (existing rows default to `source='pm'`),
-  and cross-project results now carry that provenance. Writing is gated off
-  under `PM_LENS=1` (the Lens viewer can search the ingested rows but never
-  create them).
+  and cross-project results now carry that provenance (`source_path` is the
+  absolute path — deliberately not the overlay's basename-valued
+  `source_file` key). Writing is gated off under `PM_LENS=1` while the Lens
+  viewer CAN search the ingested rows: a readonly store keeps the global
+  index path and reads it via `mode=ro&immutable=1` (no sidecars in `~/.pm`),
+  with writes refused by the store itself as defense-in-depth — the previous
+  wiring nulled the path and silently returned `[]` for every Lens
+  cross-project search.
 
 ### Changed
 

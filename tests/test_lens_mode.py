@@ -34,6 +34,7 @@ MUTATOR_TOOLS: frozenset[str] = frozenset(
         "pm_remember",
         "pm_session_summary",
         "pm_memory_cleanup",
+        "pm_memory_ingest",
         "pm_log",
         "pm_add_decision",
         "pm_discover",
@@ -270,7 +271,12 @@ def test_lens_get_memory_store_opens_readonly(lens_server, tmp_path):
     store = lens_server._get_memory_store(str(tmp_path))
     try:
         assert store.readonly is True
-        assert store.global_db_path is None
+        # PMSERV-156: the global path is KEPT (cross-project search reads it
+        # via mode=ro&immutable=1 — no sidecars); writes to it are refused
+        # through global_readonly instead of nulling the path, which had
+        # silently disabled Lens cross-project search entirely.
+        assert store.global_db_path is not None
+        assert store.global_readonly is True
         # Read path still works (verifies the seeded memory is visible)
         mems = store.search("seeded")
         assert any(m.content == "seeded under lens" for m in mems)

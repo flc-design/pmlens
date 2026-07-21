@@ -16,6 +16,7 @@ from .auto_memory import (
     INGEST_SCOPES,
     build_auto_memory_overlay,
     collect_ingest_entries,
+    locate_auto_memory_dirs,
     sync_memory_md_pointer,
 )
 from .discovery import detect_project_info, read_git_branch, scan_projects
@@ -334,10 +335,23 @@ def _get_memory_store(project_path: str | None) -> MemoryStore:
     if key not in _memory_stores:
         db_path = pm_path / "memory.db"
         if PM_LENS_ENABLED:
+            # The global index path IS passed under Lens (PMSERV-156): the
+            # store reads it with mode=ro&immutable=1 (no sidecars in ~/.pm)
+            # so cross-project search works, while global_readonly blocks
+            # every global write. The old wiring omitted it, which silently
+            # returned [] for every Lens cross-project search.
+            lens_global = _storage.GLOBAL_PM_DIR / "memory.db"
             if db_path.exists() and _has_pm_server_schema(db_path):
-                _memory_stores[key] = MemoryStore(db_path, readonly=True)
+                _memory_stores[key] = MemoryStore(
+                    db_path, global_db_path=lens_global, readonly=True
+                )
             else:
-                _memory_stores[key] = MemoryStore(Path(":memory:"), lens_fallback=True)
+                _memory_stores[key] = MemoryStore(
+                    Path(":memory:"),
+                    global_db_path=lens_global,
+                    lens_fallback=True,
+                    global_readonly=True,
+                )
         else:
             global_db_path = _storage.GLOBAL_PM_DIR / "memory.db"
             _memory_stores[key] = MemoryStore(db_path, global_db_path=global_db_path)
@@ -1583,6 +1597,7 @@ def pm_memory_stats(project_path: str | None = None) -> dict:
 def pm_memory_ingest(
     scope: str = "project",
     dry_run: bool = True,
+    force: bool = False,
     purge: bool = False,
     project_path: str | None = None,
     auto_memory_path: str | None = None,
@@ -1597,23 +1612,34 @@ def pm_memory_ingest(
 
     scope:
       - "project" (default): only this repo's auto-memory store.
-      - "all": every ``~/.claude/projects/*/memory`` store. This publishes
-        OTHER projects' notes — private ones included — into the shared
-        index, so it is an explicit opt-in and the response lists exactly
-        which projects were touched.
+      - "all": every ``~/.claude/projects/*/memory`` store.
 
-    dry_run (default True): report what would be indexed without writing.
+    The real safety boundary is a FACT-based gate, not the scope parameter:
+    if any collected note lives outside this project's own auto-memory
+    directories — via scope="all" OR via an auto_memory_path override
+    pointing elsewhere — a real run is REFUSED with ``blocked=true`` and
+    nothing written, because it would publish other projects' notes (private
+    ones included) into the shared index. ``force=true`` is the explicit
+    override; a dry-run predicts the refusal via ``would_block``. This
+    follows the PMSERV-163 pattern: an irreversible-ish publish gets a gate,
+    not a post-hoc warning keyed off a parameter the override could bypass.
+
+    dry_run (default True): a pure preview — reports the same counts without
+    creating the DB file, migrating schema, or writing anything.
     purge: instead of indexing, REMOVE previously ingested auto-memory rows —
-      scope="project" removes this repo's, scope="all" removes every ingested
-      row. This is the undo for an ``all`` run you did not mean to do; ledger
-      rows (source='pm') are never touched.
+      scope="project" removes this repo's (matched by source directory OR by
+      the recorded project root, so it still works after the source
+      directory vanished), scope="all" removes every ingested row. Ledger
+      rows (source='pm') are never touched. Purge is never gated: it is the
+      undo the gate's remediation points at.
 
     Writes only the derived global index, never a project's ledger
     (``pm_remember`` stays the source of truth). Re-running is idempotent:
     unchanged notes are skipped by content hash, edited ones are replaced,
-    and notes whose file disappeared are pruned — pruning is limited to the
-    directories this call scanned, so a project-scoped run never touches
-    another project's rows.
+    and notes whose file disappeared are pruned — pruning is limited to
+    directories this call scanned successfully, so an unreadable directory
+    skips (with a warning) instead of masquerading as empty. Failures return
+    ``status="error"``.
     """
     if scope not in INGEST_SCOPES:
         return {
@@ -1621,35 +1647,144 @@ def pm_memory_ingest(
             "message": f"scope must be one of {list(INGEST_SCOPES)}, got {scope!r}",
         }
     store = _get_memory_store(project_path)
-    entries, scanned = collect_ingest_entries(
+    entries, scanned, diagnostics = collect_ingest_entries(
         project_path, scope=scope, auto_memory_path=auto_memory_path
     )
+
     if purge:
-        purged = store.purge_auto_memory(None if scope == "all" else scanned, dry_run=dry_run)
-        purged["scope"] = scope
-        return purged
+        root = None
+        if scope == "project":
+            try:
+                root = resolve_project_path(project_path)
+            except ProjectNotFoundError:
+                root = None
+        result = store.purge_auto_memory(
+            None if scope == "all" else scanned,
+            project_root=root,
+            dry_run=dry_run,
+        )
+        result["scope"] = scope
+        purged = result.get("purged") or result.get("would_purge") or 0
+        if scope == "all" and purged:
+            verb = "が削除対象です（dry_run）" if dry_run else "を削除しました"
+            result.setdefault("warnings", []).append(
+                _build_warning(
+                    level="warning",
+                    code="auto_memory_purged_all_projects",
+                    message=(
+                        f"全プロジェクトの ingest 済み auto-memory 行 {purged} 件"
+                        f"（{len(result.get('projects', []))} プロジェクト）{verb}。"
+                    ),
+                    remediation=(
+                        ".md ファイルが正なので、pm_memory_ingest の再実行でいつでも"
+                        "索引に戻せます。"
+                    ),
+                )
+            )
+        if "error" in result:
+            result["status"] = "error"
+        return result
+
+    # Fact-based foreign gate (ADR-045 as amended): judge WHAT was collected,
+    # not which parameter collected it. The scope value was only a proxy —
+    # an auto_memory_path override kept scope="project" while ingesting an
+    # arbitrary directory, and no warning fired (adversarial review,
+    # confirmed).
+    own = {str(d) for d in locate_auto_memory_dirs(project_path)}
+    own |= {str(Path(d).resolve()) for d in locate_auto_memory_dirs(project_path)}
+    foreign = [e for e in entries if str(Path(e["source_path"]).parent) not in own]
+    foreign_projects = sorted({e.get("project") or "" for e in foreign})
+
+    if foreign and not force and not dry_run:
+        result = {
+            "blocked": True,
+            "ingested": 0,
+            "unchanged": 0,
+            "pruned": 0,
+            "scanned_dirs": len(scanned),
+            "projects": sorted({e.get("project") or "" for e in entries}),
+            "foreign_projects": foreign_projects,
+            "notes_found": len(entries),
+            "dry_run": False,
+            "scope": scope,
+            "warnings": [
+                _build_warning(
+                    level="warning",
+                    code="auto_memory_ingest_blocked_foreign",
+                    message=(
+                        f"現プロジェクト外の auto-memory ノート {len(foreign)} 件"
+                        f"（{len(foreign_projects)} プロジェクト）が対象のため、"
+                        f"取り込みを中止しました（書き込みは行われていません）。"
+                        f"実行すると private を含む他プロジェクトの内容が"
+                        f"横断検索の対象になります。"
+                    ),
+                    remediation=(
+                        "意図した操作であれば force=true を渡して再実行してください。"
+                        "現プロジェクトのみが目的なら scope='project'"
+                        "（auto_memory_path 指定なし）で再実行します。"
+                    ),
+                )
+            ],
+        }
+        return result
+
     result = store.ingest_auto_memory(entries, scanned, dry_run=dry_run)
     result["scope"] = scope
     result["notes_found"] = len(entries)
-    if scope == "all" and entries:
-        # Never let a cross-project publish be silent about its blast radius.
-        verb = "が索引に載ります" if dry_run else "を索引に載せました"
+    if foreign:
+        result["foreign_projects"] = foreign_projects
+        if dry_run and not force:
+            result["would_block"] = True
+            result.setdefault("warnings", []).append(
+                _build_warning(
+                    level="warning",
+                    code="auto_memory_ingest_blocked_foreign",
+                    message=(
+                        f"現プロジェクト外の auto-memory ノート {len(foreign)} 件"
+                        f"（{len(foreign_projects)} プロジェクト）が対象です。"
+                        f"dry_run=false の実行はブロックされます（force=true が必要）。"
+                    ),
+                    remediation=(
+                        "内容を確認のうえ、意図した操作であれば force=true を"
+                        "渡して実行してください。"
+                    ),
+                )
+            )
+        else:
+            verb = "が索引に載ります（dry_run）" if dry_run else "を索引に載せました"
+            result.setdefault("warnings", []).append(
+                _build_warning(
+                    level="warning",
+                    code="auto_memory_ingested_foreign",
+                    message=(
+                        f"現プロジェクト外の auto-memory ノート {len(foreign)} 件"
+                        f"（{len(foreign_projects)} プロジェクト）{verb}。"
+                        f"private を含む他プロジェクトの内容が横断検索の対象になります。"
+                    ),
+                    remediation=(
+                        "取り消すには pm_memory_ingest(scope='all', purge=true, "
+                        "dry_run=false) を実行してください。"
+                    ),
+                )
+            )
+    if diagnostics.get("unreadable_dirs"):
+        result["unreadable_dirs"] = diagnostics["unreadable_dirs"]
         result.setdefault("warnings", []).append(
             _build_warning(
                 level="warning",
-                code="auto_memory_ingested_all_projects",
+                code="auto_memory_dirs_skipped",
                 message=(
-                    f"scope=all のため {len(result['projects'])} プロジェクト "
-                    f"{len(entries)} 件の auto-memory ノート{verb}。"
-                    f"他プロジェクト（private を含む）の内容が横断検索の対象になります。"
+                    f"読み取れなかった auto-memory ディレクトリ "
+                    f"{len(diagnostics['unreadable_dirs'])} 件をスキップしました。"
+                    f"該当ディレクトリの索引済み行は剪定されていません。"
                 ),
-                remediation=(
-                    "現プロジェクトだけに絞るなら scope='project' を使ってください。"
-                    "取り消すには pm_memory_ingest(scope='all', purge=true, dry_run=false) を"
-                    "実行すると、索引した auto-memory 行だけを削除できます。"
-                ),
+                remediation="ディレクトリの存在と権限を確認して再実行してください。",
             )
         )
+    if diagnostics.get("skipped_files"):
+        result["skipped_files"] = diagnostics["skipped_files"]
+    if "error" in result:
+        result["status"] = "error"
     return result
 
 

@@ -219,17 +219,20 @@ CREATE TABLE IF NOT EXISTS memory_index (
     task_id      TEXT,
     created_at   TEXT NOT NULL,
     source       TEXT NOT NULL DEFAULT 'pm',
-    source_file  TEXT,
+    source_path  TEXT,
     content_hash TEXT
 );
 """
 
 #: Provenance columns added for auto-memory ingest (PMSERV-156 / ADR-045).
 #: Existing global DBs predate them, so every writer runs
-#: :func:`_ensure_global_columns` before touching the table.
+#: :func:`_ensure_global_columns` before touching the table. ``source_path``
+#: holds the note's ABSOLUTE path — deliberately not named ``source_file``,
+#: which the overlay already uses for the basename (adversarial review: one
+#: key name with two meanings).
 _GLOBAL_PROVENANCE_COLUMNS: dict[str, str] = {
     "source": "TEXT NOT NULL DEFAULT 'pm'",
-    "source_file": "TEXT",
+    "source_path": "TEXT",
     "content_hash": "TEXT",
 }
 
@@ -248,6 +251,11 @@ def _ensure_global_columns(conn: sqlite3.Connection) -> None:
     touch it.
     """
     have = {r[1] for r in conn.execute("PRAGMA table_info(memory_index)")}
+    if not have:
+        # No memory_index table at all (a file someone connected to without
+        # ever running DDL) — nothing to migrate; ALTER would raise
+        # "no such table" here.
+        return
     for name, decl in _GLOBAL_PROVENANCE_COLUMNS.items():
         if name not in have:
             conn.execute(f"ALTER TABLE memory_index ADD COLUMN {name} {decl}")  # noqa: S608
@@ -307,10 +315,21 @@ class MemoryStore:
         *,
         readonly: bool = False,
         lens_fallback: bool = False,
+        global_readonly: bool | None = None,
     ) -> None:
         self.db_path = db_path
-        self.global_db_path = None if readonly else global_db_path
+        # The global index path is kept even for a readonly (Lens) store:
+        # cross-project SEARCH is a read and stays available — it opens the
+        # index with mode=ro&immutable=1, so no -wal/-shm sidecars are ever
+        # created in ~/.pm (the RO invariant's actual guarantee, ADR-028).
+        # Writes to the global index check global_readonly instead
+        # (defense-in-depth on top of the tool not being registered under
+        # PM_LENS). Pre-PMSERV-156 this was `None if readonly else ...`,
+        # which silently killed Lens cross-project search entirely
+        # (adversarial review, confirmed).
+        self.global_db_path = global_db_path
         self.readonly = readonly
+        self.global_readonly = readonly if global_readonly is None else global_readonly
         # PMSERV-091/093: signals "Lens fallback to in-memory" (DB absent OR
         # exists-but-uninitialized) so server.py read tools can add an
         # explanatory note distinguishing "no records" from "store unavailable".
@@ -891,7 +910,7 @@ class MemoryStore:
         Silently skips if global sync is disabled or fails.
         The per-project DB is the source of truth.
         """
-        if self.global_db_path is None:
+        if self.global_db_path is None or self.global_readonly:
             return
         try:
             self.global_db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -942,13 +961,19 @@ class MemoryStore:
         silent search inconsistency with no error anywhere.
 
         Pruning is scoped to ``scanned_dirs``: a row survives unless its
-        source file lived in a directory this call actually scanned. Without
-        that scoping a ``scope="project"`` ingest would delete every other
-        project's indexed notes as "no longer present".
+        source file lived in a directory this call actually scanned (and the
+        collector only lists a directory as scanned when READING it
+        succeeded). Without that scoping a ``scope="project"`` ingest would
+        delete every other project's indexed notes as "no longer present".
 
-        Returns counts (``ingested`` / ``unchanged`` / ``pruned``) plus the
-        projects touched. ``dry_run`` computes the same numbers without
-        writing.
+        ``dry_run`` is a pure preview: it never creates the DB file, never
+        flips journal modes, and never migrates schema — it opens an existing
+        file with a plain connection and only SELECTs (the original
+        implementation ALTERed on dry_run; adversarial review, confirmed).
+        The plan (existing-row scan) and the DELETE+INSERT run inside ONE
+        ``BEGIN IMMEDIATE`` transaction: planning in autocommit reopens the
+        PMSERV-162 TOCTOU class where a concurrent ingest's insert between
+        plan and write leaves duplicate rows.
         """
         result: dict = {
             "ingested": 0,
@@ -961,11 +986,57 @@ class MemoryStore:
         if self.global_db_path is None:
             result["error"] = "global index is not configured (global_db_path is None)"
             return result
+        if self.global_readonly:
+            # Defense-in-depth: the tool is not registered under PM_LENS=1,
+            # but the store method must refuse on its own (PMSERV-144).
+            result["error"] = "global index is read-only on this host (PM_LENS)"
+            return result
 
         scanned = {str(Path(d).resolve()) for d in scanned_dirs}
         by_path = {e["source_path"]: e for e in entries}
+
+        def _plan(executor) -> tuple[list[int], list[int], list[dict], int]:
+            existing: dict[str, tuple[int, str | None]] = {}
+            try:
+                rows = executor.execute(
+                    "SELECT id, source_path, content_hash FROM memory_index WHERE source = ?",
+                    (AUTO_MEMORY_SOURCE,),
+                ).fetchall()
+            except sqlite3.OperationalError:
+                # Pre-ingest schema (no table / no provenance columns): no
+                # auto-memory rows can exist yet.
+                rows = []
+            for row in rows:
+                src = row[1] or ""
+                if str(Path(src).parent) in scanned:
+                    existing[src] = (row[0], row[2])
+            stale = [rid for src, (rid, _h) in existing.items() if src not in by_path]
+            replace: list[int] = []
+            to_write: list[dict] = []
+            unchanged = 0
+            for src, entry in by_path.items():
+                prev = existing.get(src)
+                if prev is not None and prev[1] == entry.get("content_hash"):
+                    unchanged += 1
+                    continue
+                if prev is not None:
+                    replace.append(prev[0])
+                to_write.append(entry)
+            return stale, replace, to_write, unchanged
+
         conn: sqlite3.Connection | None = None
         try:
+            if dry_run:
+                if not self.global_db_path.exists():
+                    result["ingested"] = len(by_path)
+                    return result
+                conn = sqlite3.connect(str(self.global_db_path))
+                stale, _replace, to_write, unchanged = _plan(conn)
+                result["ingested"] = len(to_write)
+                result["unchanged"] = unchanged
+                result["pruned"] = len(stale)
+                return result
+
             self.global_db_path.parent.mkdir(parents=True, exist_ok=True)
             conn = sqlite3.connect(str(self.global_db_path))
             _apply_pragmas(conn)
@@ -975,50 +1046,28 @@ class MemoryStore:
             _ensure_global_columns(conn)
             conn.commit()
 
-            # Existing auto-memory rows that belong to the scanned directories.
-            existing: dict[str, tuple[int, str | None]] = {}
-            for row in conn.execute(
-                "SELECT id, source_file, content_hash FROM memory_index WHERE source = ?",
-                (AUTO_MEMORY_SOURCE,),
-            ):
-                src = row[1] or ""
-                if str(Path(src).parent) in scanned:
-                    existing[src] = (row[0], row[2])
-
-            stale_ids = [rid for src, (rid, _h) in existing.items() if src not in by_path]
-            to_write: list[dict] = []
-            replace_ids: list[int] = []
-            for src, entry in by_path.items():
-                prev = existing.get(src)
-                if prev is not None and prev[1] == entry.get("content_hash"):
-                    result["unchanged"] += 1
-                    continue
-                if prev is not None:
-                    replace_ids.append(prev[0])
-                to_write.append(entry)
-
-            result["ingested"] = len(to_write)
-            result["pruned"] = len(stale_ids)
-            if dry_run or not (to_write or stale_ids):
-                return result
-
             cur = conn.cursor()
             cur.execute("BEGIN IMMEDIATE")
             try:
+                stale, replace, to_write, unchanged = _plan(cur)
                 cur.executemany(
                     "DELETE FROM memory_index WHERE id = ?",
-                    [(i,) for i in stale_ids + replace_ids],
+                    [(i,) for i in stale + replace],
                 )
                 cur.executemany(
                     """INSERT INTO memory_index
                        (project, project_path, memory_id, type, content, tags, task_id,
-                        created_at, source, source_file, content_hash)
+                        created_at, source, source_path, content_hash)
                        VALUES (?, ?, 0, ?, ?, ?, NULL, COALESCE(?, datetime('now')), ?, ?, ?)""",
                     [
                         (
                             e.get("project") or e.get("origin_dir") or "",
                             e.get("project_path") or e.get("origin_dir") or "",
-                            e.get("type") or AUTO_MEMORY_SOURCE,
+                            # NOT the AUTO_MEMORY_SOURCE literal: a type that
+                            # collides with the source column invents a fake
+                            # "auto_memory" type category (the overlay
+                            # honestly returns None for a type-less note).
+                            e.get("type") or "unknown",
                             e.get("content") or "",
                             _tags_to_str(e.get("tags")),
                             e.get("created_at"),
@@ -1033,6 +1082,9 @@ class MemoryStore:
             except BaseException:
                 conn.rollback()
                 raise
+            result["ingested"] = len(to_write)
+            result["unchanged"] = unchanged
+            result["pruned"] = len(stale)
             return result
         except (sqlite3.Error, OSError) as exc:
             result["error"] = f"{type(exc).__name__}: {exc}"
@@ -1044,40 +1096,79 @@ class MemoryStore:
     def purge_auto_memory(
         self,
         scanned_dirs: list[Path] | None = None,
+        project_root: Path | str | None = None,
         dry_run: bool = False,
     ) -> dict:
         """Remove ingested auto-memory rows from the global index.
 
         The undo for :meth:`ingest_auto_memory` — ADR-045 requires one,
         because a single ``scope="all"`` run publishes other projects' notes
-        and there must be a way to take that back. ``scanned_dirs=None``
-        purges every ingested row; a list limits the purge to those source
-        directories. Rows promoted from project ledgers (``source='pm'``) are
-        never touched, and DELETE (not UPDATE) keeps the external-content FTS
-        in sync via ``memory_index_ad``.
+        and there must be a way to take that back. ``scanned_dirs=None`` with
+        ``project_root=None`` purges every ingested row; otherwise a row is
+        targeted when its source directory is in ``scanned_dirs`` OR its
+        recorded ``project_path`` resolves to ``project_root``. The second
+        clause matters because the source directory can vanish (encoding
+        drift, a deleted repo): rows still carry ``project_path``, so a
+        project-scoped purge keeps working instead of silently returning
+        ``purged: 0`` and leaving ``scope="all"`` as the only recourse
+        (adversarial review, two lenses independently).
+
+        Rows promoted from project ledgers (``source='pm'``) are never
+        touched, and DELETE (not UPDATE) keeps the external-content FTS in
+        sync via ``memory_index_ad``. The match and the DELETE share one
+        ``BEGIN IMMEDIATE`` transaction; ``dry_run`` reads under a plain
+        transaction and performs no schema work at all. Deleted rows are a
+        logical removal: like every DELETE in this store, the bytes remain in
+        SQLite free pages until a VACUUM the store never runs.
         """
-        result: dict = {"purged": 0, "dry_run": dry_run}
+        count_key = "would_purge" if dry_run else "purged"
+        result: dict = {count_key: 0, "projects": [], "dry_run": dry_run}
         if self.global_db_path is None or not self.global_db_path.exists():
+            return result
+        if self.global_readonly:
+            result["error"] = "global index is read-only on this host (PM_LENS)"
             return result
         conn: sqlite3.Connection | None = None
         try:
             conn = sqlite3.connect(str(self.global_db_path))
-            _apply_pragmas(conn)
-            _ensure_global_columns(conn)
-            rows = conn.execute(
-                "SELECT id, source_file FROM memory_index WHERE source = ?",
-                (AUTO_MEMORY_SOURCE,),
-            ).fetchall()
-            if scanned_dirs is None:
-                ids = [r[0] for r in rows]
-            else:
-                scanned = {str(Path(d).resolve()) for d in scanned_dirs}
-                ids = [r[0] for r in rows if str(Path(r[1] or "").parent) in scanned]
-            result["purged"] = len(ids)
-            if dry_run or not ids:
-                return result
-            conn.executemany("DELETE FROM memory_index WHERE id = ?", [(i,) for i in ids])
-            conn.commit()
+            if not dry_run:
+                _apply_pragmas(conn)
+            cur = conn.cursor()
+            cur.execute("BEGIN" if dry_run else "BEGIN IMMEDIATE")
+            try:
+                try:
+                    rows = cur.execute(
+                        "SELECT id, source_path, project, project_path"
+                        " FROM memory_index WHERE source = ?",
+                        (AUTO_MEMORY_SOURCE,),
+                    ).fetchall()
+                except sqlite3.OperationalError:
+                    rows = []  # pre-ingest schema — nothing was ever ingested
+                if scanned_dirs is None and project_root is None:
+                    matched = list(rows)
+                else:
+                    scanned = {str(Path(d).resolve()) for d in (scanned_dirs or [])}
+                    root = str(Path(project_root).resolve()) if project_root is not None else None
+                    matched = []
+                    for r in rows:
+                        src_parent = str(Path(r[1] or "").parent)
+                        row_root = r[3] or ""
+                        try:
+                            row_root = str(Path(row_root).resolve()) if row_root else ""
+                        except (OSError, RuntimeError, ValueError):
+                            pass
+                        if src_parent in scanned or (root is not None and row_root == root):
+                            matched.append(r)
+                result[count_key] = len(matched)
+                result["projects"] = sorted({r[2] or "" for r in matched})
+                if not dry_run and matched:
+                    cur.executemany(
+                        "DELETE FROM memory_index WHERE id = ?", [(r[0],) for r in matched]
+                    )
+                conn.commit()
+            except BaseException:
+                conn.rollback()
+                raise
             return result
         except (sqlite3.Error, OSError) as exc:
             result["error"] = f"{type(exc).__name__}: {exc}"
@@ -1394,9 +1485,18 @@ class MemoryStore:
             return [], "fts"
         conn: sqlite3.Connection | None = None
         try:
-            conn = sqlite3.connect(str(self.global_db_path))
-            conn.row_factory = sqlite3.Row
-            _apply_pragmas(conn)
+            if self.global_readonly:
+                # Lens host: read the shared index without side effects —
+                # mode=ro&immutable=1 creates no -wal/-shm sidecars in ~/.pm
+                # (RO invariant, ADR-028). Trade-off: un-checkpointed WAL
+                # content is invisible until the owning writer checkpoints,
+                # exactly like the Lens project-DB reads.
+                conn = sqlite3.connect(f"file:{self.global_db_path}?mode=ro&immutable=1", uri=True)
+                conn.row_factory = sqlite3.Row
+            else:
+                conn = sqlite3.connect(str(self.global_db_path))
+                conn.row_factory = sqlite3.Row
+                _apply_pragmas(conn)
             safe_query = _sanitize_fts_query(query)
             rows = conn.execute(
                 """SELECT m.* FROM memory_index m
@@ -1434,7 +1534,7 @@ class MemoryStore:
                     "task_id": r["task_id"],
                     "created_at": r["created_at"],
                     **(
-                        {"source": r["source"] or "pm", "source_file": r["source_file"]}
+                        {"source": r["source"] or "pm", "source_path": r["source_path"]}
                         if has_source
                         else {}
                     ),

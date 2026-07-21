@@ -36,7 +36,7 @@
 ## 特徴
 
 - **🔌 マルチホストファースト** — `pmlens install --target=auto` 一発で **Claude Code と Codex CLI の両方に登録**。プロジェクトのルールも `CLAUDE.md` と `AGENTS.md` の両方に自動同期 (ADR-008)。プロジェクト途中でホストを切り替えてもコンテキストを失わない — 同じ `.pm/` データ、同じワークフロー
-- **43 の MCP ツール** — タスク CRUD、子イシュー、ステータス、ブロッカー、ベロシティ、ダッシュボード、プロンプトパック、ADR、セッションメモリ、ワークフロー、ナレッジレコード、マルチホストルール注入、クロスホスト Outbox ブリッジ、build-in-public X 下書き 等
+- **44 の MCP ツール** — タスク CRUD、子イシュー、ステータス、ブロッカー、ベロシティ、ダッシュボード、プロンプトパック、ADR、セッションメモリ、ワークフロー、ナレッジレコード、マルチホストルール注入、クロスホスト Outbox ブリッジ、build-in-public X 下書き 等
 - **ワークフローエンジン** — テンプレートベースの開発ワークフロー（ループ、ユーザーゲート、チェイン対応：Discovery → Development）
 - **ナレッジレコード** — カジュアルなメモリとフォーマルな ADR の中間に位置する構造化された知見記録（research、tradeoff、spec 等）
 - **Super Research スキル** — 3 並列エージェント（Domain Expert、Critical Analyst、Lateral Thinker）+ Depth Check（6 次元）+ Fact Check + Cross-Check
@@ -279,7 +279,7 @@ pmlens uninstall --target auto
 | `pm_session_summary` | セッション要約の保存・取得・一覧 |
 | `pm_memory_search` | type・tag・task_id フィルター付き高度な検索 |
 | `pm_memory_stats` | メモリ DB の統計情報（件数・種別・DB サイズ） |
-| `pm_memory_ingest` | Claude Code の auto-memory ノートを横断検索インデックスへ取り込み（既定は `scope="project"`、`scope="all"` で全プロジェクト、`purge=true` で取り消し） |
+| `pm_memory_ingest` | Claude Code の auto-memory ノートを横断検索インデックスへ取り込み（既定は `scope="project"`。現プロジェクト外のノートが対象になる実行（`scope="all"` や `auto_memory_path` 指定）は `force=true` なしでは拒否。`purge=true` で取り消し） |
 | `pm_memory_cleanup` | 古い記憶のクリーンアップ / セッション要約の剪定（`summaries_keep_latest=N`、各ブランチの最新文脈は保護。dry-run 対応） |
 
 ### ナレッジレコード
@@ -659,7 +659,7 @@ Claude Code Session
   └── MCP Server (stdio)
         └── pmlens serve
               │
-              ├── server.py    → 43 MCP ツール (FastMCP)
+              ├── server.py    → 44 MCP ツール (FastMCP)
               ├── models.py    → Pydantic v2 データモデル (18 models, 16 enums)
               ├── storage.py   → YAML 読み書き
               ├── workflow.py  → ワークフローエンジン (state machine)

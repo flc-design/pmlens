@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import hashlib
+import os
 import re
 from pathlib import Path
 
@@ -168,6 +169,18 @@ def locate_auto_memory_dirs(
         return []
 
     wanted = set(_encode_candidates(project_root))
+    if project_path:
+        # resolve_project_path resolves symlinks, but Claude Code encodes the
+        # path as IT sees it — which may be the unresolved spelling (/var vs
+        # /private/var, a symlinked HOME, a container mount). Add candidates
+        # from the caller's raw spelling too; enumerate-and-match makes names
+        # that never exist on disk harmless (adversarial review of
+        # PMSERV-156: the resolved-only encoding silently found zero dirs
+        # under a symlinked root and reported notes_found=0 as success).
+        try:
+            wanted |= set(_encode_candidates(Path(project_path).expanduser().absolute()))
+        except (OSError, RuntimeError, ValueError):  # pragma: no cover — defensive
+            pass
     dirs: list[Path] = []
     try:
         for entry in sorted(projects_root.iterdir()):
@@ -341,8 +354,32 @@ def _registry_lookup(home: Path | None = None) -> dict[str, tuple[str, str]]:
         path = str(getattr(proj, "path", "") or "")
         if not path:
             continue
-        out[encode_project_dirname(path)] = (str(getattr(proj, "name", "") or path), path)
+        name = str(getattr(proj, "name", "") or path)
+        # Map BOTH encoding rules seen in the wild to the same project: a
+        # legacy-encoded store that fell back to its raw dir name would look
+        # like a different project, and the drift-duplicate dedup could not
+        # see that two directories are the same repo.
+        for enc in (encode_project_dirname(path), path.replace("/", "-")):
+            out.setdefault(enc, (name, path))
     return out
+
+
+def _mtime_index_ts(path: Path, now: str) -> str:
+    """File mtime as an index timestamp, matching ledger rows' format.
+
+    Ledger rows use SQLite's ``datetime('now')`` — UTC, space-separated.
+    ``_mtime_iso``'s local ``T``-separated form sorts AFTER every ledger
+    value in a TEXT ``ORDER BY created_at`` (``'T'`` > ``' '``), which made
+    every auto-memory row outrank every ledger row regardless of age
+    (adversarial review, confirmed). Future mtimes are clamped to ``now`` —
+    this table has no idempotent heal pass to recover them later.
+    """
+    try:
+        ts = path.stat().st_mtime
+    except OSError:  # pragma: no cover — defensive FS guard
+        return now
+    stamped = _dt.datetime.fromtimestamp(ts, tz=_dt.UTC).strftime("%Y-%m-%d %H:%M:%S")
+    return min(stamped, now)
 
 
 def collect_ingest_entries(
@@ -351,18 +388,33 @@ def collect_ingest_entries(
     scope: str = "project",
     auto_memory_path: str | None = None,
     home: Path | None = None,
-) -> tuple[list[dict], list[Path]]:
+) -> tuple[list[dict], list[Path], dict]:
     """Gather full-content auto-memory notes for physical ingest.
 
-    Returns ``(entries, scanned_dirs)``. Each entry is a
+    Returns ``(entries, scanned_dirs, diagnostics)``. Each entry is a
     :func:`parse_auto_memory_file` dict (untruncated) plus the identity keys
     the index needs: ``source_path`` (absolute, the dedup key — two projects
     routinely share a file *name*), ``origin_dir``, ``content_hash``, and the
     resolved ``project`` / ``project_path``.
 
     ``scanned_dirs`` matters as much as the entries: the caller prunes stale
-    rows only within the directories actually scanned, so a ``project``-scoped
-    ingest can never delete another project's indexed notes.
+    rows only within the directories actually scanned. Directories are listed
+    with ``os.listdir`` and only enter ``scanned_dirs`` when the listing
+    SUCCEEDS — ``pathlib``'s ``glob()`` swallows ``PermissionError`` and
+    returns an empty iterator, which made an unreadable directory look like a
+    successfully-scanned empty one and pruned every previously indexed note
+    under it (adversarial review, confirmed: 2 rows -> 0 with no error).
+    Failed directories are reported in ``diagnostics["unreadable_dirs"]``;
+    files whose parse raised are skipped per-file (the overlay's "no single
+    file may break the sweep" discipline) under
+    ``diagnostics["skipped_files"]``.
+
+    Directories are resolved before scanning so ``source_path`` and the
+    pruning/idempotency comparisons in :meth:`MemoryStore.ingest_auto_memory`
+    normalize the same way (a symlinked root otherwise re-ingested every note
+    as new on every run). When encoding drift gives one repo several
+    directories, entries are deduplicated per ``(project_path, basename)``
+    keeping the newest note.
     """
     if scope not in INGEST_SCOPES:
         raise ValueError(f"scope must be one of {INGEST_SCOPES}, got {scope!r}")
@@ -378,16 +430,41 @@ def collect_ingest_entries(
         dirs = locate_auto_memory_dirs(project_path, auto_memory_path=auto_memory_path, home=home)
 
     registry = _registry_lookup(home)
-    entries: list[dict] = []
-    for mem_dir in dirs:
-        origin_dir = mem_dir.parent.name
-        name, path = registry.get(origin_dir, (origin_dir, str(mem_dir.parent)))
+    # For an un-overridden project scope, every scanned dir belongs to THIS
+    # project by construction — record the real project root as the row's
+    # project_path even when the repo was never registered. Rows keep a
+    # usable identity, so a project-scoped purge can still target them after
+    # the source directory itself vanishes (encoding drift, deleted repo).
+    # Never applied under auto_memory_path: an override can point anywhere,
+    # and stamping this project's root onto foreign notes would be a lie.
+    fallback_root: str | None = None
+    if scope == "project" and auto_memory_path is None:
         try:
-            files = sorted(mem_dir.glob("*.md"))
-        except OSError:  # pragma: no cover — defensive FS guard
+            fallback_root = str(resolve_project_path(project_path))
+        except Exception:  # noqa: BLE001 — identity is best-effort, never break collect
+            fallback_root = None
+    entries: list[dict] = []
+    scanned: list[Path] = []
+    unreadable: list[str] = []
+    skipped_files: list[str] = []
+    now = _dt.datetime.now(_dt.UTC).strftime("%Y-%m-%d %H:%M:%S")
+    for mem_dir in dirs:
+        try:
+            mem_dir = mem_dir.resolve()
+            names = sorted(n for n in os.listdir(mem_dir) if n.endswith(".md"))
+        except OSError:
+            unreadable.append(str(mem_dir))
             continue
-        for f in files:
-            entry = parse_auto_memory_file(f, content_limit=None)
+        scanned.append(mem_dir)
+        origin_dir = mem_dir.parent.name
+        name, path = registry.get(origin_dir, (origin_dir, fallback_root or str(mem_dir.parent)))
+        for fname in names:
+            f = mem_dir / fname
+            try:
+                entry = parse_auto_memory_file(f, content_limit=None)
+            except Exception:  # noqa: BLE001 — one bad file must not abort the sweep
+                skipped_files.append(str(f))
+                continue
             if entry is None:  # MEMORY.md (the derived index) or unreadable
                 continue
             body = entry.get("content") or ""
@@ -396,8 +473,22 @@ def collect_ingest_entries(
             entry["content_hash"] = hashlib.sha256(body.encode("utf-8")).hexdigest()
             entry["project"] = name
             entry["project_path"] = path
+            entry["created_at"] = _mtime_index_ts(f, now)
             entries.append(entry)
-    return entries, list(dirs)
+
+    # Drift dedup: the same repo can own several encoded directories
+    # (memory:265); without this, one logical note ingests as N rows.
+    deduped: dict[tuple[str, str], dict] = {}
+    for e in entries:
+        key = (e["project_path"], Path(e["source_path"]).name)
+        prev = deduped.get(key)
+        if prev is None or (e["created_at"], e["source_path"]) > (
+            prev["created_at"],
+            prev["source_path"],
+        ):
+            deduped[key] = e
+    diagnostics = {"unreadable_dirs": unreadable, "skipped_files": skipped_files}
+    return list(deduped.values()), scanned, diagnostics
 
 
 def _entry_matches_query(entry: dict, query: str) -> bool:
