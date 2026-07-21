@@ -12,7 +12,12 @@ from pathlib import Path
 from fastmcp import FastMCP
 
 from . import storage as _storage
-from .auto_memory import build_auto_memory_overlay, sync_memory_md_pointer
+from .auto_memory import (
+    INGEST_SCOPES,
+    build_auto_memory_overlay,
+    collect_ingest_entries,
+    sync_memory_md_pointer,
+)
 from .discovery import detect_project_info, read_git_branch, scan_projects
 from .memory import MemoryStore, _has_pm_server_schema
 from .models import (
@@ -1572,6 +1577,80 @@ def pm_memory_stats(project_path: str | None = None) -> dict:
         stats["db_size"] = f"{size / (1024 * 1024):.1f} MB"
 
     return _maybe_add_lens_note(stats, store)
+
+
+@_tool()
+def pm_memory_ingest(
+    scope: str = "project",
+    dry_run: bool = True,
+    purge: bool = False,
+    project_path: str | None = None,
+    auto_memory_path: str | None = None,
+) -> dict:
+    """Index Claude Code auto-memory notes into the cross-project index.
+
+    PMSERV-156 / ADR-045. Without this, notes in
+    ``~/.claude/projects/<repo>/memory/*.md`` are reachable only through
+    ``pm_recall(include_auto_memory=true)`` for the CURRENT project —
+    ``cross_project=true`` searches the global index, which never contained
+    them, so the flag is silently inert there.
+
+    scope:
+      - "project" (default): only this repo's auto-memory store.
+      - "all": every ``~/.claude/projects/*/memory`` store. This publishes
+        OTHER projects' notes — private ones included — into the shared
+        index, so it is an explicit opt-in and the response lists exactly
+        which projects were touched.
+
+    dry_run (default True): report what would be indexed without writing.
+    purge: instead of indexing, REMOVE previously ingested auto-memory rows —
+      scope="project" removes this repo's, scope="all" removes every ingested
+      row. This is the undo for an ``all`` run you did not mean to do; ledger
+      rows (source='pm') are never touched.
+
+    Writes only the derived global index, never a project's ledger
+    (``pm_remember`` stays the source of truth). Re-running is idempotent:
+    unchanged notes are skipped by content hash, edited ones are replaced,
+    and notes whose file disappeared are pruned — pruning is limited to the
+    directories this call scanned, so a project-scoped run never touches
+    another project's rows.
+    """
+    if scope not in INGEST_SCOPES:
+        return {
+            "status": "error",
+            "message": f"scope must be one of {list(INGEST_SCOPES)}, got {scope!r}",
+        }
+    store = _get_memory_store(project_path)
+    entries, scanned = collect_ingest_entries(
+        project_path, scope=scope, auto_memory_path=auto_memory_path
+    )
+    if purge:
+        purged = store.purge_auto_memory(None if scope == "all" else scanned, dry_run=dry_run)
+        purged["scope"] = scope
+        return purged
+    result = store.ingest_auto_memory(entries, scanned, dry_run=dry_run)
+    result["scope"] = scope
+    result["notes_found"] = len(entries)
+    if scope == "all" and entries:
+        # Never let a cross-project publish be silent about its blast radius.
+        verb = "が索引に載ります" if dry_run else "を索引に載せました"
+        result.setdefault("warnings", []).append(
+            _build_warning(
+                level="warning",
+                code="auto_memory_ingested_all_projects",
+                message=(
+                    f"scope=all のため {len(result['projects'])} プロジェクト "
+                    f"{len(entries)} 件の auto-memory ノート{verb}。"
+                    f"他プロジェクト（private を含む）の内容が横断検索の対象になります。"
+                ),
+                remediation=(
+                    "現プロジェクトだけに絞るなら scope='project' を使ってください。"
+                    "取り消すには pm_memory_ingest(scope='all', purge=true, dry_run=false) を"
+                    "実行すると、索引した auto-memory 行だけを削除できます。"
+                ),
+            )
+        )
+    return result
 
 
 @_tool()

@@ -226,7 +226,7 @@ pmlens uninstall --target auto
 
 ---
 
-## MCP ツール一覧（43ツール）
+## MCP ツール一覧（44ツール）
 
 ### プロジェクト管理
 
@@ -279,6 +279,7 @@ pmlens uninstall --target auto
 | `pm_session_summary` | セッション要約の保存・取得・一覧 |
 | `pm_memory_search` | type・tag・task_id フィルター付き高度な検索 |
 | `pm_memory_stats` | メモリ DB の統計情報（件数・種別・DB サイズ） |
+| `pm_memory_ingest` | Claude Code の auto-memory ノートを横断検索インデックスへ取り込み（既定は `scope="project"`、`scope="all"` で全プロジェクト、`purge=true` で取り消し） |
 | `pm_memory_cleanup` | 古い記憶のクリーンアップ / セッション要約の剪定（`summaries_keep_latest=N`、各ブランチの最新文脈は保護。dry-run 対応） |
 
 ### ナレッジレコード

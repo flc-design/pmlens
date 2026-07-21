@@ -295,6 +295,7 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
     <tr><td><code>pm_recall</code></td><td>last session + recent memories + FTS5 検索</td><td><span class="badge badge-ro">RO</span></td></tr>
     <tr><td><code>pm_memory_search</code></td><td>tags / type / task_id / cross_project 検索</td><td><span class="badge badge-ro">RO</span></td></tr>
     <tr><td><code>pm_memory_stats</code></td><td>type 別カウント・最古/最新タイムスタンプ</td><td><span class="badge badge-ro">RO</span></td></tr>
+    <tr><td><code>pm_memory_ingest</code></td><td>Claude Code の auto-memory ノートを横断検索インデックス (memory_index) へ物理 ingest（既定 <code>scope="project"</code>／<code>scope="all"</code> は全プロジェクト公開のため警告付き・<code>purge=true</code> で取り消し。派生インデックスのみに書き、台帳は不変 — ADR-045）</td><td><span class="badge badge-rw">RW</span></td></tr>
     <tr><td><code>pm_memory_cleanup</code></td><td>古い memory の削除 + <code>summaries_keep_latest=N</code> でセッション要約を剪定（branch ごとの最新 1 行は常に保護・dry-run 対応。recency 式 index は RW open でのみ作成され、作成後は memory.db の読み手にも SQLite ≥ 3.9 が必要 — ADR-043）</td><td><span class="badge badge-rw">RW</span></td></tr>
     <tr><td><code>pm_prompt_pack</code></td><td>バックログタスク → 自己完結セッションプロンプト生成（md/HTML、レーン進捗図 + カード毎 Copy、ADR-041。読み経路 RO・出力は .pm/exports/ のみ）</td><td><span class="badge badge-rw">RW</span></td></tr>
     <tr><td><code>pm_log</code></td><td>daily log エントリ追記 (progress/decision/blocker/milestone)</td><td><span class="badge badge-rw">RW</span></td></tr>
@@ -323,7 +324,7 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
     <tr><td><code>pm_workflow_list</code></td><td>active/completed/paused/abandoned 一覧</td><td><span class="badge badge-ro">RO</span></td></tr>
     <tr><td><code>pm_workflow_templates</code></td><td>builtin + custom テンプレート一覧</td><td><span class="badge badge-ro">RO</span></td></tr>
   </table>
-  <p class="muted">15 RO + 2 OUTBOX-RW + 26 Full-RW = 43 ツール (2026-07-17, v0.12.0)。Lens 配布では RO_ALLOWLIST 外の
+  <p class="muted">15 RO + 2 OUTBOX-RW + 27 Full-RW = 44 ツール (2026-07-21, v0.12.1+)。Lens 配布では RO_ALLOWLIST 外の
      ツールが FastMCP に未登録 = 構造的不変条件 (ADR-015/017/018)。OUTBOX 2 ツールは <code>PM_DESKTOP_WRITE=1</code>
      が追加で立った時のみ登録され、main <code>.pm/memory.db</code> は touch しない (ADR-019)。</p>
 </section>
@@ -632,7 +633,7 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
     <tr><th></th><th>PyPI <code>pmlens</code></th><th>.mcpb bundle (Lens)</th><th>.mcpb + PM_DESKTOP_WRITE</th></tr>
     <tr><td><strong>対象 host</strong></td><td>Claude Code (CLI) / Codex CLI</td><td>Claude Cowork / その他 viewer</td><td>Claude Desktop (Phase 2 bridge)</td></tr>
     <tr><td><strong>インストール</strong></td><td><code>pip install pm-server</code> &rarr; <code>pmlens install</code></td><td>.mcpb ファイルを host に drag &amp; drop</td><td>.mcpb + manifest が <code>PM_DESKTOP_WRITE=1</code> を auto-propagate (PMSERV-100)</td></tr>
-    <tr><td><strong>登録 tools</strong></td><td>Full RW (43 tools)</td><td>Lens RO (15 tools)</td><td>RO 15 + OUTBOX-RW 2 = 17 tools</td></tr>
+    <tr><td><strong>登録 tools</strong></td><td>Full RW (44 tools)</td><td>Lens RO (15 tools)</td><td>RO 15 + OUTBOX-RW 2 = 17 tools</td></tr>
     <tr><td><strong>環境変数</strong></td><td>未設定</td><td><code>PM_LENS=1</code></td><td><code>PM_LENS=1, PM_DESKTOP_WRITE=1</code></td></tr>
     <tr><td><strong>SQLite モード</strong></td><td>RW main + outbox</td><td><code>?mode=ro&amp;immutable=1</code> main / outbox 不触</td><td>main は RO 不変、outbox <code>~/.pm/desktop/desktop.db</code> は append-only RW</td></tr>
     <tr><td><strong>同一バイナリ?</strong></td><td>はい — 配布物は 1 種類、env で role gating</td><td colspan="2" style="text-align:center">←</td></tr>

@@ -2,6 +2,35 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Physical auto-memory ingest for cross-project search (PMSERV-156,
+  ADR-045)**: a new `pm_memory_ingest` tool indexes Claude Code's auto-memory
+  notes (`~/.claude/projects/<repo>/memory/*.md`) into the global
+  cross-project index. Until now those notes were reachable only through
+  `pm_recall(include_auto_memory=true)` for the *current* project — the
+  `cross_project=true` branch returns before any overlay runs, so the flag was
+  silently inert there and the notes were structurally invisible to
+  cross-project search (measured on a real corpus: 850 distinct tokens present
+  in 150 notes across 20 projects and absent from the ledger).
+  `scope="project"` (the default) indexes only this repo; `scope="all"` sweeps
+  every store and raises an `auto_memory_ingested_all_projects` warning naming
+  the projects, because it publishes other projects' notes — private ones
+  included — into a shared index. `purge=true` is the undo. Rows land ONLY in
+  the derived `memory_index`, never in a project ledger, so `pm_remember`
+  stays the source of truth (PMSERV-111's no-dual-write rule) and the `.md`
+  files stay the source of truth for auto-memory. Re-ingest is idempotent by
+  content hash and implemented as DELETE-then-INSERT: the global FTS5 table is
+  external-content with only after-insert and after-delete triggers, so an
+  `UPDATE` would leave the previous text searchable and the new text missing,
+  silently. Pruning of vanished notes is scoped to the directories the call
+  actually scanned, so a project-scoped run can never delete another project's
+  rows. `memory_index` gains `source` / `source_file` / `content_hash` via
+  backward-compatible `ADD COLUMN` (existing rows default to `source='pm'`),
+  and cross-project results now carry that provenance. Writing is gated off
+  under `PM_LENS=1` (the Lens viewer can search the ingested rows but never
+  create them).
+
 ### Changed
 
 - **Session-summary pruning now gates on the ambiguity window instead of

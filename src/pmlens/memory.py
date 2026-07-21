@@ -217,9 +217,41 @@ CREATE TABLE IF NOT EXISTS memory_index (
     content      TEXT NOT NULL,
     tags         TEXT,
     task_id      TEXT,
-    created_at   TEXT NOT NULL
+    created_at   TEXT NOT NULL,
+    source       TEXT NOT NULL DEFAULT 'pm',
+    source_file  TEXT,
+    content_hash TEXT
 );
 """
+
+#: Provenance columns added for auto-memory ingest (PMSERV-156 / ADR-045).
+#: Existing global DBs predate them, so every writer runs
+#: :func:`_ensure_global_columns` before touching the table.
+_GLOBAL_PROVENANCE_COLUMNS: dict[str, str] = {
+    "source": "TEXT NOT NULL DEFAULT 'pm'",
+    "source_file": "TEXT",
+    "content_hash": "TEXT",
+}
+
+#: ``source`` value marking a row ingested from Claude Code's auto-memory
+#: store rather than promoted from a project ledger.
+AUTO_MEMORY_SOURCE = "auto_memory"
+
+
+def _ensure_global_columns(conn: sqlite3.Connection) -> None:
+    """Add the provenance columns to a pre-PMSERV-156 global index.
+
+    ``ADD COLUMN`` is backward compatible in both directions: existing rows
+    default to ``source='pm'`` and an older binary keeps working because it
+    never names the new columns. The FTS5 index is external-content over
+    ``content``/``tags``/``project`` only, so widening the table does not
+    touch it.
+    """
+    have = {r[1] for r in conn.execute("PRAGMA table_info(memory_index)")}
+    for name, decl in _GLOBAL_PROVENANCE_COLUMNS.items():
+        if name not in have:
+            conn.execute(f"ALTER TABLE memory_index ADD COLUMN {name} {decl}")  # noqa: S608
+
 
 _GLOBAL_FTS_SQL = """\
 CREATE VIRTUAL TABLE IF NOT EXISTS memory_index_fts USING fts5(
@@ -868,6 +900,7 @@ class MemoryStore:
             conn.executescript(_GLOBAL_SCHEMA_SQL)
             conn.executescript(_GLOBAL_FTS_SQL)
             conn.executescript(_GLOBAL_TRIGGER_SQL)
+            _ensure_global_columns(conn)
             conn.execute("PRAGMA user_version = 1")
             conn.execute(
                 """INSERT INTO memory_index
@@ -887,6 +920,171 @@ class MemoryStore:
             conn.close()
         except (sqlite3.Error, OSError):
             pass  # Global sync is best-effort
+
+    def ingest_auto_memory(
+        self,
+        entries: list[dict],
+        scanned_dirs: list[Path],
+        dry_run: bool = False,
+    ) -> dict:
+        """Index Claude Code auto-memory notes into the global index.
+
+        PMSERV-156 / ADR-045. The rows land ONLY in ``memory_index`` — the
+        derived cross-project index — never in a project's ``memories`` table,
+        so ``pm_remember`` stays the single source of truth for PM knowledge
+        and the ``.md`` files stay the source of truth for auto-memory
+        (PMSERV-111's no-dual-write rule).
+
+        Re-ingest is **DELETE then INSERT**, never ``UPDATE``: the global FTS5
+        table is external-content with only ``memory_index_ai`` (after insert)
+        and ``memory_index_ad`` (after delete) triggers. An ``UPDATE`` of
+        ``content`` would leave the FTS row holding the previous text — a
+        silent search inconsistency with no error anywhere.
+
+        Pruning is scoped to ``scanned_dirs``: a row survives unless its
+        source file lived in a directory this call actually scanned. Without
+        that scoping a ``scope="project"`` ingest would delete every other
+        project's indexed notes as "no longer present".
+
+        Returns counts (``ingested`` / ``unchanged`` / ``pruned``) plus the
+        projects touched. ``dry_run`` computes the same numbers without
+        writing.
+        """
+        result: dict = {
+            "ingested": 0,
+            "unchanged": 0,
+            "pruned": 0,
+            "scanned_dirs": len(scanned_dirs),
+            "projects": sorted({e.get("project") or "" for e in entries}),
+            "dry_run": dry_run,
+        }
+        if self.global_db_path is None:
+            result["error"] = "global index is not configured (global_db_path is None)"
+            return result
+
+        scanned = {str(Path(d).resolve()) for d in scanned_dirs}
+        by_path = {e["source_path"]: e for e in entries}
+        conn: sqlite3.Connection | None = None
+        try:
+            self.global_db_path.parent.mkdir(parents=True, exist_ok=True)
+            conn = sqlite3.connect(str(self.global_db_path))
+            _apply_pragmas(conn)
+            conn.executescript(_GLOBAL_SCHEMA_SQL)
+            conn.executescript(_GLOBAL_FTS_SQL)
+            conn.executescript(_GLOBAL_TRIGGER_SQL)
+            _ensure_global_columns(conn)
+            conn.commit()
+
+            # Existing auto-memory rows that belong to the scanned directories.
+            existing: dict[str, tuple[int, str | None]] = {}
+            for row in conn.execute(
+                "SELECT id, source_file, content_hash FROM memory_index WHERE source = ?",
+                (AUTO_MEMORY_SOURCE,),
+            ):
+                src = row[1] or ""
+                if str(Path(src).parent) in scanned:
+                    existing[src] = (row[0], row[2])
+
+            stale_ids = [rid for src, (rid, _h) in existing.items() if src not in by_path]
+            to_write: list[dict] = []
+            replace_ids: list[int] = []
+            for src, entry in by_path.items():
+                prev = existing.get(src)
+                if prev is not None and prev[1] == entry.get("content_hash"):
+                    result["unchanged"] += 1
+                    continue
+                if prev is not None:
+                    replace_ids.append(prev[0])
+                to_write.append(entry)
+
+            result["ingested"] = len(to_write)
+            result["pruned"] = len(stale_ids)
+            if dry_run or not (to_write or stale_ids):
+                return result
+
+            cur = conn.cursor()
+            cur.execute("BEGIN IMMEDIATE")
+            try:
+                cur.executemany(
+                    "DELETE FROM memory_index WHERE id = ?",
+                    [(i,) for i in stale_ids + replace_ids],
+                )
+                cur.executemany(
+                    """INSERT INTO memory_index
+                       (project, project_path, memory_id, type, content, tags, task_id,
+                        created_at, source, source_file, content_hash)
+                       VALUES (?, ?, 0, ?, ?, ?, NULL, COALESCE(?, datetime('now')), ?, ?, ?)""",
+                    [
+                        (
+                            e.get("project") or e.get("origin_dir") or "",
+                            e.get("project_path") or e.get("origin_dir") or "",
+                            e.get("type") or AUTO_MEMORY_SOURCE,
+                            e.get("content") or "",
+                            _tags_to_str(e.get("tags")),
+                            e.get("created_at"),
+                            AUTO_MEMORY_SOURCE,
+                            e["source_path"],
+                            e.get("content_hash"),
+                        )
+                        for e in to_write
+                    ],
+                )
+                conn.commit()
+            except BaseException:
+                conn.rollback()
+                raise
+            return result
+        except (sqlite3.Error, OSError) as exc:
+            result["error"] = f"{type(exc).__name__}: {exc}"
+            return result
+        finally:
+            if conn is not None:
+                conn.close()
+
+    def purge_auto_memory(
+        self,
+        scanned_dirs: list[Path] | None = None,
+        dry_run: bool = False,
+    ) -> dict:
+        """Remove ingested auto-memory rows from the global index.
+
+        The undo for :meth:`ingest_auto_memory` — ADR-045 requires one,
+        because a single ``scope="all"`` run publishes other projects' notes
+        and there must be a way to take that back. ``scanned_dirs=None``
+        purges every ingested row; a list limits the purge to those source
+        directories. Rows promoted from project ledgers (``source='pm'``) are
+        never touched, and DELETE (not UPDATE) keeps the external-content FTS
+        in sync via ``memory_index_ad``.
+        """
+        result: dict = {"purged": 0, "dry_run": dry_run}
+        if self.global_db_path is None or not self.global_db_path.exists():
+            return result
+        conn: sqlite3.Connection | None = None
+        try:
+            conn = sqlite3.connect(str(self.global_db_path))
+            _apply_pragmas(conn)
+            _ensure_global_columns(conn)
+            rows = conn.execute(
+                "SELECT id, source_file FROM memory_index WHERE source = ?",
+                (AUTO_MEMORY_SOURCE,),
+            ).fetchall()
+            if scanned_dirs is None:
+                ids = [r[0] for r in rows]
+            else:
+                scanned = {str(Path(d).resolve()) for d in scanned_dirs}
+                ids = [r[0] for r in rows if str(Path(r[1] or "").parent) in scanned]
+            result["purged"] = len(ids)
+            if dry_run or not ids:
+                return result
+            conn.executemany("DELETE FROM memory_index WHERE id = ?", [(i,) for i in ids])
+            conn.commit()
+            return result
+        except (sqlite3.Error, OSError) as exc:
+            result["error"] = f"{type(exc).__name__}: {exc}"
+            return result
+        finally:
+            if conn is not None:
+                conn.close()
 
     # ─── Stats & Cleanup ─────────────────────────────
 
@@ -1220,6 +1418,10 @@ class MemoryStore:
                        LIMIT ?""",
                     (pattern, pattern, limit),
                 ).fetchall()
+            # Provenance is optional: a global index that predates PMSERV-156
+            # has no source columns, and this is a read path that must not
+            # raise on an un-migrated DB (ingest is what migrates it).
+            has_source = bool(rows) and "source" in rows[0].keys()
             return [
                 {
                     "id": r["id"],
@@ -1231,6 +1433,11 @@ class MemoryStore:
                     "tags": _str_to_tags(r["tags"]),
                     "task_id": r["task_id"],
                     "created_at": r["created_at"],
+                    **(
+                        {"source": r["source"] or "pm", "source_file": r["source_file"]}
+                        if has_source
+                        else {}
+                    ),
                 }
                 for r in rows
             ], strategy

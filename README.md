@@ -229,7 +229,7 @@ dataclasses, atomic-write helpers).
 
 ---
 
-## MCP Tools (43 tools)
+## MCP Tools (44 tools)
 
 ### Project Management
 
@@ -282,6 +282,7 @@ dataclasses, atomic-write helpers).
 | `pm_session_summary` | Save / get / list session summaries for continuity |
 | `pm_memory_search` | Advanced search with type, tag, and task filters |
 | `pm_memory_stats` | Memory DB statistics (total, by type, DB size) |
+| `pm_memory_ingest` | Index Claude Code auto-memory notes into the cross-project index (`scope="project"` by default, `scope="all"` opts into every project, `purge=true` undoes it) |
 | `pm_memory_cleanup` | Clean up old memories / prune session summaries (`summaries_keep_latest=N`, keeps every branch's latest context; dry-run supported) |
 
 **What "latest" means (ADR-042/043).** Every recency read — `pm_recall` (with or

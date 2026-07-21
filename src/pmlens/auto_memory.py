@@ -30,6 +30,7 @@ overlay follows the outbox *read overlay*, not the merge.
 from __future__ import annotations
 
 import datetime as _dt
+import hashlib
 import re
 from pathlib import Path
 
@@ -245,7 +246,9 @@ def _truncate(text: str, limit: int) -> tuple[str, bool]:
     return text, False
 
 
-def parse_auto_memory_file(path: Path) -> dict | None:
+def parse_auto_memory_file(
+    path: Path, *, content_limit: int | None = _AUTO_MEMORY_CONTENT_LIMIT
+) -> dict | None:
     """Parse one auto-memory ``*.md`` file into an overlay-entry dict.
 
     Returns ``None`` only for the derived index (``MEMORY.md``) or an
@@ -256,6 +259,11 @@ def parse_auto_memory_file(path: Path) -> dict | None:
     ``origin_type`` string — NOT coerced to :class:`MemoryType`, whose reader
     strictly validates the enum) plus provenance keys ``source_file`` /
     ``session_id`` and the ``source`` tag.
+
+    ``content_limit`` defaults to the overlay's excerpt budget; pass ``None``
+    for the untruncated body. The ingest path (PMSERV-156) needs the full text
+    — indexing a 500-character excerpt would make the FTS row silently
+    unsearchable for anything said later in the note.
     """
     if path.name == MEMORY_INDEX_FILENAME:
         return None
@@ -282,7 +290,10 @@ def parse_auto_memory_file(path: Path) -> dict | None:
     else:
         tags = None
 
-    content, truncated = _truncate(body.strip(), _AUTO_MEMORY_CONTENT_LIMIT)
+    if content_limit is None:
+        content, truncated = body.strip(), False
+    else:
+        content, truncated = _truncate(body.strip(), content_limit)
 
     entry: dict = {
         "name": str(name) if name is not None else path.stem,
@@ -298,6 +309,95 @@ def parse_auto_memory_file(path: Path) -> dict | None:
     if truncated:
         entry["content_truncated"] = True
     return entry
+
+
+# ─── Ingest collector (PMSERV-156 / ADR-045) ─────────
+
+#: The two ingest scopes. ``project`` (the default) indexes only the current
+#: repo's notes; ``all`` sweeps every ``~/.claude/projects/*/memory`` store.
+#: The default is deliberately the narrow one — ``all`` publishes other
+#: projects' notes (including private ones) into the shared cross-project
+#: index, which is a decision only the user can make (ADR-045).
+INGEST_SCOPES = ("project", "all")
+
+
+def _registry_lookup(home: Path | None = None) -> dict[str, tuple[str, str]]:
+    """Map ``~/.claude/projects`` dir name -> (project name, project path).
+
+    Best-effort: a registered project's absolute path re-encodes to the same
+    directory name Claude Code used, which is the only link between an
+    auto-memory store and a real project. Unregistered stores fall back to the
+    encoded name itself, so ingest never drops a note just because the repo was
+    never ``pm_init``ed.
+    """
+    try:
+        from .storage import load_registry
+
+        registry = load_registry(_home(home) / ".pm" if home else None)
+    except Exception:  # pragma: no cover — registry is optional metadata
+        return {}
+    out: dict[str, tuple[str, str]] = {}
+    for proj in getattr(registry, "projects", []) or []:
+        path = str(getattr(proj, "path", "") or "")
+        if not path:
+            continue
+        out[encode_project_dirname(path)] = (str(getattr(proj, "name", "") or path), path)
+    return out
+
+
+def collect_ingest_entries(
+    project_path: str | None = None,
+    *,
+    scope: str = "project",
+    auto_memory_path: str | None = None,
+    home: Path | None = None,
+) -> tuple[list[dict], list[Path]]:
+    """Gather full-content auto-memory notes for physical ingest.
+
+    Returns ``(entries, scanned_dirs)``. Each entry is a
+    :func:`parse_auto_memory_file` dict (untruncated) plus the identity keys
+    the index needs: ``source_path`` (absolute, the dedup key — two projects
+    routinely share a file *name*), ``origin_dir``, ``content_hash``, and the
+    resolved ``project`` / ``project_path``.
+
+    ``scanned_dirs`` matters as much as the entries: the caller prunes stale
+    rows only within the directories actually scanned, so a ``project``-scoped
+    ingest can never delete another project's indexed notes.
+    """
+    if scope not in INGEST_SCOPES:
+        raise ValueError(f"scope must be one of {INGEST_SCOPES}, got {scope!r}")
+
+    if scope == "all":
+        projects_root = _home(home) / ".claude" / "projects"
+        dirs = (
+            sorted(d for d in projects_root.glob("*/memory") if d.is_dir())
+            if projects_root.is_dir()
+            else []
+        )
+    else:
+        dirs = locate_auto_memory_dirs(project_path, auto_memory_path=auto_memory_path, home=home)
+
+    registry = _registry_lookup(home)
+    entries: list[dict] = []
+    for mem_dir in dirs:
+        origin_dir = mem_dir.parent.name
+        name, path = registry.get(origin_dir, (origin_dir, str(mem_dir.parent)))
+        try:
+            files = sorted(mem_dir.glob("*.md"))
+        except OSError:  # pragma: no cover — defensive FS guard
+            continue
+        for f in files:
+            entry = parse_auto_memory_file(f, content_limit=None)
+            if entry is None:  # MEMORY.md (the derived index) or unreadable
+                continue
+            body = entry.get("content") or ""
+            entry["source_path"] = str(f)
+            entry["origin_dir"] = origin_dir
+            entry["content_hash"] = hashlib.sha256(body.encode("utf-8")).hexdigest()
+            entry["project"] = name
+            entry["project_path"] = path
+            entries.append(entry)
+    return entries, list(dirs)
 
 
 def _entry_matches_query(entry: dict, query: str) -> bool:

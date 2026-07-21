@@ -384,6 +384,30 @@ worktree ごとに独立するため、**1 ライン = 1 worktree** にすれば
   削除集合が単一述語のため all-or-nothing。`force=True` で従来動作（事後 warning
   経路）。`dry_run` は決してブロックせず `would_block` で予告する（プレビューが
   gate を隠すと本実行で不意打ちになる）。2つの warning code は排他。
+- auto-memory の物理 ingest（PMSERV-156 / ADR-045）: `pm_memory_ingest` が
+  `~/.claude/projects/<repo>/memory/*.md` をグローバル `memory_index` に取り込む。
+  v1 overlay（ADR-040）は現プロジェクトにしか効かず、`pm_recall` の cross_project
+  分岐は overlay 到達前に早期 return するため `include_auto_memory` が無音で無視され、
+  auto-memory 知識は横断検索から構造的に不可視だった（実測: 20プロジェクト150ノート中、
+  台帳に存在しない distinct トークン 850 個）。設計:
+  - 書き込みは派生インデックス `memory_index` のみ。プロジェクト台帳 `memories` には
+    書かない（PMSERV-111 の二重書き込み禁止。auto-memory の正は .md、PM 知識の正は
+    `pm_remember`）。
+  - scope は `project`（既定）と `all` の2モード。`all` は他プロジェクト（private 含む）の
+    内容を共有インデックスに載せるため明示オプトインとし、対象プロジェクト名を含む
+    warnings[] (`auto_memory_ingested_all_projects`) を必ず返す。`purge=True` が取り消し。
+  - 再取り込みは content hash で冪等。変更時は **DELETE→INSERT**（UPDATE 禁止）。
+    グローバル FTS5 は external-content で after-insert / after-delete トリガしか無く、
+    UPDATE では FTS に旧本文が残って無音の検索不整合になるため。
+  - 消えたノートの剪定は「実際にスキャンしたディレクトリ」に限定する。限定しないと
+    project スコープの実行が他プロジェクトの行を「ファイルが無い」と判定して消す。
+  - ingest 時の本文は非切り詰め（overlay の 500 字抜粋を索引すると、以降の記述が
+    恒久的に検索不能になる）。
+  - 追加列 `source` / `source_file` / `content_hash` は ADD COLUMN で後方互換移行
+    （既存行は `source='pm'`）。FTS 定義は content/tags/project しか参照しないため影響なし。
+    読み経路は未移行 DB でも例外を出さない（移行するのは ingest 側）。
+  - ingest は書き込みなので PM_LENS=1 では登録しない（RO 不変条件）。Lens は取り込み済み
+    行の検索だけ行える。
 - memories 側 floor の対称化（PMSERV-164）: `cleanup(keep_latest=...)` も `>= 1` を
   強制する。0 は `id NOT IN (SELECT ... LIMIT 0)` = 空の keep 集合となり**全メモリ削除**、
   負値は SQLite が「無制限」と解釈するため**削除ゼロなのに成功に見える** — どちらも
