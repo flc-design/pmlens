@@ -38,11 +38,10 @@ class TestFastMcpIdentity:
         assert mcp.name == "pmlens"
 
     def test_server_source_has_no_legacy_fastmcp_name(self):
-        # Mirrors the CI grep gate: the legacy FastMCP("pm-server") must be gone
-        # and the new name present.
+        # Guard the name while allowing optional arguments such as version.
         src = SERVER_PY.read_text(encoding="utf-8")
-        assert 'FastMCP("pm-server")' not in src
-        assert 'FastMCP("pmlens")' in src
+        assert 'FastMCP("pm-server"' not in src
+        assert 'FastMCP("pmlens"' in src
 
 
 class TestManifestIdentity:

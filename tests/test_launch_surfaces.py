@@ -44,6 +44,8 @@ from typing import Any, NamedTuple
 
 import pytest
 
+from pmlens import __version__
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PLUGIN_MCP = REPO_ROOT / "plugin" / ".mcp.json"
 MCPB_MANIFEST = REPO_ROOT / "manifest.json"
@@ -252,6 +254,17 @@ def test_serve_speaks_mcp_over_stdio():
     session = _mcp_session(lens=False)
     assert session.tools, "tools/list returned nothing over the wire"
     assert "pm_status" in session.tools
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("lens", [False, True], ids=["full", "lens"])
+def test_handshake_reports_pmlens_identity(lens: bool) -> None:
+    """The wire identity must identify pmlens itself (PMSERV-179)."""
+    session = _mcp_session(lens=lens)
+    assert session.server_info.get("name") == "pmlens"
+    assert session.server_info.get("version") == __version__, (
+        f"serverInfo must report the pmlens version {__version__!r}, got {session.server_info!r}"
+    )
 
 
 @pytest.mark.smoke

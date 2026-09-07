@@ -12,7 +12,7 @@
   fastmcp 4 removes server-initiated sampling and roots, restricts
   `ctx.elicit()` to the old protocol, and drops the 3.x module shims. None of
   that reaches this codebase: the entire framework surface in use is
-  `FastMCP(name)`, `mcp.tool()(fn)` and `mcp.run(transport="stdio")`, and
+  `FastMCP(name, version=...)`, `mcp.tool()(fn)` and `mcp.run(transport="stdio")`, and
   `Context`, `ctx.*`, sampling, elicitation and roots do not appear in `src/`
   at all. The negotiated protocol revision is `2025-11-25` on both fastmcp
   3.4.6 and 4.0.3, so no host sees a wire-level change — the version a client
@@ -44,6 +44,13 @@
   intended. PMSERV-186 tracks replacing them with a guard: this is the second
   time a defense in this area was documented and not executed, and a comment
   cannot fail a build.
+
+### Fixed
+
+- **MCP server identity reports the pmlens version (PMSERV-179)**:
+  `serverInfo.version` now uses the same `__version__` as the CLI. Previously,
+  FastMCP supplied its own framework version, making it hard to identify the
+  running pmlens release. Real stdio regression tests cover full and Lens modes.
 
 ## [0.15.0] - 2026-08-01
 
