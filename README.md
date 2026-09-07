@@ -428,9 +428,12 @@ Deterministic redaction is the one safety layer, and raw content never leaves th
 
 The preferred names above are an **unreleased change after v0.15.1**.
 `pm_draft_x` and `pm_x_drafts_pending` remain supported compatibility aliases,
-using the same arguments, results and existing `.pm/x_drafts.db`. v0.15.1 and
-earlier use only these legacy names. Existing permissions keep working for the
-legacy names; see [the migration guide](docs/content-tool-migration.md).
+using the same arguments, results and project-local store. New projects use
+`.pm/drafts.db`; existing `.pm/x_drafts.db` files stay in place and remain in use.
+v0.15.1 and earlier use only the legacy tool names and database filename.
+Existing permissions keep working for the legacy tool names; see
+[the migration guide](docs/content-tool-migration.md) for older-client limits
+and recovery when both database names exist.
 
 ### Outbox (Cross-Host Bridge)
 

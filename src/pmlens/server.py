@@ -23,6 +23,12 @@ from .auto_memory import (
     sync_memory_md_pointer,
 )
 from .discovery import detect_project_info, read_git_branch, scan_projects
+from .draft_store import (
+    DraftStoreConflictError,
+    default_draft_db_path,
+    get_draft_store,
+    normalize_source_refs,
+)
 from .memory import MemoryStore, SearchDiagnostics, _has_pm_server_schema
 from .models import (
     ConfidenceLevel,
@@ -92,11 +98,6 @@ from .utils import (
 )
 from .velocity import calculate_velocity, detect_risks
 from .workflow import abandon_workflow, advance_step, start_workflow, workflow_status
-from .x_draft_store import (
-    default_x_draft_db_path,
-    get_x_draft_store,
-    normalize_source_refs,
-)
 
 mcp = FastMCP("pmlens", version=__version__)
 
@@ -663,6 +664,7 @@ def pm_status(project_path: str | None = None) -> dict:
         "utils_fingerprint": get_utils_fingerprint(),
         "builtin_templates_dir": get_builtin_templates_dir_status(),
     }
+    status_warnings: list[dict] = []
     if not PM_LENS_ENABLED:
         try:
             # readonly=True (PMSERV-145, ADR-039 T2): this is a read-only
@@ -682,22 +684,27 @@ def pm_status(project_path: str | None = None) -> dict:
                 "call pm_outbox_pending to review and pm_outbox_merge to promote",
             ]
 
-        # PMSERV-113 / PMSERV-118 — per-project X-draft pending count. Same
+        # PMSERV-113 / PMSERV-118 — per-project content draft pending count. Same
         # Claude-Code-only gating as outbox_pending. Probe ONLY if the store
-        # file already exists, so pm_status never creates x_drafts.db in a
+        # file already exists, so pm_status never creates a draft database in a
         # project that has not used the pipeline (Lens must-fix #3 corollary).
-        x_draft_db = default_x_draft_db_path(pm_path)
-        x_drafts_pending = 0
-        if x_draft_db.exists():
-            try:
-                x_drafts_pending = get_x_draft_store(x_draft_db).get_pending_count()
-            except Exception:
-                x_drafts_pending = 0
-        diagnostics["x_drafts_pending"] = x_drafts_pending
-        if x_drafts_pending > 0:
+        drafts_pending: int | None = 0
+        try:
+            draft_db = default_draft_db_path(pm_path)
+            if draft_db.exists():
+                drafts_pending = get_draft_store(draft_db).get_pending_count()
+        except DraftStoreConflictError as exc:
+            drafts_pending = None  # Unknown, not an empty queue.
+            status_warnings.append({"code": "draft_store_conflict", "remediation": str(exc)})
+            next_actions = [*next_actions, str(exc)]
+        except Exception:
+            drafts_pending = 0
+        # Keep the diagnostic key for existing clients (PMSERV-182).
+        diagnostics["x_drafts_pending"] = drafts_pending
+        if drafts_pending is not None and drafts_pending > 0:
             next_actions = [
                 *next_actions,
-                f"{x_drafts_pending} content draft(s) pending review — "
+                f"{drafts_pending} content draft(s) pending review — "
                 "call pm_drafts_pending to review the redacted draft and publish manually",
             ]
 
@@ -724,7 +731,6 @@ def pm_status(project_path: str | None = None) -> dict:
     # twice. Read-only (two Path.exists + two reads) — safe on this read path.
     from .rules import duplicate_rule_file_warning
 
-    status_warnings: list[dict] = []
     duplicate = duplicate_rule_file_warning(root)
     if duplicate is not None:
         status_warnings.append(duplicate)
@@ -2770,11 +2776,11 @@ def pm_outbox_reject(
 # system. All these tools are mutators on the per-project store and are
 # deliberately NOT in any allowlist, so they are hidden under PM_LENS=1
 # (mirroring the pm_outbox_* review tools). The review queue exposes ONLY
-# redacted fields — enforced structurally in XDraftStore.pending.
+# redacted fields — enforced structurally in DraftStore.pending.
 
-_VALID_X_SIGNAL_TYPES = {"lesson", "insight", "adr", "mistake"}
-_VALID_X_KINDS = {"single", "thread"}
-_VALID_X_DRAFT_STATUSES = {"draft", "redacted", "rejected", "posted", "all"}
+_VALID_DRAFT_SIGNAL_TYPES = {"lesson", "insight", "adr", "mistake"}
+_VALID_DRAFT_KINDS = {"single", "thread"}
+_VALID_DRAFT_STATUSES = {"draft", "redacted", "rejected", "posted", "all"}
 
 # Debounce window (PMSERV-121): if a live draft was staged within this many
 # seconds, a second *distinct* draft is suppressed so one session's many
@@ -2782,10 +2788,10 @@ _VALID_X_DRAFT_STATUSES = {"draft", "redacted", "rejected", "posted", "all"}
 _DRAFT_DEBOUNCE_SECONDS = 600
 
 
-def _get_x_draft_store(project_path: str | None):
-    """Resolve the per-project XDraftStore via the db_path-keyed factory."""
+def _get_draft_store(project_path: str | None):
+    """Resolve the per-project DraftStore via the db_path-keyed factory."""
     pm_path = _get_pm_path(project_path)
-    return get_x_draft_store(default_x_draft_db_path(pm_path))
+    return get_draft_store(default_draft_db_path(pm_path))
 
 
 @_tool()
@@ -2821,19 +2827,20 @@ def pm_draft_content(
     NOTE: raw_content is the unscrubbed concentrate and is NEVER surfaced by
     the review queue (pm_drafts_pending). Call pm_redact_draft next.
     """
-    if signal_type not in _VALID_X_SIGNAL_TYPES:
+    if signal_type not in _VALID_DRAFT_SIGNAL_TYPES:
         return {
             "status": "error",
             "code": "invalid_signal_type",
             "message": (
-                f"signal_type must be one of {sorted(_VALID_X_SIGNAL_TYPES)}, got {signal_type!r}"
+                f"signal_type must be one of {sorted(_VALID_DRAFT_SIGNAL_TYPES)}, "
+                f"got {signal_type!r}"
             ),
         }
-    if kind not in _VALID_X_KINDS:
+    if kind not in _VALID_DRAFT_KINDS:
         return {
             "status": "error",
             "code": "invalid_kind",
-            "message": f"kind must be one of {sorted(_VALID_X_KINDS)}, got {kind!r}",
+            "message": f"kind must be one of {sorted(_VALID_DRAFT_KINDS)}, got {kind!r}",
         }
     if not source_refs:
         return {
@@ -2843,7 +2850,10 @@ def pm_draft_content(
         }
 
     normalized = normalize_source_refs(source_refs)
-    store = _get_x_draft_store(project_path)
+    try:
+        store = _get_draft_store(project_path)
+    except DraftStoreConflictError as exc:
+        return {"status": "error", "code": "draft_store_conflict", "message": str(exc)}
 
     existing = store.find_live_by_source_refs(normalized)
     if existing:
@@ -2942,7 +2952,10 @@ def pm_redact_draft(draft_id: int, project_path: str | None = None) -> dict:
     semantic pass (/secret-scan + /privacy-check) on the redacted fields, then
     have the human review via pm_drafts_pending and publish manually.
     """
-    store = _get_x_draft_store(project_path)
+    try:
+        store = _get_draft_store(project_path)
+    except DraftStoreConflictError as exc:
+        return {"status": "error", "code": "draft_store_conflict", "message": str(exc)}
     row = store.get(draft_id)
     if row is None:
         return {"status": "error", "code": "not_found", "message": f"draft {draft_id} not found"}
@@ -3015,7 +3028,10 @@ def pm_reject_draft(draft_id: int, reason: str, project_path: str | None = None)
             "code": "reason_required",
             "message": "reason is required and must be non-empty",
         }
-    store = _get_x_draft_store(project_path)
+    try:
+        store = _get_draft_store(project_path)
+    except DraftStoreConflictError as exc:
+        return {"status": "error", "code": "draft_store_conflict", "message": str(exc)}
     row = store.get(draft_id)
     if row is None:
         return {"status": "error", "code": "not_found", "message": f"draft {draft_id} not found"}
@@ -3044,12 +3060,12 @@ def pm_drafts_pending(
 
     filter_status: draft | redacted | rejected | posted | all
     """
-    if filter_status not in _VALID_X_DRAFT_STATUSES:
+    if filter_status not in _VALID_DRAFT_STATUSES:
         return {
             "status": "error",
             "code": "invalid_filter_status",
             "message": (
-                f"filter_status must be one of {sorted(_VALID_X_DRAFT_STATUSES)}, "
+                f"filter_status must be one of {sorted(_VALID_DRAFT_STATUSES)}, "
                 f"got {filter_status!r}"
             ),
         }
@@ -3059,7 +3075,10 @@ def pm_drafts_pending(
             "code": "invalid_pagination",
             "message": "limit and offset must be non-negative",
         }
-    store = _get_x_draft_store(project_path)
+    try:
+        store = _get_draft_store(project_path)
+    except DraftStoreConflictError as exc:
+        return {"status": "error", "code": "draft_store_conflict", "message": str(exc)}
     page = store.pending(filter_status=filter_status, limit=limit, offset=offset)
     return {"status": "ok", **page}
 

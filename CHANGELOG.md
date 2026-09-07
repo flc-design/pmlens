@@ -5,10 +5,10 @@
 ### Added
 
 - **Destination-neutral content tool names with compatibility aliases
-  (PMSERV-182 stage 1 / PMSERV-189)**: `pm_draft_content` and
+  (PMSERV-182 / PMSERV-189)**: `pm_draft_content` and
   `pm_drafts_pending` are the preferred names. `pm_draft_x` and
   `pm_x_drafts_pending` remain callable with the same arguments and results,
-  sharing the existing `.pm/x_drafts.db`. Full mode exposes 46 tool names for
+  sharing the same project-local store. Full mode exposes 46 tool names for
   44 operations; Lens remains at 16 names, or 18 with Desktop outbox writes.
   No legacy-name removal version is scheduled. See
   [the migration guide](docs/content-tool-migration.md).
@@ -17,8 +17,17 @@
 
 - Rule template v14 and new built-in content workflows use the preferred tool
   names. Existing host permissions and copied workflows using the legacy names
-  continue to work. The database path, schema and append-only triggers remain
-  unchanged in this compatibility stage.
+  continue to work.
+- **Neutral draft storage names with legacy database support (PMSERV-190)**:
+  new projects use `.pm/drafts.db`; existing `.pm/x_drafts.db` files continue
+  being used in place, including their WAL/SHM files. The implementation moves
+  to `pmlens.draft_store` and five test files lose their `x` prefix. The old
+  Python module re-exports the same implementation and factory cache. SQL
+  schema, IDs, states and append-only triggers stay unchanged. If both database
+  names exist, content tools report `draft_store_conflict` without opening
+  either; `pm_status` warns and reports an unknown pending count. Older versions
+  cannot discover a new `drafts.db`; see the migration guide before mixing
+  versions or downgrading.
 
 ## [0.15.1] - 2026-09-07
 

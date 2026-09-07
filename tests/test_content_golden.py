@@ -1,4 +1,4 @@
-"""Golden-fixture regression for the X content pipeline (PMSERV-121).
+"""Golden-fixture regression for the content pipeline (PMSERV-121).
 
 Pins the *artifact shape* of a representative build-in-public thread end to
 end: a realistic hook + thread (the kind a session would draft) is run through
@@ -29,7 +29,7 @@ from pmlens.redaction import redact
 # ─── Golden input (assembled at runtime — no literal secret forms) ───────────
 
 _FAKE_AWS = "AKIA" + "A" * 16
-_PATH = "/Users/flc001/.pm/x_drafts.db"
+_PATH = "/Users/flc001/.pm/drafts.db"
 _EMAIL = "dev@example.com"
 
 GOLDEN_HOOK = "Shipped PR2 hardening for our build-in-public pipeline (PMSERV-121)"
@@ -96,10 +96,10 @@ def _make_project(tmp_path: Path) -> Path:
 
 
 def test_golden_pipeline_surfaces_redacted_artifact(tmp_path: Path) -> None:
-    """End to end: pm_draft_x → pm_redact_draft → pm_x_drafts_pending yields the
+    """End to end: pm_draft_content → pm_redact_draft → pm_drafts_pending yields the
     golden redacted artifact, and the raw concentrate / secret never leak."""
     proj = _make_project(tmp_path)
-    draft_id = srv.pm_draft_x(
+    draft_id = srv.pm_draft_content(
         signal_type="lesson",
         source_refs=["memory:190", "ADR-024"],
         raw_content="raw concentrate " + _FAKE_AWS,
@@ -111,7 +111,7 @@ def test_golden_pipeline_surfaces_redacted_artifact(tmp_path: Path) -> None:
     assert red["status"] == "redacted"
     assert red["report"] == EXPECTED_REPORT
 
-    page = srv.pm_x_drafts_pending(filter_status="redacted", project_path=str(proj))
+    page = srv.pm_drafts_pending(filter_status="redacted", project_path=str(proj))
     item = page["items"][0]
     assert item["redacted_hook"] == EXPECTED_HOOK
     assert json.loads(item["redacted_body_json"]) == EXPECTED_SEGMENTS

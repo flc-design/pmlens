@@ -1,6 +1,6 @@
-"""Tool-level tests for the X content pipeline MCP tools (PMSERV-116).
+"""Tool-level tests for the content pipeline MCP tools (PMSERV-116).
 
-pm_draft_x / pm_redact_draft / pm_reject_draft / pm_x_drafts_pending. The
+pm_draft_content / pm_redact_draft / pm_reject_draft / pm_drafts_pending. The
 end-to-end must-fix #1 check lives here: a secret put into a draft must never
 surface through the review queue.
 """
@@ -13,13 +13,14 @@ from pathlib import Path
 import pytest
 
 import pmlens.server as srv
+from pmlens.draft_store import DraftStore
 
 # Assembled at runtime so the literal never appears in source (GitHub secret
 # scanning flags secret-shaped literals; this is FAKE test data).
 _FAKE_AWS = "AKIA" + "A" * 16
 
 
-def _make_project(tmp_path: Path, name: str = "xproj") -> Path:
+def _make_project(tmp_path: Path, name: str = "draftproj") -> Path:
     """Minimal project root with .pm/project.yaml + tasks.yaml + daily/."""
     proj = tmp_path / name
     (proj / ".pm" / "daily").mkdir(parents=True)
@@ -37,12 +38,12 @@ def _make_project(tmp_path: Path, name: str = "xproj") -> Path:
     return proj
 
 
-# ─── pm_draft_x ──────────────────────────────────────
+# ─── pm_draft_content ──────────────────────────────────────
 
 
-def test_pm_draft_x_saves(tmp_path: Path) -> None:
+def test_pm_draft_content_saves(tmp_path: Path) -> None:
     proj = _make_project(tmp_path)
-    res = srv.pm_draft_x(
+    res = srv.pm_draft_content(
         signal_type="lesson",
         source_refs=["memory:190"],
         raw_content="raw concentrate",
@@ -55,9 +56,9 @@ def test_pm_draft_x_saves(tmp_path: Path) -> None:
     assert res["source_refs"] == "memory:190"
 
 
-def test_pm_draft_x_invalid_signal_type(tmp_path: Path) -> None:
+def test_pm_draft_content_invalid_signal_type(tmp_path: Path) -> None:
     proj = _make_project(tmp_path)
-    res = srv.pm_draft_x(
+    res = srv.pm_draft_content(
         signal_type="bogus",
         source_refs=["memory:1"],
         raw_content="r",
@@ -68,9 +69,9 @@ def test_pm_draft_x_invalid_signal_type(tmp_path: Path) -> None:
     assert res["code"] == "invalid_signal_type"
 
 
-def test_pm_draft_x_invalid_kind(tmp_path: Path) -> None:
+def test_pm_draft_content_invalid_kind(tmp_path: Path) -> None:
     proj = _make_project(tmp_path)
-    res = srv.pm_draft_x(
+    res = srv.pm_draft_content(
         signal_type="lesson",
         source_refs=["memory:1"],
         raw_content="r",
@@ -82,18 +83,18 @@ def test_pm_draft_x_invalid_kind(tmp_path: Path) -> None:
     assert res["code"] == "invalid_kind"
 
 
-def test_pm_draft_x_empty_source_refs(tmp_path: Path) -> None:
+def test_pm_draft_content_empty_source_refs(tmp_path: Path) -> None:
     proj = _make_project(tmp_path)
-    res = srv.pm_draft_x(
+    res = srv.pm_draft_content(
         signal_type="lesson", source_refs=[], raw_content="r", hook="h", project_path=str(proj)
     )
     assert res["status"] == "error"
     assert res["code"] == "source_refs_required"
 
 
-def test_pm_draft_x_dedupes_same_source_refs(tmp_path: Path) -> None:
+def test_pm_draft_content_dedupes_same_source_refs(tmp_path: Path) -> None:
     proj = _make_project(tmp_path)
-    first = srv.pm_draft_x(
+    first = srv.pm_draft_content(
         signal_type="lesson",
         source_refs=["ADR-024", "memory:190"],
         raw_content="r",
@@ -101,7 +102,7 @@ def test_pm_draft_x_dedupes_same_source_refs(tmp_path: Path) -> None:
         project_path=str(proj),
     )
     # Re-trigger with the same sources in a different order → deduped.
-    second = srv.pm_draft_x(
+    second = srv.pm_draft_content(
         signal_type="lesson",
         source_refs=["memory:190", "ADR-024"],
         raw_content="r2",
@@ -114,18 +115,18 @@ def test_pm_draft_x_dedupes_same_source_refs(tmp_path: Path) -> None:
     assert first["draft_id"] in second["warnings"][0]["existing_ids"]
 
 
-def test_pm_draft_x_debounces_recent_distinct_draft(tmp_path: Path) -> None:
+def test_pm_draft_content_debounces_recent_distinct_draft(tmp_path: Path) -> None:
     """PMSERV-121: a second distinct draft staged in the same session (within
     the debounce window) is suppressed to avoid one-draft-per-lesson spam."""
     proj = _make_project(tmp_path)
-    first = srv.pm_draft_x(
+    first = srv.pm_draft_content(
         signal_type="lesson",
         source_refs=["memory:1"],
         raw_content="r1",
         hook="h1",
         project_path=str(proj),
     )
-    second = srv.pm_draft_x(
+    second = srv.pm_draft_content(
         signal_type="lesson",
         source_refs=["memory:2"],  # DIFFERENT sources — not a dedupe case
         raw_content="r2",
@@ -138,16 +139,16 @@ def test_pm_draft_x_debounces_recent_distinct_draft(tmp_path: Path) -> None:
     assert first["draft_id"] in second["warnings"][0]["recent_ids"]
 
 
-def test_pm_draft_x_force_overrides_debounce(tmp_path: Path) -> None:
+def test_pm_draft_content_force_overrides_debounce(tmp_path: Path) -> None:
     proj = _make_project(tmp_path)
-    srv.pm_draft_x(
+    srv.pm_draft_content(
         signal_type="lesson",
         source_refs=["memory:1"],
         raw_content="r1",
         hook="h1",
         project_path=str(proj),
     )
-    forced = srv.pm_draft_x(
+    forced = srv.pm_draft_content(
         signal_type="lesson",
         source_refs=["memory:2"],
         raw_content="r2",
@@ -163,7 +164,7 @@ def test_pm_draft_x_force_overrides_debounce(tmp_path: Path) -> None:
 
 def test_pm_redact_draft_scrubs_and_reports(tmp_path: Path) -> None:
     proj = _make_project(tmp_path)
-    rid = srv.pm_draft_x(
+    rid = srv.pm_draft_content(
         signal_type="lesson",
         source_refs=["memory:190"],
         raw_content="raw",
@@ -190,7 +191,7 @@ def test_pm_redact_draft_not_found(tmp_path: Path) -> None:
 
 def test_pm_redact_draft_skips_non_draft(tmp_path: Path) -> None:
     proj = _make_project(tmp_path)
-    rid = srv.pm_draft_x(
+    rid = srv.pm_draft_content(
         signal_type="lesson",
         source_refs=["memory:1"],
         raw_content="r",
@@ -208,7 +209,7 @@ def test_pm_redact_draft_skips_non_draft(tmp_path: Path) -> None:
 
 def test_pm_reject_draft(tmp_path: Path) -> None:
     proj = _make_project(tmp_path)
-    rid = srv.pm_draft_x(
+    rid = srv.pm_draft_content(
         signal_type="lesson",
         source_refs=["memory:1"],
         raw_content="r",
@@ -218,7 +219,7 @@ def test_pm_reject_draft(tmp_path: Path) -> None:
     res = srv.pm_reject_draft(draft_id=rid, reason="off-topic", project_path=str(proj))
     assert res["status"] == "rejected"
     # Now the same source_refs are free again (rejected is not 'live').
-    again = srv.pm_draft_x(
+    again = srv.pm_draft_content(
         signal_type="lesson",
         source_refs=["memory:1"],
         raw_content="r",
@@ -242,29 +243,29 @@ def test_pm_reject_draft_not_found(tmp_path: Path) -> None:
     assert res["code"] == "not_found"
 
 
-# ─── pm_x_drafts_pending ─────────────────────────────
+# ─── pm_drafts_pending ─────────────────────────────
 
 
-def test_pm_x_drafts_pending_invalid_status(tmp_path: Path) -> None:
+def test_pm_drafts_pending_invalid_status(tmp_path: Path) -> None:
     proj = _make_project(tmp_path)
-    res = srv.pm_x_drafts_pending(filter_status="bogus", project_path=str(proj))
+    res = srv.pm_drafts_pending(filter_status="bogus", project_path=str(proj))
     assert res["status"] == "error"
     assert res["code"] == "invalid_filter_status"
 
 
-def test_pm_x_drafts_pending_invalid_pagination(tmp_path: Path) -> None:
+def test_pm_drafts_pending_invalid_pagination(tmp_path: Path) -> None:
     proj = _make_project(tmp_path)
-    res = srv.pm_x_drafts_pending(limit=-1, project_path=str(proj))
+    res = srv.pm_drafts_pending(limit=-1, project_path=str(proj))
     assert res["status"] == "error"
     assert res["code"] == "invalid_pagination"
 
 
-def test_pm_x_drafts_pending_never_leaks_raw_content(tmp_path: Path) -> None:
+def test_pm_drafts_pending_never_leaks_raw_content(tmp_path: Path) -> None:
     """End-to-end must-fix #1: a secret put into a draft must never surface via
     the review queue the human copy-pastes from."""
     proj = _make_project(tmp_path)
     secret = _FAKE_AWS
-    rid = srv.pm_draft_x(
+    rid = srv.pm_draft_content(
         signal_type="lesson",
         source_refs=["memory:190"],
         raw_content=f"concentrate with {secret} and /Users/flc001/x",
@@ -274,7 +275,7 @@ def test_pm_x_drafts_pending_never_leaks_raw_content(tmp_path: Path) -> None:
     )["draft_id"]
     srv.pm_redact_draft(draft_id=rid, project_path=str(proj))
 
-    page = srv.pm_x_drafts_pending(filter_status="redacted", project_path=str(proj))
+    page = srv.pm_drafts_pending(filter_status="redacted", project_path=str(proj))
     assert page["status"] == "ok"
     assert page["total"] == 1
     item = page["items"][0]
@@ -293,7 +294,7 @@ def test_pm_redact_draft_handles_non_list_body_json(tmp_path: Path) -> None:
     character-by-character (it would produce hundreds of 1-char segments)."""
     proj = _make_project(tmp_path)
     # Inject a draft whose body_json is a bare JSON string, not a list.
-    store = srv._get_x_draft_store(str(proj))
+    store = srv._get_draft_store(str(proj))
     rid = store.append(
         signal_type="lesson",
         source_refs="m:1",
@@ -303,7 +304,7 @@ def test_pm_redact_draft_handles_non_list_body_json(tmp_path: Path) -> None:
     )
     res = srv.pm_redact_draft(draft_id=rid, project_path=str(proj))
     assert res["status"] == "redacted"
-    page = srv.pm_x_drafts_pending(filter_status="redacted", project_path=str(proj))
+    page = srv.pm_drafts_pending(filter_status="redacted", project_path=str(proj))
     segs = json.loads(page["items"][0]["redacted_body_json"])
     assert isinstance(segs, list)
     assert len(segs) == 1  # wrapped, not exploded into characters
@@ -313,12 +314,13 @@ def test_pm_redact_draft_handles_non_list_body_json(tmp_path: Path) -> None:
     "create_name, review_name",
     [("pm_draft_content", "pm_x_drafts_pending"), ("pm_draft_x", "pm_drafts_pending")],
 )
+@pytest.mark.parametrize("db_name", ["drafts.db", "x_drafts.db"])
 def test_content_names_share_existing_drafts(
-    tmp_path: Path, create_name: str, review_name: str
+    tmp_path: Path, create_name: str, review_name: str, db_name: str
 ) -> None:
     """Switching names preserves existing IDs, dedupe and redaction (PMSERV-189)."""
     proj = _make_project(tmp_path)
-    store = srv._get_x_draft_store(str(proj))
+    store = DraftStore(proj / ".pm" / db_name)
     original_id = store.append(
         signal_type="lesson",
         source_refs="memory:190",
@@ -370,5 +372,56 @@ def test_content_names_share_existing_drafts(
     assert row["kind"] == "single"
     assert row["hashtags"] == "one,two"
     assert row["workflow_id"] == "WF-001"
-    assert (proj / ".pm" / "x_drafts.db").is_file()
-    assert not (proj / ".pm" / "drafts.db").exists()
+    assert (proj / ".pm" / db_name).is_file()
+    other_name = "drafts.db" if db_name == "x_drafts.db" else "x_drafts.db"
+    assert not (proj / ".pm" / other_name).exists()
+
+
+@pytest.mark.parametrize(
+    "name, args",
+    [
+        (
+            "pm_draft_content",
+            {
+                "signal_type": "lesson",
+                "source_refs": ["m:new"],
+                "raw_content": "raw",
+                "hook": "hook",
+            },
+        ),
+        (
+            "pm_draft_x",
+            {
+                "signal_type": "lesson",
+                "source_refs": ["m:new"],
+                "raw_content": "raw",
+                "hook": "hook",
+            },
+        ),
+        ("pm_redact_draft", {"draft_id": 1}),
+        ("pm_reject_draft", {"draft_id": 1, "reason": "reject"}),
+        ("pm_drafts_pending", {}),
+        ("pm_x_drafts_pending", {}),
+    ],
+)
+def test_conflicting_databases_block_tools_without_touching_either(
+    tmp_path: Path, name: str, args: dict
+) -> None:
+    proj = _make_project(tmp_path)
+    for filename in ("drafts.db", "x_drafts.db"):
+        store = (
+            srv._get_draft_store(str(proj))
+            if filename == "drafts.db"
+            else DraftStore(proj / ".pm" / filename)
+        )
+        store.append("lesson", "m:existing", f"private {filename}")
+    # A cached canonical store must not hide a legacy store appearing later.
+    # Both database files and any sidecars must stay byte-identical.
+    before = {p.name: p.read_bytes() for p in (proj / ".pm").glob("*.db*")}
+    result = getattr(srv, name)(project_path=str(proj), **args)
+    assert result["status"] == "error"
+    assert result["code"] == "draft_store_conflict"
+    assert "back up both databases" in result["message"]
+    assert "private" not in json.dumps(result)
+    after = {p.name: p.read_bytes() for p in (proj / ".pm").glob("*.db*")}
+    assert after == before

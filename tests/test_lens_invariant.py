@@ -225,14 +225,14 @@ def test_outbox_log_does_not_mutate_main_memory_dbs(tmp_path: Path) -> None:
     )
 
 
-# ─── X content pipeline Lens gating (PMSERV-113 / PMSERV-116) ──────────────
-# The x_drafts tools are Claude-Code-only: NOT in RO_ALLOWLIST and NOT in
+# ─── Content pipeline Lens gating (PMSERV-113 / PMSERV-116) ──────────────
+# The content draft tools are Claude-Code-only: NOT in RO_ALLOWLIST and NOT in
 # OUTBOX_WRITE_ALLOWLIST, so PM_LENS=1 hides them entirely (mirroring the
 # pm_outbox_* review tools). This is how must-fix #3 is satisfied — no
-# x_drafts mutator is even reachable on a Lens host, so x_drafts.db can never
+# content draft mutator is even reachable on a Lens host, so neither draft database can ever
 # be created/written there.
 
-_X_DRAFT_TOOLS = (
+_CONTENT_DRAFT_TOOLS = (
     "pm_draft_content",
     "pm_drafts_pending",
     "pm_draft_x",
@@ -242,18 +242,18 @@ _X_DRAFT_TOOLS = (
 )
 
 
-def test_x_draft_tools_registered_in_claude_code_mode() -> None:
+def test_content_draft_tools_registered_in_claude_code_mode() -> None:
     """Sanity (PM_LENS=0, the normal test process): all six content tool names
     ARE registered, so the Lens=1 hidden assertion below is meaningful."""
     import pmlens.server as srv
 
     assert srv.PM_LENS_ENABLED is False
-    for name in _X_DRAFT_TOOLS:
+    for name in _CONTENT_DRAFT_TOOLS:
         assert name in srv.REGISTERED_TOOLS, f"{name} should be registered in Claude Code mode"
 
 
-def test_x_draft_tools_hidden_under_lens(tmp_path: Path) -> None:
-    """Under PM_LENS=1 none of the x_drafts tools may register with MCP — they
+def test_content_draft_tools_hidden_under_lens(tmp_path: Path) -> None:
+    """Under PM_LENS=1 none of the content draft tools may register with MCP — they
     are mutators not in any allowlist, so the @_tool() gate returns the bare
     function and never adds them to REGISTERED_TOOLS."""
     script = textwrap.dedent("""
@@ -264,7 +264,7 @@ def test_x_draft_tools_hidden_under_lens(tmp_path: Path) -> None:
             "pm_draft_x", "pm_redact_draft", "pm_reject_draft", "pm_x_drafts_pending",
             "pm_draft_content", "pm_drafts_pending",
         ) if t in srv.REGISTERED_TOOLS]
-        assert hidden == [], f"x_drafts tools leaked into Lens registration: {hidden}"
+        assert hidden == [], f"content draft tools leaked into Lens registration: {hidden}"
         # The bare functions still exist as module attributes (just not MCP-registered).
         assert callable(srv.pm_draft_x)
         print("ok")

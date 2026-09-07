@@ -350,8 +350,8 @@ def test_content_aliases_share_schemas_and_state_over_stdio(tmp_project: Path) -
     assert preferred_page["items"][0]["id"] == saved["draft_id"]
     assert "private concentrate" not in json.dumps(preferred_page)
     assert "a draft hook" not in json.dumps(preferred_page)
-    assert (tmp_project / ".pm" / "x_drafts.db").is_file()
-    assert not (tmp_project / ".pm" / "drafts.db").exists()
+    assert (tmp_project / ".pm" / "drafts.db").is_file()
+    assert not (tmp_project / ".pm" / "x_drafts.db").exists()
 
 
 @pytest.mark.smoke
