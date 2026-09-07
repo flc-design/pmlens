@@ -43,7 +43,7 @@ flip tasks to `in_progress`, surface `warnings[]`, …) is therefore re-homed to
 
 > **Prerequisite:** `uvx` (from [uv](https://docs.astral.sh/uv/)) on PATH. The
 > bundled MCP pulls `pm-server` from PyPI automatically (published — latest
-> `pm-server@0.15.0`), so no prior `pip install` is needed.
+> `pm-server@0.15.1`), so no prior `pip install` is needed.
 
 ### ⚠️ Existing manual-registration users — migrate first
 
@@ -100,7 +100,7 @@ hooks/MCP need the reload).
 
 ## Release vs dev `.mcp.json`
 
-- **Committed (`.mcp.json`)** — release form: `uvx pm-server@0.15.0 serve`.
+- **Committed (`.mcp.json`)** — release form: `uvx pm-server@0.15.1 serve`.
   The `serve` subcommand is **required**: `__main__.cli` is a plain
   `@click.group()` with no `invoke_without_command`, so dropping it makes the
   command print usage and exit 2 without ever reaching `mcp.run()`. The
@@ -109,7 +109,7 @@ hooks/MCP need the reload).
   surface. Note what the pin does and does not fix: it selects the *wrapper*
   distribution, but that wrapper declares `pmlens` with a floor and no upper
   bound, so a later pmlens release can change the implementation underneath
-  an unchanged command. Use `uvx --from "pm-server>=0.15.0" pm-server serve`
+  an unchanged command. Use `uvx --from "pm-server>=0.15.1" pm-server serve`
   for an explicit floor instead.
 - **Dev** — local source via `uv run --project <repo> pmlens serve`, supplied
   through `--mcp-config` in the isolation harness above (not committed).

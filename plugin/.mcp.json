@@ -2,7 +2,7 @@
   "mcpServers": {
     "pmlens": {
       "command": "uvx",
-      "args": ["pm-server@0.15.0", "serve"],
+      "args": ["pm-server@0.15.1", "serve"],
       "env": {
         "PYTHONUNBUFFERED": "1"
       }

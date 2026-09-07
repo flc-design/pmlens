@@ -182,12 +182,12 @@ jobs:
         run: |
           set -euo pipefail
           # 1. The legacy FastMCP server name must be gone everywhere in src/.
-          if grep -rn 'FastMCP("pm-server")' src/; then
+          if grep -rnF 'FastMCP("pm-server"' src/; then
             echo "::error::legacy FastMCP(\"pm-server\") still present — identity flip incomplete"
             exit 1
           fi
-          # 2. The new identity must be present.
-          grep -q 'FastMCP("pmlens")' src/pmlens/server.py
+          # 2. The new identity must be present; allow optional arguments.
+          grep -qF 'FastMCP("pmlens"' src/pmlens/server.py
           # 3. The CLAUDE.md/AGENTS.md marker slug must STAY 'pm-server:begin'
           #    (ADR-032 invariant: renaming it strands existing user blocks).
           count="$(grep -c 'pm-server:begin' src/pmlens/rules.py)"

@@ -11,6 +11,7 @@ from pathlib import Path
 
 from fastmcp import FastMCP
 
+from . import __version__
 from . import storage as _storage
 from .auto_memory import (
     _MAX_INGEST_BYTES,
@@ -97,7 +98,7 @@ from .x_draft_store import (
     normalize_source_refs,
 )
 
-mcp = FastMCP("pmlens")
+mcp = FastMCP("pmlens", version=__version__)
 
 
 # ─── Lens Mode (PMSERV-079, WF-025) ──────────────────

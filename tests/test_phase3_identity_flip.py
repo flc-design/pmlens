@@ -7,7 +7,7 @@ same commit as the value it guards cannot protect THAT commit. Those positive
 assertions land HERE, in step 6, alongside the values they assert, as
 REGRESSION guards (they catch a future accidental revert) and are backstopped by
 the INDEPENDENT mechanical grep gate in ``.github/workflows/ci.yml``
-(``grep -c 'FastMCP("pm-server")' src`` == 0).
+(``grep -rF 'FastMCP("pm-server"' src`` finds no matches).
 
 Scope note: this guards the user-facing identity flipped in step 6 — the FastMCP
 server name, the .mcpb manifest top-level name, and the plugin ``.mcp.json``
@@ -38,11 +38,10 @@ class TestFastMcpIdentity:
         assert mcp.name == "pmlens"
 
     def test_server_source_has_no_legacy_fastmcp_name(self):
-        # Mirrors the CI grep gate: the legacy FastMCP("pm-server") must be gone
-        # and the new name present.
+        # Guard the name while allowing optional arguments such as version.
         src = SERVER_PY.read_text(encoding="utf-8")
-        assert 'FastMCP("pm-server")' not in src
-        assert 'FastMCP("pmlens")' in src
+        assert 'FastMCP("pm-server"' not in src
+        assert 'FastMCP("pmlens"' in src
 
 
 class TestManifestIdentity:

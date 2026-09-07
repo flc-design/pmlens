@@ -89,7 +89,7 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
 <header class="hero">
   <h1>PM Lens — Architecture &amp; Behavior</h1>
   <div class="subtitle">Claude Code 用プロジェクト管理 MCP サーバーの全体機能・データフロー・状態遷移マップ</div>
-  <div class="meta">バージョン 0.15.0 (2026-08-01 時点) · 44 MCP tools · 16 RO + 2 outbox-RW + 26 full-RW · 1,528 tests · MIT</div>
+  <div class="meta">バージョン 0.15.1 (2026-08-01 時点) · 44 MCP tools · 16 RO + 2 outbox-RW + 26 full-RW · 1,530 tests · MIT</div>
   <div class="meta">関連ドキュメント: <a href="user-guide.html">User Guide (CLI &amp; UX Tips)</a> · <a href="workflow-guide.html">Workflow Guide (作り方)</a> · <a href="cheatsheet.ja.md">Cheatsheet (ja)</a></div>
 </header>
 
@@ -324,7 +324,7 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
     <tr><td><code>pm_workflow_list</code></td><td>active/completed/paused/abandoned 一覧</td><td><span class="badge badge-ro">RO</span></td></tr>
     <tr><td><code>pm_workflow_templates</code></td><td>builtin + custom テンプレート一覧</td><td><span class="badge badge-ro">RO</span></td></tr>
   </table>
-  <p class="muted">16 RO + 2 OUTBOX-RW + 26 Full-RW = 44 ツール (2026-08-01, v0.15.0)。Lens 配布では RO_ALLOWLIST 外の
+  <p class="muted">16 RO + 2 OUTBOX-RW + 26 Full-RW = 44 ツール (2026-08-01, v0.15.1)。Lens 配布では RO_ALLOWLIST 外の
      ツールが FastMCP に未登録 = 構造的不変条件 (ADR-015/017/018)。OUTBOX 2 ツールは <code>PM_DESKTOP_WRITE=1</code>
      が追加で立った時のみ登録され、main <code>.pm/memory.db</code> は touch しない (ADR-019)。</p>
 </section>
@@ -754,7 +754,7 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
 </section>
 
 <footer style="text-align: center; color: var(--muted); font-size: 12px; margin: 24px 0;">
-  Generated 2026-06-15, counts refreshed 2026-08-06 · PM Lens v0.15.0 · Phase 2 Desktop Outbox (ADR-019) shipped · 1,528 tests · 44 MCP tools
+  Generated 2026-06-15, counts refreshed 2026-08-06 · PM Lens v0.15.1 · Phase 2 Desktop Outbox (ADR-019) shipped · 1,530 tests · 44 MCP tools
 </footer>
 
 </main>
