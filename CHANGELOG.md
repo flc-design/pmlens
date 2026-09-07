@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.15.1] - 2026-09-07
+
+Maintenance release with accurate MCP server identity, FastMCP 4.x support,
+dependency lock updates, and corrected installation guidance.
+
+MCP tool count: 44 (unchanged). Test suite: 1,530 passing.
+
 ### Changed
 
 - **fastmcp upper bound raised to `<5.0`; fresh installs now resolve fastmcp 4.x
@@ -14,9 +21,9 @@
   that reaches this codebase: the entire framework surface in use is
   `FastMCP(name, version=...)`, `mcp.tool()(fn)` and `mcp.run(transport="stdio")`, and
   `Context`, `ctx.*`, sampling, elicitation and roots do not appear in `src/`
-  at all. The negotiated protocol revision is `2025-11-25` on both fastmcp
-  3.4.6 and 4.0.3, so no host sees a wire-level change — the version a client
-  negotiates and the revision a release announces are separate facts.
+  at all. Both fastmcp 3.4.6 and 4.0.3 negotiate protocol revision
+  `2025-11-25` in the verified stdio handshake. The revision a client
+  negotiates and the revision a framework release announces are separate facts.
 
   The defensive upper bound itself is retained one major later, for the same
   reason v0.5.0 introduced it: a floating range is what users install, and a
@@ -45,12 +52,34 @@
   time a defense in this area was documented and not executed, and a comment
   cannot fail a build.
 
+### Security
+
+- **Refresh the locked dependency versions**: `uv.lock` now pins
+  `cryptography` 50.0.0 (GHSA-g6cj-pr64-35w5) and `pip` 26.2.1;
+  `requirements.lock` already pinned `cryptography` 50.0.0 and now pins
+  `pip` 26.2. These changes update the reproducible development and test
+  environments. Standard PyPI installs resolve dependencies from
+  `pyproject.toml` rather than either lockfile.
+
 ### Fixed
 
 - **MCP server identity reports the pmlens version (PMSERV-179)**:
   `serverInfo.version` now uses the same `__version__` as the CLI. Previously,
   FastMCP supplied its own framework version, making it hard to identify the
   running pmlens release. Real stdio regression tests cover full and Lens modes.
+
+- **Installation guidance uses the current package (PMSERV-183)**:
+  README and quick-reference instructions now recommend `pipx install pmlens`
+  and `pipx upgrade pmlens`, avoiding the retired package name in new-user
+  instructions and supporting externally managed Python installations.
+
+- **Architecture documentation reports the correct Lens tool counts
+  (PMSERV-184)**: 16 tools in read-only Lens mode and 18 with Desktop outbox
+  writes enabled, out of 44 total tools.
+
+- **Release recovery guidance reflects the unified publisher (PMSERV-174)**:
+  document the completed move to one approval for both distributions and the
+  publisher configuration required to restore the fallback wrapper workflow.
 
 ## [0.15.0] - 2026-08-01
 
