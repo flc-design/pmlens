@@ -1,5 +1,50 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+
+- **fastmcp upper bound raised to `<5.0`; fresh installs now resolve fastmcp 4.x
+  (PMSERV-185)**: the shipped range moves from `fastmcp>=3.2.0,<4.0` to
+  `>=3.2.0,<5.0`, so `pipx install pmlens` now pulls fastmcp 4 and, with it,
+  MCP Python SDK 2.x in place of 1.x and `httpx2` in place of `httpx`.
+
+  fastmcp 4 removes server-initiated sampling and roots, restricts
+  `ctx.elicit()` to the old protocol, and drops the 3.x module shims. None of
+  that reaches this codebase: the entire framework surface in use is
+  `FastMCP(name)`, `mcp.tool()(fn)` and `mcp.run(transport="stdio")`, and
+  `Context`, `ctx.*`, sampling, elicitation and roots do not appear in `src/`
+  at all. The negotiated protocol revision is `2025-11-25` on both fastmcp
+  3.4.6 and 4.0.3, so no host sees a wire-level change — the version a client
+  negotiates and the revision a release announces are separate facts.
+
+  The defensive upper bound itself is retained one major later, for the same
+  reason v0.5.0 introduced it: a floating range is what users install, and a
+  future 5.x is exactly the event nobody will be watching for.
+
+- **`requirements.lock` had no update path at all, automated or manual
+  (PMSERV-185)**: Dependabot's `pip` ecosystem entry has never once touched the
+  file — the only `pip`-ecosystem PR this repository has ever received changed
+  `pyproject.toml` alone — because that ecosystem matches `requirements*.txt`
+  rather than a `.lock` name. Independently, the regeneration command
+  documented in `ci.yml` omitted `--upgrade`, and `uv pip compile` reads its
+  existing output file as resolution preferences: run as written against a lock
+  that already exists, it produced a byte-identical pin set while fastmcp 4 sat
+  on PyPI.
+
+  So the hash-verified tree would have stayed on fastmcp 3.4.5 while
+  `pyproject.toml` said `<5.0` and `uv.lock` said 4.x — the three-way split
+  v0.15.0 removed, restored, with `test-locked` green throughout because that
+  job installs the project with `--no-deps` and 3.4.5 still satisfies the
+  widened range. Both lockfiles now pin fastmcp 4.0.3, the version the floating
+  matrix actually resolved and proved green, so the tested tree and the pinned
+  tree are the same tree.
+
+  Both comments are corrected to state what is true rather than what was
+  intended. PMSERV-186 tracks replacing them with a guard: this is the second
+  time a defense in this area was documented and not executed, and a comment
+  cannot fail a build.
+
 ## [0.15.0] - 2026-08-01
 
 Three things had been broken for months, and all three were invisible because
