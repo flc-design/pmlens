@@ -7,7 +7,7 @@ same commit as the value it guards cannot protect THAT commit. Those positive
 assertions land HERE, in step 6, alongside the values they assert, as
 REGRESSION guards (they catch a future accidental revert) and are backstopped by
 the INDEPENDENT mechanical grep gate in ``.github/workflows/ci.yml``
-(``grep -c 'FastMCP("pm-server")' src`` == 0).
+(``grep -rF 'FastMCP("pm-server"' src`` finds no matches).
 
 Scope note: this guards the user-facing identity flipped in step 6 — the FastMCP
 server name, the .mcpb manifest top-level name, and the plugin ``.mcp.json``
