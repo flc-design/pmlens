@@ -43,9 +43,14 @@ jobs:
     # The `test` matrix above resolves dependencies fresh every run. That is
     # deliberate and stays — it is the early warning for upstream breakage,
     # which matters because this project ships a floating range
-    # (`fastmcp>=3.2.0,<4.0`) and users get whatever resolves at install time.
-    # A future fastmcp 3.x could change what `mcp` resolves to while still
+    # (`fastmcp>=3.2.0,<5.0`) and users get whatever resolves at install time.
+    # A future fastmcp 4.x could change what `mcp` resolves to while still
     # satisfying that range; the floating job is what would notice.
+    #
+    # It already has. The fastmcp 3 -> 4 bump (PMSERV-185) swapped the
+    # transitive MCP SDK from `mcp` 1.x to `mcp` 2.x and httpx for httpx2 —
+    # a resolution change no pinned job would have surfaced, and this matrix
+    # is where it first ran.
     #
     # What was missing is the other half. requirements.lock has carried
     # SHA-256 hashes since v0.6.1 and the changelog advertised
@@ -80,7 +85,23 @@ jobs:
         #
         # requirements.lock MUST be regenerated with:
         #   uv pip compile --universal --generate-hashes --all-extras \
-        #     --output-file requirements.lock pyproject.toml
+        #     --upgrade --output-file requirements.lock pyproject.toml
+        #
+        # `--upgrade` is load-bearing and its absence here was a real defect
+        # (PMSERV-185). `uv pip compile` reads the EXISTING output file as
+        # resolution preferences, exactly as pip-compile does. Run against a
+        # lock that already exists, the command as previously written pins the
+        # resolution to what is already in the file: measured on uv 0.11.25, it
+        # produced a byte-identical pin set while fastmcp 4 was sitting on
+        # PyPI. Anyone following this comment to the letter would have
+        # concluded the lock was already fresh.
+        #
+        # Use `--upgrade-package <name>` when the intent is to move one
+        # dependency rather than refresh the whole tree. The file as committed
+        # is the product of targeted moves, so a bare `--upgrade` will also
+        # pull unrelated transitives forward — that is not drift in this file,
+        # it is the backlog of every refresh that did not happen while the
+        # command above was a no-op. PMSERV-186 decides how that gets paid off.
         #
         # --universal is load-bearing, not a preference. This job failed on its
         # very first run because the lock had been generated with pip-compile on
@@ -109,9 +130,17 @@ jobs:
     # requirements.lock pinned fastmcp 3.2.4, uv.lock pinned 3.3.1, and the
     # environment everyone actually ran had 3.4.5.
     #
-    #   requirements.lock — the hash-verified install above. Kept fresh by
-    #                       Dependabot's `pip` ecosystem (pip-compile is an
-    #                       officially supported manifest type).
+    #   requirements.lock — the hash-verified install above. NOT kept fresh by
+    #                       Dependabot, despite what this comment used to say.
+    #                       Across every Dependabot PR this repo has received,
+    #                       not one has touched the file; the only
+    #                       `pip`-ecosystem PR it has ever opened changed
+    #                       pyproject.toml alone (PMSERV-185). That ecosystem
+    #                       matches `requirements*.txt`, not a `.lock` name,
+    #                       whatever tool wrote the contents. Refreshing it is
+    #                       a MANUAL step — the `--upgrade` form above.
+    #                       PMSERV-186 tracks replacing this paragraph with a
+    #                       guard, since a comment cannot fail a build.
     #   uv.lock          — the development environment: the devcontainer and
     #                       `uv run --project` in plugin/README.md.
     #

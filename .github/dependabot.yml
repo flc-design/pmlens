@@ -31,13 +31,23 @@ updates:
 
   # PMSERV-178: keep requirements.lock fresh.
   #
-  # This is the load-bearing one. requirements.lock is the hash-verified tree
-  # that ci.yml's `test-locked` job installs with `--require-hashes`, and a
-  # lock nobody updates is how it ended up two minor versions behind reality
-  # (pinned fastmcp 3.2.4 while everyone ran 3.4.5). It is pip-compile output,
-  # which GitHub supports natively under the `pip` ecosystem — a mature path,
-  # deliberately chosen over relying on uv for the file that carries the
-  # security claim.
+  # INTENT was: requirements.lock is the hash-verified tree that ci.yml's
+  # `test-locked` job installs with `--require-hashes`, and a lock nobody
+  # updates is how it ended up two minor versions behind reality (pinned
+  # fastmcp 3.2.4 while everyone ran 3.4.5). Being pip-compile output, it
+  # looked like a natural fit for the `pip` ecosystem.
+  #
+  # MEASURED REALITY (PMSERV-185): this entry does not do that, and never has.
+  # Not one Dependabot PR in this repo's history has touched
+  # requirements.lock, and the single `pip`-ecosystem PR it has ever opened
+  # changed pyproject.toml and nothing else. The ecosystem's manifest matching
+  # covers `requirements*.txt`, pyproject.toml, Pipfile and setup.py — a file
+  # named `requirements.lock` is not a manifest to it.
+  #
+  # The entry EARNS ITS KEEP anyway: watching pyproject.toml's declared ranges
+  # is what surfaced the fastmcp v4 major. Just do not read it as the mechanism
+  # that keeps the hash-verified lock fresh — that is manual, and PMSERV-186
+  # tracks giving it a real guard.
   #
   # Grouped like github-actions above, and with the same trade-off (ADR-013):
   # one PR may mix a safe patch with a breaking major. Review accordingly.
