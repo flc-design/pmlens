@@ -43,7 +43,7 @@ class TestRulesModule:
         assert isinstance(TEMPLATE_VERSION, int)
         assert TEMPLATE_VERSION >= 1
 
-    def test_template_version_pinned_at_v13(self):
+    def test_template_version_pinned_at_v14(self):
         # ADR-008 4th-tier guard: a bump must be intentional. v11 is the PM Lens
         # rebrand — the rule-section heading "PM Server 自動行動ルール" becomes
         # "PM Lens 自動行動ルール", so the bump re-injects the new heading into
@@ -60,7 +60,9 @@ class TestRulesModule:
         # was implying a risk the implementation does not carry — this section
         # is injected into every managed CLAUDE.md/AGENTS.md, so it is the
         # widest-reaching place that framing appeared.
-        assert TEMPLATE_VERSION == 13
+        # v14 uses the preferred pm_drafts_pending name (PMSERV-189). Old
+        # templates continue to work through the registered compatibility alias.
+        assert TEMPLATE_VERSION == 14
 
     def test_template_contains_content_pipeline_section(self):
         # PMSERV-119: the on-signal trigger rule must be present in the
@@ -72,6 +74,8 @@ class TestRulesModule:
         assert "コンテンツパイプライン" in CLAUDEMD_TEMPLATE
         assert "content-pipeline" in CLAUDEMD_TEMPLATE
         assert "pm_redact_draft" in CLAUDEMD_TEMPLATE
+        assert "pm_drafts_pending" in CLAUDEMD_TEMPLATE
+        assert "pm_x_drafts_pending" not in CLAUDEMD_TEMPLATE
         assert "propose-don't-force" in CLAUDEMD_TEMPLATE
         # The safety claim is the load-bearing part and must survive rewording.
         assert "構造的に不可能" in CLAUDEMD_TEMPLATE

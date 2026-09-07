@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Destination-neutral content tool names with compatibility aliases
+  (PMSERV-182 stage 1 / PMSERV-189)**: `pm_draft_content` and
+  `pm_drafts_pending` are the preferred names. `pm_draft_x` and
+  `pm_x_drafts_pending` remain callable with the same arguments and results,
+  sharing the existing `.pm/x_drafts.db`. Full mode exposes 46 tool names for
+  44 operations; Lens remains at 16 names, or 18 with Desktop outbox writes.
+  No legacy-name removal version is scheduled. See
+  [the migration guide](docs/content-tool-migration.md).
+
+### Changed
+
+- Rule template v14 and new built-in content workflows use the preferred tool
+  names. Existing host permissions and copied workflows using the legacy names
+  continue to work. The database path, schema and append-only triggers remain
+  unchanged in this compatibility stage.
+
 ## [0.15.1] - 2026-09-07
 
 Maintenance release with accurate MCP server identity, FastMCP 4.x support,

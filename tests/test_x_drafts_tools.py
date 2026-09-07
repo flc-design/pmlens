@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 import pmlens.server as srv
 
 # Assembled at runtime so the literal never appears in source (GitHub secret
@@ -305,3 +307,68 @@ def test_pm_redact_draft_handles_non_list_body_json(tmp_path: Path) -> None:
     segs = json.loads(page["items"][0]["redacted_body_json"])
     assert isinstance(segs, list)
     assert len(segs) == 1  # wrapped, not exploded into characters
+
+
+@pytest.mark.parametrize(
+    "create_name, review_name",
+    [("pm_draft_content", "pm_x_drafts_pending"), ("pm_draft_x", "pm_drafts_pending")],
+)
+def test_content_names_share_existing_drafts(
+    tmp_path: Path, create_name: str, review_name: str
+) -> None:
+    """Switching names preserves existing IDs, dedupe and redaction (PMSERV-189)."""
+    proj = _make_project(tmp_path)
+    store = srv._get_x_draft_store(str(proj))
+    original_id = store.append(
+        signal_type="lesson",
+        source_refs="memory:190",
+        raw_content=f"private {_FAKE_AWS}",
+        hook=f"a lesson {_FAKE_AWS}",
+        body_json=json.dumps([f"segment {_FAKE_AWS}"]),
+    )
+    create = getattr(srv, create_name)
+    review = getattr(srv, review_name)
+    duplicate = create(
+        signal_type="lesson",
+        source_refs=["memory:190"],
+        raw_content="duplicate",
+        hook="duplicate",
+        force=True,
+        project_path=str(proj),
+    )
+    assert duplicate["status"] == "skipped"
+    assert duplicate["warnings"][0]["existing_ids"] == [original_id]
+    assert srv.pm_redact_draft(original_id, project_path=str(proj))["status"] == "redacted"
+    page = review(project_path=str(proj))
+    assert page["total"] == 1
+    assert page["items"][0]["id"] == original_id
+    assert _FAKE_AWS not in json.dumps(page)
+    assert "raw_content" not in page["items"][0]
+    assert page == srv.pm_drafts_pending(project_path=str(proj))
+    assert page == srv.pm_x_drafts_pending(project_path=str(proj))
+
+    # Every optional argument must survive either entry point's delegation.
+    args = dict(
+        signal_type="insight",
+        source_refs=["memory:191"],
+        raw_content="new concentrate",
+        hook="new hook",
+        body=["first", "second"],
+        kind="single",
+        hashtags=["one", "two"],
+        workflow_id="WF-001",
+        project_path=str(proj),
+    )
+    assert create(**args)["status"] == "debounced"
+    saved = create(**args, force=True)
+    row = store.get(saved["draft_id"])
+    assert saved["status"] == "saved"
+    assert row["id"] > original_id
+    assert row["raw_content"] == args["raw_content"]
+    assert row["hook"] == args["hook"]
+    assert json.loads(row["body_json"]) == args["body"]
+    assert row["kind"] == "single"
+    assert row["hashtags"] == "one,two"
+    assert row["workflow_id"] == "WF-001"
+    assert (proj / ".pm" / "x_drafts.db").is_file()
+    assert not (proj / ".pm" / "drafts.db").exists()

@@ -257,6 +257,11 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
 
 <section class="card" id="tools">
   <h2>3. MCP Tool Catalog</h2>
+  <p class="muted">未リリースの変更: <code>pm_draft_content</code> /
+     <code>pm_drafts_pending</code> を標準名として追加し、旧名も互換名として維持する。
+     Full は44機能・46登録名、Lens は16登録名（Desktop outbox有効時18）のまま。
+     既存の下書きDBを共有する。<a href="content-tool-migration.md">移行ガイド</a>参照。
+     以下のカタログと集計は公開済みバージョンを示す。</p>
   <p>44 個の MCP ツールがカテゴリ別に提供される。配布モードによって登録される ツール集合が異なる:
      <span class="badge badge-ro">RO</span> は Lens モード (<code>PM_LENS=1</code>) で利用可能、
      <span class="badge" style="background:#ede9fe;color:#6d28d9">OUTBOX</span> は Lens + <code>PM_DESKTOP_WRITE=1</code> で追加開放される Desktop Outbox 書込み tool、

@@ -268,7 +268,9 @@ class TestClaudeMdV3:
         # for the AGENTS.md hosts (PMSERV-165).
         # v13: content pipeline section reframed away from the "X /
         # build-in-public" naming (PMSERV-181) — behaviour unchanged.
-        assert TEMPLATE_VERSION == 13
+        # v14: prefer pm_drafts_pending, retaining the old MCP name as an alias
+        # for existing injected templates (PMSERV-189).
+        assert TEMPLATE_VERSION == 14
 
     def test_template_has_pm_recall(self):
         from pmlens.claudemd import CLAUDEMD_TEMPLATE

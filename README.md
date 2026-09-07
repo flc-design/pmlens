@@ -36,7 +36,7 @@ Track tasks, visualize progress, record decisions — through natural language i
 ## Features
 
 - **🔌 Multi-host first** — registers in **Claude Code, Codex CLI, Cursor and Grok Build** with one command (`pmlens install --target=auto`). Project rules sync to `CLAUDE.md` and `AGENTS.md` automatically (ADR-008). Switch hosts mid-project without losing context — same `.pm/` data, same workflows
-- **44 MCP tools** — task CRUD, child issues, status, blockers, velocity, dashboard, prompt packs, ADR, session memory, workflows, knowledge records, multi-host rules injection, cross-host outbox bridge, content pipeline (recorded knowledge → redacted drafts), and more
+- **44 MCP tools + 2 compatibility aliases** — task CRUD, child issues, status, blockers, velocity, dashboard, prompt packs, ADR, session memory, workflows, knowledge records, multi-host rules injection, cross-host outbox bridge, content pipeline (recorded knowledge → redacted drafts), and more
 - **Workflow engine** — template-based development workflows with loops, user gates, and chaining (Discovery → Development)
 - **Knowledge records** — structured findings between casual memory and formal ADR (research, tradeoff, spec, etc.)
 - **Super Research skill** — 3 parallel agents (Domain Expert, Critical Analyst, Lateral Thinker) + Depth Check (6 dimensions) + Fact Check + Cross-Check
@@ -260,7 +260,7 @@ dataclasses, atomic-write helpers).
 
 ---
 
-## MCP Tools (44 tools)
+## MCP Tools (44 tools + 2 compatibility aliases)
 
 ### Project Management
 
@@ -421,10 +421,16 @@ Deterministic redaction is the one safety layer, and raw content never leaves th
 
 | Tool | Description |
 |---|---|
-| `pm_draft_x` | Stage a draft from a `.pm` signal — raw content stays internal (PMSERV-113) |
+| `pm_draft_content` | Stage a draft from a `.pm` signal — raw content stays internal (PMSERV-113) |
 | `pm_redact_draft` | Layer-1 deterministic redaction prefilter — scrubs hook + each body segment, count-only report |
-| `pm_x_drafts_pending` | Review queue for staged drafts — exposes ONLY redacted / safe fields |
+| `pm_drafts_pending` | Review queue for staged drafts — exposes ONLY redacted / safe fields |
 | `pm_reject_draft` | Discard a staged draft with a mandatory, auditable reason |
+
+The preferred names above are an **unreleased change after v0.15.1**.
+`pm_draft_x` and `pm_x_drafts_pending` remain supported compatibility aliases,
+using the same arguments, results and existing `.pm/x_drafts.db`. v0.15.1 and
+earlier use only these legacy names. Existing permissions keep working for the
+legacy names; see [the migration guide](docs/content-tool-migration.md).
 
 ### Outbox (Cross-Host Bridge)
 
@@ -738,7 +744,7 @@ Claude Code Session
   └── MCP Server (stdio)
         └── pmlens serve
               │
-              ├── server.py    → 44 MCP tools (FastMCP)
+              ├── server.py    → 44 MCP tools + 2 compatibility aliases (FastMCP)
               ├── models.py    → Pydantic v2 data models (18 models, 16 enums)
               ├── storage.py   → YAML read/write
               ├── workflow.py  → Workflow engine (state machine)

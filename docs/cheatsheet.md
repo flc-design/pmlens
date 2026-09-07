@@ -1,6 +1,6 @@
 # PM Lens Cheatsheet
 
-> **44 MCP tools** for Claude Code, Codex CLI, Cursor and Grok Build.
+> **44 MCP tools + 2 compatibility aliases** for Claude Code, Codex CLI, Cursor and Grok Build.
 > Version 0.15.1 | Python 3.11+ | PyPI: `pmlens`
 
 ---
@@ -74,12 +74,15 @@ Claude Code session:
 
 ### Content Pipeline (ADR-024)
 
+The preferred names below are an unreleased development change. Released packages
+use the legacy names. See the [migration guide](content-tool-migration.md).
+
 | Tool | Description | Key Params |
 |------|-------------|------------|
-| `pm_draft_x` | Draft publishable content from recorded knowledge | `source?`, `angle?` |
+| `pm_draft_content` (`pm_draft_x` alias) | Draft publishable content from recorded knowledge | `signal_type`, `source_refs`, `raw_content`, `hook` |
 | `pm_redact_draft` | Redact a draft (the only safety layer before manual publishing) | `draft_id` |
-| `pm_reject_draft` | Reject a draft | `draft_id` |
-| `pm_x_drafts_pending` | List redacted drafts awaiting human review | _(none)_ |
+| `pm_reject_draft` | Reject a draft | `draft_id`, `reason` |
+| `pm_drafts_pending` (`pm_x_drafts_pending` alias) | List redacted drafts awaiting human review | `filter_status?`, `limit?`, `offset?` |
 
 ### Recording
 

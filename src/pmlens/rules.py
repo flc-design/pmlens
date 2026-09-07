@@ -44,7 +44,9 @@ assert set(TARGET_FILES) == set(HOSTS), "TARGET_FILES drifted from the host regi
 # naming CLAUDE.md; and the ADR-028 branch clause was factually wrong — it keyed
 # on "hosts without hooks", but Cursor and Grok Build both HAVE session hooks;
 # what they lack is a pmlens-installed one.
-TEMPLATE_VERSION = 13
+# v14 (PMSERV-189): prefer pm_drafts_pending in the content pipeline rule;
+# the old tool name remains callable for previously injected templates.
+TEMPLATE_VERSION = 14
 BEGIN_MARKER = "<!-- pm-server:begin v={version} -->"
 END_MARKER = "<!-- pm-server:end -->"
 BEGIN_PATTERN = re.compile(r"<!-- pm-server:begin v=(\d+) -->")
@@ -169,7 +171,7 @@ pm-server は公開先の認証情報も送信機能も持たず、自動公開�
 2. propose-don't-force: 提案を強制しない。ユーザーが乗ったら pm_workflow_start で content-pipeline
    ワークフローを開始する。
 3. 必ず pm_redact_draft で redact してから（hook + 各 body セグメントを個別に）、/secret-scan と
-   /privacy-check で Layer-2 確認。redact 済み下書きは pm_x_drafts_pending で確認する。
+   /privacy-check で Layer-2 確認。redact 済み下書きは pm_drafts_pending で確認する。
 4. 公開はユーザーがシステム外で手動で行う。pm-server から公開・送信してはならない。
 5. トリガもレビューも規約であり強制ではない（workflow gate は助言）。唯一の構造的保証は
    「ネットワーク/認証情報がスコープ外」であること。raw_content（原液）は決して表に出さない。

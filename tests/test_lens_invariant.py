@@ -232,11 +232,18 @@ def test_outbox_log_does_not_mutate_main_memory_dbs(tmp_path: Path) -> None:
 # x_drafts mutator is even reachable on a Lens host, so x_drafts.db can never
 # be created/written there.
 
-_X_DRAFT_TOOLS = ("pm_draft_x", "pm_redact_draft", "pm_reject_draft", "pm_x_drafts_pending")
+_X_DRAFT_TOOLS = (
+    "pm_draft_content",
+    "pm_drafts_pending",
+    "pm_draft_x",
+    "pm_redact_draft",
+    "pm_reject_draft",
+    "pm_x_drafts_pending",
+)
 
 
 def test_x_draft_tools_registered_in_claude_code_mode() -> None:
-    """Sanity (PM_LENS=0, the normal test process): all four x_drafts tools
+    """Sanity (PM_LENS=0, the normal test process): all six content tool names
     ARE registered, so the Lens=1 hidden assertion below is meaningful."""
     import pmlens.server as srv
 
@@ -255,6 +262,7 @@ def test_x_draft_tools_hidden_under_lens(tmp_path: Path) -> None:
         assert srv.PM_LENS_ENABLED is True, "PM_LENS not picked up in subprocess"
         hidden = [t for t in (
             "pm_draft_x", "pm_redact_draft", "pm_reject_draft", "pm_x_drafts_pending",
+            "pm_draft_content", "pm_drafts_pending",
         ) if t in srv.REGISTERED_TOOLS]
         assert hidden == [], f"x_drafts tools leaked into Lens registration: {hidden}"
         # The bare functions still exist as module attributes (just not MCP-registered).

@@ -148,9 +148,17 @@ class Session(NamedTuple):
     protocol_version: str
     server_info: dict[str, Any]
     tools: list[str]
+    tool_definitions: dict[str, dict[str, Any]]
+    responses: list[dict[str, Any]]
 
 
-def _mcp_session(*, lens: bool, timeout: float = 90.0) -> Session:
+def _mcp_session(
+    *,
+    lens: bool,
+    desktop_write: bool = False,
+    calls: list[dict[str, Any]] | None = None,
+    timeout: float = 90.0,
+) -> Session:
     """Launch `python -m pmlens serve`, handshake, and report what came back.
 
     Speaks the MCP stdio framing directly (newline-delimited JSON-RPC)
@@ -164,6 +172,7 @@ def _mcp_session(*, lens: bool, timeout: float = 90.0) -> Session:
     # subprocess that inherits the real HOME would write the developer's
     # own config).
     env["PM_LENS"] = "1" if lens else "0"
+    env["PM_DESKTOP_WRITE"] = "1" if desktop_write else "0"
     env["PYTHONUNBUFFERED"] = "1"
 
     proc = subprocess.Popen(
@@ -206,10 +215,22 @@ def _mcp_session(*, lens: bool, timeout: float = 90.0) -> Session:
         proc.stdin.flush()
         listed = _read_response(proc, want_id=2)
         assert "result" in listed, f"tools/list failed: {listed!r}"
+        responses = []
+        for request_id, params in enumerate(calls or [], start=3):
+            proc.stdin.write(
+                _rpc({"jsonrpc": "2.0", "id": request_id, "method": "tools/call", "params": params})
+            )
+            proc.stdin.flush()
+            response = _read_response(proc, want_id=request_id)
+            assert "result" in response, f"tools/call failed: {response!r}"
+            assert not response["result"].get("isError"), response
+            responses.append(response["result"])
         return Session(
             protocol_version=init["result"].get("protocolVersion", ""),
             server_info=init["result"].get("serverInfo", {}),
             tools=[t["name"] for t in listed["result"]["tools"]],
+            tool_definitions={t["name"]: t for t in listed["result"]["tools"]},
+            responses=responses,
         )
     finally:
         watchdog.cancel()
@@ -281,6 +302,64 @@ def test_lens_mode_exposes_a_strict_subset_over_the_wire():
     assert lens < full, (
         f"Lens mode must expose a strict subset of the default surface. "
         f"only-in-lens={sorted(lens - full)}, lens={len(lens)}, full={len(full)}"
+    )
+
+
+@pytest.mark.smoke
+def test_content_aliases_share_schemas_and_state_over_stdio(tmp_project: Path) -> None:
+    """Both MCP names work against one existing-format DB, with identical schemas."""
+    (tmp_project / ".pm" / "project.yaml").write_text(
+        "name: aliases\ndisplay_name: Aliases\nversion: 0.0.1\n"
+        "status: development\nstarted: 2026-01-01\ndescription: alias test\nphases: []\n",
+        encoding="utf-8",
+    )
+    args = {
+        "signal_type": "lesson",
+        "source_refs": ["memory:1"],
+        "raw_content": "private concentrate",
+        "hook": "a draft hook",
+        "project_path": str(tmp_project),
+    }
+    listing = {"filter_status": "all", "limit": 1, "offset": 0, "project_path": str(tmp_project)}
+    session = _mcp_session(
+        lens=False,
+        calls=[
+            {"name": "pm_draft_content", "arguments": args},
+            {"name": "pm_draft_x", "arguments": args},
+            {"name": "pm_drafts_pending", "arguments": listing},
+            {"name": "pm_x_drafts_pending", "arguments": listing},
+        ],
+    )
+    for preferred, legacy in (
+        ("pm_draft_content", "pm_draft_x"),
+        ("pm_drafts_pending", "pm_x_drafts_pending"),
+    ):
+        new = session.tool_definitions[preferred]
+        old = session.tool_definitions[legacy]
+        assert old["inputSchema"] == new["inputSchema"]
+        assert old.get("outputSchema") == new.get("outputSchema")
+        assert preferred in old["description"]
+
+    replies = [json.loads(response["content"][0]["text"]) for response in session.responses]
+    saved, duplicate, preferred_page, legacy_page = replies
+    assert saved["status"] == "saved"
+    assert duplicate["status"] == "skipped"
+    assert duplicate["warnings"][0]["existing_ids"] == [saved["draft_id"]]
+    assert preferred_page == legacy_page
+    assert preferred_page["total"] == 1
+    assert preferred_page["items"][0]["id"] == saved["draft_id"]
+    assert "private concentrate" not in json.dumps(preferred_page)
+    assert "a draft hook" not in json.dumps(preferred_page)
+    assert (tmp_project / ".pm" / "x_drafts.db").is_file()
+    assert not (tmp_project / ".pm" / "drafts.db").exists()
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("desktop_write", [False, True], ids=["lens", "desktop"])
+def test_content_aliases_are_absent_from_lens_wire_surface(desktop_write: bool) -> None:
+    session = _mcp_session(lens=True, desktop_write=desktop_write)
+    assert not {"pm_draft_content", "pm_draft_x", "pm_drafts_pending", "pm_x_drafts_pending"} & set(
+        session.tools
     )
 
 

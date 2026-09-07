@@ -697,8 +697,8 @@ def pm_status(project_path: str | None = None) -> dict:
         if x_drafts_pending > 0:
             next_actions = [
                 *next_actions,
-                f"{x_drafts_pending} X draft(s) pending review — "
-                "call pm_x_drafts_pending to review the redacted draft and post manually",
+                f"{x_drafts_pending} content draft(s) pending review — "
+                "call pm_drafts_pending to review the redacted draft and publish manually",
             ]
 
     # PMSERV-137 / ADR-034 — read-only pm-server -> pmlens cutover awareness.
@@ -2762,11 +2762,11 @@ def pm_outbox_reject(
     }
 
 
-# ─── X content pipeline (PMSERV-113, ADR-024) ──────────────────────────────
-# Per-project staging for build-in-public X drafts derived from .pm by-products.
-# Safety model: pm-server holds NO X credentials and performs NO network/post
+# ─── Content pipeline (PMSERV-113, ADR-024) ────────────────────────────────
+# Per-project staging for publication drafts derived from .pm by-products.
+# Safety model: pm-server holds NO publishing credentials and performs NO network/post
 # action — "never auto-post" is structural, not a gate. The human reviews
-# redacted drafts (pm_x_drafts_pending) and posts manually on X, outside the
+# redacted drafts (pm_drafts_pending) and publishes manually, outside the
 # system. All these tools are mutators on the per-project store and are
 # deliberately NOT in any allowlist, so they are hidden under PM_LENS=1
 # (mirroring the pm_outbox_* review tools). The review queue exposes ONLY
@@ -2777,7 +2777,7 @@ _VALID_X_KINDS = {"single", "thread"}
 _VALID_X_DRAFT_STATUSES = {"draft", "redacted", "rejected", "posted", "all"}
 
 # Debounce window (PMSERV-121): if a live draft was staged within this many
-# seconds, a second *distinct* pm_draft_x is suppressed so one session's many
+# seconds, a second *distinct* draft is suppressed so one session's many
 # lessons don't each spawn a draft. Pass force=true to override.
 _DRAFT_DEBOUNCE_SECONDS = 600
 
@@ -2789,7 +2789,7 @@ def _get_x_draft_store(project_path: str | None):
 
 
 @_tool()
-def pm_draft_x(
+def pm_draft_content(
     signal_type: str,
     source_refs: list[str],
     raw_content: str,
@@ -2801,7 +2801,7 @@ def pm_draft_x(
     force: bool = False,
     project_path: str | None = None,
 ) -> dict:
-    """Stage a build-in-public X draft derived from a .pm signal (PMSERV-113).
+    """Stage a publication draft derived from a .pm signal (PMSERV-113).
 
     Persists the draft as the FIRST action (compaction-safe). Two guards run
     before the insert:
@@ -2816,10 +2816,10 @@ def pm_draft_x(
 
     signal_type: lesson | insight | adr | mistake
     source_refs: provenance ids (memory:NN / ADR-NNN / PMSERV-NNN) — frozen
-    body: ordered thread segments (each ideally <=280 chars)
+    body: ordered content segments
     force: bypass the debounce window (NOT the source_refs dedupe)
     NOTE: raw_content is the unscrubbed concentrate and is NEVER surfaced by
-    the review queue (pm_x_drafts_pending). Call pm_redact_draft next.
+    the review queue (pm_drafts_pending). Call pm_redact_draft next.
     """
     if signal_type not in _VALID_X_SIGNAL_TYPES:
         return {
@@ -2901,6 +2901,38 @@ def pm_draft_x(
 
 
 @_tool()
+def pm_draft_x(
+    signal_type: str,
+    source_refs: list[str],
+    raw_content: str,
+    hook: str,
+    body: list[str] | None = None,
+    kind: str = "thread",
+    hashtags: list[str] | None = None,
+    workflow_id: str | None = None,
+    force: bool = False,
+    project_path: str | None = None,
+) -> dict:
+    """Compatibility alias for pm_draft_content; prefer the new name in new integrations.
+
+    Arguments, defaults, results and the project-local draft store are identical.
+    The legacy name remains available for existing host permissions and workflows.
+    """
+    return pm_draft_content(
+        signal_type=signal_type,
+        source_refs=source_refs,
+        raw_content=raw_content,
+        hook=hook,
+        body=body,
+        kind=kind,
+        hashtags=hashtags,
+        workflow_id=workflow_id,
+        force=force,
+        project_path=project_path,
+    )
+
+
+@_tool()
 def pm_redact_draft(draft_id: int, project_path: str | None = None) -> dict:
     """Run the Layer-1 deterministic redaction prefilter on a staged draft.
 
@@ -2908,7 +2940,7 @@ def pm_redact_draft(draft_id: int, project_path: str | None = None) -> dict:
     fields plus a count-only report, and transitions draft -> redacted. Returns
     the count-only report (never cleartext). After this, run the Layer-2
     semantic pass (/secret-scan + /privacy-check) on the redacted fields, then
-    have the human review via pm_x_drafts_pending and post manually on X.
+    have the human review via pm_drafts_pending and publish manually.
     """
     store = _get_x_draft_store(project_path)
     row = store.get(draft_id)
@@ -2960,7 +2992,7 @@ def pm_redact_draft(draft_id: int, project_path: str | None = None) -> dict:
         "flagged": result.flagged,
         "skill_hint": (
             "Run /secret-scan and /privacy-check on the redacted fields "
-            "(visible via pm_x_drafts_pending) for a semantic second pass before posting."
+            "(visible via pm_drafts_pending) for a semantic second pass before publishing."
         ),
     }
     if result.flagged:
@@ -2976,7 +3008,7 @@ def pm_redact_draft(draft_id: int, project_path: str | None = None) -> dict:
 
 @_tool()
 def pm_reject_draft(draft_id: int, reason: str, project_path: str | None = None) -> dict:
-    """Discard a staged X draft with a mandatory, auditable reason."""
+    """Discard a staged draft with a mandatory, auditable reason."""
     if not reason or not reason.strip():
         return {
             "status": "error",
@@ -2996,19 +3028,19 @@ def pm_reject_draft(draft_id: int, reason: str, project_path: str | None = None)
 
 
 @_tool()
-def pm_x_drafts_pending(
+def pm_drafts_pending(
     filter_status: str = "redacted",
     limit: int = 50,
     offset: int = 0,
     project_path: str | None = None,
 ) -> dict:
-    """Review queue for staged X drafts — exposes ONLY redacted/safe fields.
+    """Review queue for staged drafts — exposes ONLY redacted/safe fields.
 
     raw_content and the un-redacted hook/body are NEVER returned (must-fix #1):
     the human copy-pastes from here, so the queue must never carry the
     unscrubbed concentrate. Default lists status='redacted' (ready for human
     review); use 'all' to also see draft/rejected/posted rows. Posting happens
-    manually on X, outside the system — pm-server never posts.
+    manually, outside the system — pm-server never publishes.
 
     filter_status: draft | redacted | rejected | posted | all
     """
@@ -3030,6 +3062,23 @@ def pm_x_drafts_pending(
     store = _get_x_draft_store(project_path)
     page = store.pending(filter_status=filter_status, limit=limit, offset=offset)
     return {"status": "ok", **page}
+
+
+@_tool()
+def pm_x_drafts_pending(
+    filter_status: str = "redacted",
+    limit: int = 50,
+    offset: int = 0,
+    project_path: str | None = None,
+) -> dict:
+    """Compatibility alias for pm_drafts_pending; prefer the new name in new integrations.
+
+    Uses the same filters and pagination and exposes only redacted/safe fields.
+    The legacy name remains available for existing host permissions and workflows.
+    """
+    return pm_drafts_pending(
+        filter_status=filter_status, limit=limit, offset=offset, project_path=project_path
+    )
 
 
 @_tool()

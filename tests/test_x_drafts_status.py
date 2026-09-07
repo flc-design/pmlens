@@ -30,7 +30,7 @@ def test_pm_status_x_drafts_zero_does_not_create_db(tmp_path: Path) -> None:
     status = srv.pm_status(project_path=str(proj))
     assert status["diagnostics"]["x_drafts_pending"] == 0
     assert not (proj / ".pm" / "x_drafts.db").exists()
-    assert not any("X draft" in line for line in status["next_pm_actions"])
+    assert not any("content draft" in line for line in status["next_pm_actions"])
 
 
 def test_pm_status_x_drafts_pending_counts_and_hints(tmp_path: Path) -> None:
@@ -45,4 +45,7 @@ def test_pm_status_x_drafts_pending_counts_and_hints(tmp_path: Path) -> None:
     )
     status = srv.pm_status(project_path=str(proj))
     assert status["diagnostics"]["x_drafts_pending"] == 1
-    assert any("X draft" in line and "pending review" in line for line in status["next_pm_actions"])
+    assert any(
+        "content draft" in line and "pm_drafts_pending" in line
+        for line in status["next_pm_actions"]
+    )
