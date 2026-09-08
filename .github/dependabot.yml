@@ -29,28 +29,10 @@ updates:
     commit-message:
       prefix: "chore(deps)"
 
-  # PMSERV-178: keep requirements.lock fresh.
-  #
-  # INTENT was: requirements.lock is the hash-verified tree that ci.yml's
-  # `test-locked` job installs with `--require-hashes`, and a lock nobody
-  # updates is how it ended up two minor versions behind reality (pinned
-  # fastmcp 3.2.4 while everyone ran 3.4.5). Being pip-compile output, it
-  # looked like a natural fit for the `pip` ecosystem.
-  #
-  # MEASURED REALITY (PMSERV-185): this entry does not do that, and never has.
-  # Not one Dependabot PR in this repo's history has touched
-  # requirements.lock, and the single `pip`-ecosystem PR it has ever opened
-  # changed pyproject.toml and nothing else. The ecosystem's manifest matching
-  # covers `requirements*.txt`, pyproject.toml, Pipfile and setup.py — a file
-  # named `requirements.lock` is not a manifest to it.
-  #
-  # The entry EARNS ITS KEEP anyway: watching pyproject.toml's declared ranges
-  # is what surfaced the fastmcp v4 major. Just do not read it as the mechanism
-  # that keeps the hash-verified lock fresh — that is manual, and PMSERV-186
-  # tracks giving it a real guard.
-  #
-  # Grouped like github-actions above, and with the same trade-off (ADR-013):
-  # one PR may mix a safe patch with a breaking major. Review accordingly.
+  # Watch pyproject.toml's declared ranges, including new major versions.
+  # This ecosystem does not maintain requirements.lock (PMSERV-185).
+  # After accepting a range update, run `make lock-sync` and commit both locks.
+  # Grouped updates may mix patch and major changes; review them together.
   - package-ecosystem: "pip"
     directory: "/"
     schedule:
@@ -65,18 +47,10 @@ updates:
     commit-message:
       prefix: "chore(deps)"
 
-  # PMSERV-178: keep uv.lock fresh — best effort, by design.
-  #
-  # uv.lock is the DEVELOPMENT environment (.devcontainer, and the
-  # `uv run --project` flow in plugin/README.md). Astral documents this
-  # ecosystem, but calls the support incomplete and tracks unsupported cases
-  # upstream; there are open reports of uv.lock simply not being updated.
-  #
-  # That is acceptable ONLY because nothing depends on it working: ci.yml's
-  # `lockfile-freshness` job runs `uv lock --check` and fails if uv.lock drifts
-  # from pyproject.toml. If this entry silently does nothing, CI still tells
-  # us. Never move the hash-verified file onto this ecosystem without
-  # revisiting that reasoning.
+  # Best-effort upstream updates to the canonical resolution (PMSERV-186).
+  # Run `make lock-sync` on an update PR to regenerate requirements.lock.
+  # CI checks the exported hashes/markers/pins even if this updater fails;
+  # `make lock-refresh` is the explicit fallback and release preparation path.
   - package-ecosystem: "uv"
     directory: "/"
     schedule:

@@ -33,7 +33,7 @@ DOCKER_RUN := docker run --rm $(TTY) \
 # host .venv. Guard on pyvenv.cfg, not the dir, so a fresh empty volume re-creates.
 ENSURE := ([ -f /home/pmdev/.venv/pyvenv.cfg ] || uv venv /home/pmdev/.venv) && uv pip install -e '.[dev]' --quiet
 
-.PHONY: help dev-build dev-setup dev-shell dev-test dev-lint dev-sandbox dev-clean
+.PHONY: help dev-build dev-setup dev-shell dev-test dev-lint dev-sandbox dev-clean lock-check lock-sync lock-refresh
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -52,10 +52,21 @@ dev-test: ## Run the full test suite inside the isolated container
 	$(DOCKER_RUN) bash -c "$(ENSURE); pytest -q"
 
 dev-lint: ## Run ruff check + format check inside the container
-	$(DOCKER_RUN) bash -c "$(ENSURE); ruff check src/ tests/ && ruff format --check src/ tests/"
+	$(DOCKER_RUN) bash -c "$(ENSURE); ruff check src/ tests/ scripts/lockfiles.py && ruff format --check src/ tests/ scripts/lockfiles.py"
 
 dev-sandbox: ## Dry-run the installer against the DISPOSABLE container HOME (proves host isolation)
 	$(DOCKER_RUN) bash -c "$(ENSURE); python -c \"from pmlens import installer; print(installer.install(target='all', dry_run=True).message)\"; echo '--- container HOME (disposable; host ~/.claude untouched) ---'; ls -la /home/pmdev"
 
 dev-clean: ## Remove the disposable HOME volume (resets ~/.claude + the venv)
 	-docker volume rm $(HOME_VOL)
+
+# These commands only manage repository lockfiles; they do not install the
+# project or invoke installer/hooks. Use Python 3.11+ and the pinned uv version.
+lock-check: ## Verify both lockfiles offline without changing them
+	python3 scripts/lockfiles.py check
+
+lock-sync: ## Synchronize locks after editing pyproject.toml or accepting an update
+	python3 scripts/lockfiles.py sync
+
+lock-refresh: ## Upgrade dependencies and regenerate both lockfiles for review
+	python3 scripts/lockfiles.py refresh

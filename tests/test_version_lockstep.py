@@ -50,7 +50,7 @@ mutating the tree and re-running this file rather than by reasoning about it:
 Deliberately frozen, and therefore out of scope: ``docs/user-guide.html`` and
 ``docs/workflow-guide.html`` sit at 0.12.0 on purpose (see ``docs/README.md``);
 ``packaging/pmlens-reservation/`` is a name reservation pinned at 0.0.1;
-``requirements.lock`` is pip-compile output and does not pin pmlens itself.
+``requirements.lock`` is uv export output and does not pin pmlens itself.
 """
 
 from __future__ import annotations
@@ -365,7 +365,7 @@ def test_uv_lock_root_version_matches_pyproject():
 
     Since PMSERV-178 this is no longer the only thing standing between a stale
     uv.lock and a green build: ci.yml's ``lockfile-freshness`` job runs
-    ``uv lock --check``, which fails when the lock no longer matches
+    the locked export check, which fails when the lock no longer matches
     pyproject.toml. That check subsumes this one on paper — a changed project
     version is drift like any other. It is kept anyway for two reasons: it
     names the actual mismatch instead of reporting generic lock staleness, and

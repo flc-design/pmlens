@@ -15,6 +15,16 @@
 
 ### Changed
 
+- **Executable dependency lock synchronization (PMSERV-186)**: `uv.lock` now
+  owns the resolution and `requirements.lock` is its universal hash-bearing
+  export. CI and release verification reject project/lock/export drift with
+  the same offline check. `make lock-sync` preserves compatible pins;
+  `make lock-refresh` explicitly upgrades them. The hash-verified CI install
+  also runs `pip check`, so `--no-deps` cannot hide incompatible project ranges.
+  This verifies the selected resolution, not the availability of newer PyPI
+  releases. Initial alignment moves 18 uv pins to the versions already in
+  `requirements.lock`, preserves uv's newer pip 26.2.1, and includes the
+  Python-conditional dependencies already present in uv.lock.
 - Rule template v14 and new built-in content workflows use the preferred tool
   names. Existing host permissions and copied workflows using the legacy names
   continue to work.
