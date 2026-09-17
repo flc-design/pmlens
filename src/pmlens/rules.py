@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Literal
 
 from .hosts import HOSTS, hosts_reading_both_rule_files, rule_files
+from .models import PmServerError
 from .utils import _atomic_write_text, _timestamped_backup
 
 # Mapping from host id (used by `target` arg) to the rule-file basename
@@ -244,6 +245,7 @@ def ensure_claudemd(project_root: Path) -> str:
     Returns:
         Status message describing what was done.
     """
+    guard_not_home_root(project_root)
     status = get_claudemd_status(project_root)
     claude_md = project_root / "CLAUDE.md"
     template = _render_template()
@@ -275,6 +277,7 @@ def update_claudemd(project_root: Path) -> str:
     Returns:
         Status message describing what was done.
     """
+    guard_not_home_root(project_root)
     status = get_claudemd_status(project_root)
     claude_md = project_root / "CLAUDE.md"
     template = _render_template()
@@ -498,6 +501,142 @@ def duplicate_rule_file_warning(project_root: Path) -> dict | None:
     }
 
 
+def _forbidden_root_kind(project_root: Path) -> str | None:
+    """Classify ``project_root`` as ``"the filesystem root"``, ``"the home
+    directory"`` or ``None`` (an ordinary directory).
+
+    Both are ancestors of every project on the machine, so a rule file there
+    is loaded into every Claude Code session. Home resolution failures
+    (``RuntimeError`` from ``Path.home()`` when ``$HOME`` is unset and the
+    passwd lookup fails) fall through to ``None`` — the guard cannot decide,
+    and blocking every project write in such an environment would be a worse
+    regression than the one it prevents.
+    """
+    try:
+        resolved = project_root.resolve()
+    except (OSError, RuntimeError):  # pragma: no cover — defensive FS guard
+        return None
+    if resolved == Path(resolved.anchor):
+        return "the filesystem root"
+    try:
+        if resolved == Path.home().resolve():
+            return "the home directory"
+    except (OSError, RuntimeError):  # pragma: no cover — no resolvable home
+        return None
+    return None
+
+
+def _is_home_root(project_root: Path) -> bool:
+    """Return True iff ``project_root`` resolves to the user's home directory."""
+    return _forbidden_root_kind(project_root) == "the home directory"
+
+
+def guard_not_home_root(project_root: Path) -> None:
+    """Refuse to manage PM rule files directly under ``$HOME`` or ``/`` (ADR-053).
+
+    Claude Code concatenates every ``CLAUDE.md`` between the filesystem root
+    and the working directory at launch, so a ``$HOME/CLAUDE.md`` is injected
+    into EVERY session on the machine — the opposite of pmlens's per-project
+    model, and a guaranteed duplicate (often at a stale template version) for
+    any project that already carries the section. ``pm_init`` reaches the
+    writers with ``Path.cwd()`` when an MCP host runs with ``cwd=$HOME``
+    (Claude Desktop does), which is exactly how the 2026-09-17 audit found a
+    v11 section sitting in the user's home directory. A host running with
+    ``cwd=/`` would do the same one level higher, so the filesystem root is
+    refused too.
+
+    Raises:
+        PmServerError: when ``project_root`` is the home directory or ``/``.
+    """
+    kind = _forbidden_root_kind(project_root)
+    if kind is not None:
+        raise PmServerError(
+            f"refusing to write PM Lens rules into {project_root / 'CLAUDE.md'}: "
+            f"{kind} is an ancestor of every project, so Claude Code "
+            "would load these rules into every session on this machine. Run "
+            "from a project directory or pass project_path explicitly (ADR-053)."
+        )
+
+
+def ancestor_rules_warning(project_root: Path) -> dict | None:
+    """Warn when an ANCESTOR directory's ``CLAUDE.md`` also carries the PM
+    section (ADR-053).
+
+    Claude Code loads ``CLAUDE.md`` from every directory above the working
+    directory, so the project's own section and the ancestor's both land in
+    context — usually at different template versions — and the official docs
+    state Claude picks arbitrarily between conflicting instructions. pmlens
+    never manages ancestor files, so this is reported, not fixed.
+
+    Claude Code walks the *logical* working directory (the path as typed,
+    symlinks intact), so both the logical ancestry and the resolved ancestry
+    are scanned and de-duplicated by real file; ``CLAUDE.local.md`` is
+    included because Claude Code loads it beside ``CLAUDE.md``.
+
+    Read-only (``Path.is_file`` + ``read_text`` per ancestor, no subprocess),
+    which keeps it legal on the ``pm_status`` read path (ADR-028).
+
+    Returns:
+        A ``warnings[]``-shaped dict (with an extra ``files`` list of the
+        offending paths, resolved), or ``None`` when no ancestor carries the
+        marker.
+    """
+    bases: list[Path] = [project_root if project_root.is_absolute() else Path.cwd() / project_root]
+    try:
+        resolved_root = project_root.resolve()
+    except (OSError, RuntimeError):  # pragma: no cover — defensive FS guard
+        resolved_root = None
+    if resolved_root is not None and resolved_root != bases[0]:
+        bases.append(resolved_root)
+
+    seen: set[Path] = set()
+    hits: list[tuple[Path, int]] = []
+    for base in bases:
+        for parent in base.parents:
+            for name in ("CLAUDE.md", "CLAUDE.local.md"):
+                candidate = parent / name
+                if not candidate.is_file():
+                    continue
+                try:
+                    real = candidate.resolve()
+                except (OSError, RuntimeError):  # pragma: no cover — defensive FS guard
+                    real = candidate
+                if real in seen:
+                    continue
+                seen.add(real)
+                try:
+                    content = real.read_text(encoding="utf-8")
+                except OSError:  # pragma: no cover — defensive FS guard
+                    continue
+                match = BEGIN_PATTERN.search(content)
+                if match:
+                    hits.append((real, int(match.group(1))))
+
+    if not hits:
+        return None
+    hits.sort(key=lambda item: str(item[0]))
+
+    listing = ", ".join(f"{path} (v{version})" for path, version in hits)
+    return {
+        "code": "pm_rules_in_ancestor_claudemd",
+        "message": (
+            "Claude Code loads every CLAUDE.md between the filesystem root and "
+            "the working directory, and an ancestor of this project already "
+            f"carries the PM Lens section: {listing}. Those rules are injected "
+            f"alongside this project's own section (template v{TEMPLATE_VERSION}), "
+            "so Claude sees the same rules twice and, when the versions differ, "
+            "may follow either copy."
+        ),
+        "remediation": (
+            "Remove the PM Lens section from the ancestor file (pmlens does not "
+            "manage files outside the project root), or exclude it for this "
+            "machine with the Claude Code `claudeMdExcludes` setting. Never run "
+            "pm_init / pm_update_rules from $HOME."
+        ),
+        "files": [str(path) for path, _ in hits],
+    }
+
+
 #: The statuses a single rule-file injection can yield. Annotating
 #: ``InjectResult.status`` (and the aggregate ``InjectSummary.overall_status``)
 #: with this Literal pushes validation to the type checker, mirroring
@@ -603,6 +742,10 @@ def _inject_into_file(
         * ``"failed"`` — read/write/backup raised an OSError
     """
     target_file = path.name
+    # ADR-053: a rule file in $HOME is an ancestor of every project and would
+    # be loaded into every Claude Code session on the machine. _safe_inject
+    # turns the PmServerError into a "failed" result with this message.
+    guard_not_home_root(path.parent)
     template = _render_template()
 
     # Symlink-safe resolution (cross-check D3): operate on the underlying
@@ -735,6 +878,16 @@ def _safe_inject(path: Path, host: str, *, dry_run: bool) -> InjectResult:
     """
     try:
         return _inject_into_file(path, host, dry_run=dry_run)
+    except PmServerError as e:
+        # Deliberate refusal (e.g. the ADR-053 $HOME guard): surface the
+        # reason verbatim instead of the generic "unexpected error" wording.
+        return InjectResult(
+            target_file=TARGET_FILES[host],
+            host=host,
+            status="failed",
+            message=str(e),
+            is_dry_run=dry_run,
+        )
     except Exception as e:  # noqa: BLE001 - intentional broad guard
         return InjectResult(
             target_file=TARGET_FILES[host],

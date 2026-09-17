@@ -692,6 +692,14 @@ PM Lens automatically installs Claude Code hooks at first session start (`pm_sta
 - Existing user hooks are preserved (PM Lens hooks are appended, not replaced)
 - No manual setup needed — hooks are auto-installed on upgrade
 - To manage manually: `pmlens install-hooks` / `pmlens uninstall-hooks`
+- Health check (ADR-053): `pm_status` reports `hooks.stale` (entries whose
+  executable no longer exists, e.g. after removing an old distribution) and
+  `hooks.duplicates`, and surfaces a `stale_pm_hook_command` warning. It never
+  edits existing entries — run `pmlens install-hooks` to replace them with one
+  fresh entry. `pm_status` also warns with `pm_rules_in_ancestor_claudemd` when
+  a `CLAUDE.md` above the project root carries the PM Lens section, because
+  Claude Code loads every ancestor `CLAUDE.md` and would read the rules twice.
+  Writing the section into `$HOME/CLAUDE.md` is refused for the same reason.
 
 ### Multi-Project Management
 

@@ -4,6 +4,16 @@
 
 ### Added
 
+- **Configuration-drift detection in `pm_status` (PMSERV-193 / ADR-053)**:
+  two new read-only `warnings[]` codes. `pm_rules_in_ancestor_claudemd` fires
+  when a `CLAUDE.md` in a directory ABOVE the project root also carries the
+  PM Lens section (Claude Code loads every ancestor `CLAUDE.md`, so the rules
+  were being injected twice, often at different template versions).
+  `stale_pm_hook_command` fires when a PM Lens PostToolUse hook entry points
+  at an executable that no longer exists, or is registered twice.
+  `hooks` in the `pm_status` response gains additive `commands`, `stale`,
+  `duplicates` and `healthy` keys. `pm_status` only reports; it never edits
+  existing hook entries.
 - **Destination-neutral content tool names with compatibility aliases
   (PMSERV-182 / PMSERV-189)**: `pm_draft_content` and
   `pm_drafts_pending` are the preferred names. `pm_draft_x` and
@@ -15,6 +25,11 @@
 
 ### Changed
 
+- **`pmlens install-hooks` repairs unhealthy PM Lens entries (ADR-053)**:
+  stale or duplicate PM Lens hook commands are replaced by one fresh entry.
+  Healthy entries are still skipped, and hooks that belong to other tools are
+  never touched — including a user hook that shares a group with ours, which
+  `uninstall-hooks` now also preserves.
 - **Executable dependency lock synchronization (PMSERV-186)**: `uv.lock` now
   owns the resolution and `requirements.lock` is its universal hash-bearing
   export. CI and release verification reject project/lock/export drift with
@@ -38,6 +53,15 @@
   either; `pm_status` warns and reports an unknown pending count. Older versions
   cannot discover a new `drafts.db`; see the migration guide before mixing
   versions or downgrading.
+
+### Fixed
+
+- **PM rules can no longer be written into `$HOME` (ADR-053)**: `pm_init`,
+  `pm_update_claudemd`, `pm_update_rules` and the matching CLI commands refuse
+  when the project root resolves to the home directory. An MCP host running
+  with `cwd=$HOME` (Claude Desktop does) could previously turn the global
+  `~/.pm` registry directory into a "project" and leave a `CLAUDE.md` that
+  every Claude Code session on the machine loaded.
 
 ## [0.15.1] - 2026-09-07
 

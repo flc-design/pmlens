@@ -562,6 +562,14 @@ def pm_init(project_path: str | None = None, project_name: str | None = None) ->
     project_name defaults to directory name or detected from config files.
     """
     root = Path(project_path).resolve() if project_path else Path.cwd().resolve()
+
+    # ADR-053: an MCP host running with cwd=$HOME (Claude Desktop does) would
+    # otherwise turn the global ~/.pm registry directory into a "project" and
+    # write a CLAUDE.md that every session on the machine loads. Refuse early,
+    # before init_pm_directory() has touched ~/.pm.
+    from .rules import guard_not_home_root
+
+    guard_not_home_root(root)
     pm_path = init_pm_directory(root)
 
     # Detect project info
@@ -729,11 +737,26 @@ def pm_status(project_path: str | None = None) -> dict:
     # PMSERV-165: Grok Build loads EVERY recognised rule file in a directory,
     # so a project carrying both CLAUDE.md and AGENTS.md hands it the PM rules
     # twice. Read-only (two Path.exists + two reads) — safe on this read path.
-    from .rules import duplicate_rule_file_warning
+    from .rules import ancestor_rules_warning, duplicate_rule_file_warning
 
     duplicate = duplicate_rule_file_warning(root)
     if duplicate is not None:
         status_warnings.append(duplicate)
+
+    # ADR-053: Claude Code also loads every ANCESTOR CLAUDE.md, so a PM Lens
+    # section above the project root (e.g. a stray $HOME/CLAUDE.md) doubles
+    # the rules. Read-only walk of root.parents — no subprocess.
+    ancestor = ancestor_rules_warning(root)
+    if ancestor is not None:
+        status_warnings.append(ancestor)
+
+    # ADR-053: report — never auto-repair — PM Lens hook entries whose binary
+    # is gone or which are registered twice. `pmlens install-hooks` repairs.
+    from .hooks import stale_pm_hook_warning
+
+    hook_warning = stale_pm_hook_warning(hooks_status)
+    if hook_warning is not None:
+        status_warnings.append(hook_warning)
 
     return {
         "project": {

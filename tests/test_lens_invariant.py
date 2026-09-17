@@ -574,5 +574,12 @@ def test_lens_pm_status_does_not_write_claude_settings(tmp_path: Path) -> None:
     )
 
     # And the read still reports status truthfully: hooks are NOT installed.
+    # The v0.4.x keys (installed/path) are asserted exactly; the ADR-053
+    # health keys (commands/stale/duplicates/healthy) are additive and must
+    # report an empty, unhealthy state on a machine with no hooks at all.
     payload = json.loads(proc.stdout.strip().splitlines()[-1])
-    assert payload["hooks"] == {"installed": False, "path": str(settings)}, payload
+    hooks = payload["hooks"]
+    assert hooks["installed"] is False, payload
+    assert hooks["path"] == str(settings), payload
+    assert hooks["commands"] == [] and hooks["stale"] == [] and hooks["duplicates"] == [], payload
+    assert hooks["healthy"] is False, payload
