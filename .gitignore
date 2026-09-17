@@ -46,6 +46,9 @@ Thumbs.db
 #  cannot have its children re-included.)
 .claude/*
 !.claude/agents/
+# .claude/rules/ holds path-scoped coding rules the whole team should get
+# (Claude Code loads them only when matching files are touched).
+!.claude/rules/
 CLAUDE.md
 CLAUDE.md.bak.*
 
