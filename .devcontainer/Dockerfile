@@ -25,6 +25,14 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends git jq \
     && rm -rf /var/lib/apt/lists/*
 
+# The workspace is bind-mounted from the host, so inside the container it is
+# owned by a different uid than the non-root user below. git >= 2.35.2 then
+# refuses every command with "detected dubious ownership", which broke the six
+# tests that shell out to `git check-ignore` (test_drafts_gitignore.py) under
+# `make dev-test`. Trusting the single, fixed workspace path is the documented
+# remedy and keeps the container-only mount model unchanged (2026-09-17 audit).
+RUN git config --system --add safe.directory /workspaces/pmlens
+
 # Non-root user with a container-local HOME. The installer writes to
 # /home/pmdev/.claude etc. — disposable, never the host's.
 ARG USERNAME=pmdev
