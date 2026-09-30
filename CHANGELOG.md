@@ -2,13 +2,48 @@
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-10-01
+
+Rewrites the PM Lens rule section for current models (template v15) and makes
+its delivery safe: rule sections no longer move backwards, outdated or
+conflicting sections are reported, the manual post-commit reminder finally
+reaches the model, and the MCP server now ships instructions of its own. Also
+includes the destination-neutral content tool names, neutral draft storage and
+the configuration-drift checks developed since 0.15.1.
+
+MCP tool count: 46 names for 44 operations in full mode (the two content tool
+aliases); Lens 16, or 18 with Desktop outbox writes. Test suite: 1,740 passing.
+
+**Upgrade notes.** Existing projects keep their current rule section until you
+update it: `pm_status` now reports `rules_outdated`, and
+`pmlens update-rules --all` shows the plan (it writes only with `--apply`).
+`pmlens update-claudemd --all` is retired. Rule sections before v15 tell the
+model to commit without being asked; v15 does not.
+
 ### Added
 
+- **MCP server instructions (PMSERV-201 / ADR-055)**: the server sends
+  instructions for its registration mode (full, Lens, Lens with Desktop
+  outbox). They ship with the server build, so the tool names they mention
+  always exist on the running server.
+- **Rule-section version warnings in `pm_status` (PMSERV-198 / ADR-055)**:
+  `rules_outdated`, `rules_newer_than_server`, `rule_file_version_mismatch`
+  (CLAUDE.md and AGENTS.md at different versions) and `multiple_pm_sections`,
+  plus `diagnostics.server_template_version`.
+- **Safer rule updates (PMSERV-197 / PMSERV-198)**: `pm_update_rules` and
+  `pmlens update-rules` accept `target="existing"` (only files that already
+  carry the section; never creates one) and `force` / `--force` (rewrite a
+  section newer than this build on purpose). `pmlens update-rules --all` gains
+  `--apply`.
+- `pm_session_summary` returns `session_summary_pending_dropped` when a save
+  drops pending items the previous save for the same server connection still
+  listed.
 - **Configuration-drift detection in `pm_status` (PMSERV-193 / ADR-053)**:
   two new read-only `warnings[]` codes. `pm_rules_in_ancestor_claudemd` fires
-  when a `CLAUDE.md` in a directory ABOVE the project root also carries the
-  PM Lens section (Claude Code loads every ancestor `CLAUDE.md`, so the rules
-  were being injected twice, often at different template versions).
+  when a `CLAUDE.md` or `CLAUDE.local.md` in a directory above the project root
+  carries the PM Lens section (Claude Code loads every ancestor `CLAUDE.md`, so
+  a project with its own section received the rules twice, often at different
+  template versions).
   `stale_pm_hook_command` fires when a PM Lens PostToolUse hook entry points
   at an executable that no longer exists, or is registered twice.
   `hooks` in the `pm_status` response gains additive `commands`, `stale`,
@@ -25,9 +60,37 @@
 
 ### Changed
 
+- **PM rule template v15 (PMSERV-199 / ADR-054)**: rewritten for models that
+  follow rule files literally. The model commits only when the user asks (or a
+  workflow they started includes it) and only its own changes; the start-of-work
+  routine applies to project work, not to unrelated questions; emphasis is kept
+  for the content-pipeline safety constraints; triggers the model cannot observe
+  (`/clear`, session end, every N exchanges) are gone; the wording is
+  host-neutral for AGENTS.md readers; posting or sending a content-pipeline
+  draft stays off limits even on request; and the heading carries the version.
+  80 lines, down from 129.
+- **`pmlens update-rules --all` plans by default (PMSERV-198)**: by default it
+  targets only files that already carry the section (`--target existing`) and
+  prints the plan until `--apply` is given. `--apply` without `--all`, or with
+  `--dry-run`, is an error. **`pmlens update-claudemd --all` is retired** (exit
+  1, pointing at `update-rules --all`); the single-project form still works.
+- **Plugin hooks act only in PM Lens projects**: both hooks look for
+  `.pm/project.yaml` in or above the directory that matters (the session cwd, or
+  the directory a commit ran in) and otherwise stay silent, except that the
+  SessionStart hook still warns about a duplicate manual registration. The
+  SessionStart directive defers the timing of `pm_status` / `pm_recall` /
+  `pm_next` to the project's rule file instead of "before your first reply".
+- The prompt pack's commit step is scoped to the task's own changes, without
+  push; its common rules point at the project's rule file.
+- `pm_init` and `pmlens update-claudemd` back up an existing CLAUDE.md before
+  rewriting it and write atomically, like `pm_update_rules`.
+- Rule markers count at the start of a line (a BOM and indentation allowed, text
+  after a marker allowed), and a file with several PM Lens sections is reported
+  instead of half-rewritten; the newest section decides the version.
 - **`pmlens install-hooks` repairs unhealthy PM Lens entries (ADR-053)**:
-  stale or duplicate PM Lens hook commands are replaced by one fresh entry.
-  Healthy entries are still skipped, and hooks that belong to other tools are
+  if any PM Lens hook command is stale or duplicated, all PM Lens hook commands
+  are replaced by one fresh entry; when every PM Lens entry is healthy,
+  install-hooks still skips. Hooks that belong to other tools are
   never touched — including a user hook that shares a group with ours, which
   `uninstall-hooks` now also preserves.
 - **Executable dependency lock synchronization (PMSERV-186)**: `uv.lock` now
@@ -40,9 +103,11 @@
   releases. Initial alignment moves 18 uv pins to the versions already in
   `requirements.lock`, preserves uv's newer pip 26.2.1, and includes the
   Python-conditional dependencies already present in uv.lock.
-- Rule template v14 and new built-in content workflows use the preferred tool
-  names. Existing host permissions and copied workflows using the legacy names
-  continue to work.
+- Rule templates (v14 and later) and new built-in content workflows use the
+  preferred tool names. Existing host permissions and copied workflows using the
+  legacy names continue to work.
+- **Dependency locks refreshed for the release**: 40 of 92 pins move, including
+  fastmcp 4.0.10, mcp 2.2, starlette 1.7, cyclopts 5 and filelock 4.
 - **Neutral draft storage names with legacy database support (PMSERV-190)**:
   new projects use `.pm/drafts.db`; existing `.pm/x_drafts.db` files continue
   being used in place, including their WAL/SHM files. The implementation moves
@@ -56,12 +121,31 @@
 
 ### Fixed
 
+- **The manual post-commit reminder never reached the model (PMSERV-196)**: the
+  hook installed by `pmlens install-hooks` printed a top-level
+  `additionalContext`, which Claude Code drops, and the plugin hook's jq-less
+  fallback printed bare text (the plugin's jq path was already correct). Both
+  now emit
+  `hookSpecificOutput`. A commit is recognised only when `git ... commit` runs
+  as a command — not in quotes, heredoc bodies, `grep` / `echo` text, `--help`
+  or `--dry-run` style invocations — the reminder names the project a commit
+  went to when that differs from the session's, the manual hook (outside Lens
+  mode) is silent when no task is in progress — the plugin hook does not read
+  tasks and fires on every commit in a PM Lens project — and task ids are
+  included only when well formed.
+- **An older pmlens silently downgraded newer rule sections (PMSERV-197)**:
+  sections were replaced without comparing versions, so a pipx release next to
+  a newer build rewrote the newer section. A newer section is now left alone
+  and reported (`rules_newer_than_server`); `pm_update_claudemd` returns the
+  same warning.
+- Non-UTF-8 rule files no longer abort `update-rules --all`.
 - **PM rules can no longer be written into `$HOME` (ADR-053)**: `pm_init`,
   `pm_update_claudemd`, `pm_update_rules` and the matching CLI commands refuse
-  when the project root resolves to the home directory. An MCP host running
-  with `cwd=$HOME` (Claude Desktop does) could previously turn the global
-  `~/.pm` registry directory into a "project" and leave a `CLAUDE.md` that
-  every Claude Code session on the machine loaded.
+  when the project root resolves to the home directory. An MCP host whose
+  working directory is `$HOME` (for example, some Claude Desktop setups) could
+  previously turn the global `~/.pm` registry directory into a "project" and
+  leave a `~/CLAUDE.md` that Claude Code loaded into every session started
+  under the home directory.
 
 ## [0.15.1] - 2026-09-07
 

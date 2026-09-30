@@ -14,7 +14,7 @@ PM Lens の各種ドキュメント。読者層と用途で 3 つの HTML ガイ
 
 ### HTML ガイド
 
-> architecture.html は v0.15.1 時点。user-guide / workflow-guide は v0.12.0 時点の内容（PMSERV-132 で再生成された版）。
+> architecture.html は v0.16.0 時点。user-guide / workflow-guide は v0.12.0 時点の内容（PMSERV-132 で再生成された版）。
 - **[architecture.html](./architecture.html)** — Architecture &amp; Behavior（44 MCP tools, Lens mode, Phase 2 Desktop Outbox, distribution channels）
 - **[user-guide.html](./user-guide.html)** — User Guide（CLI コマンド完全リファレンス・UX Tips・トラブルシューティング）
 - **[workflow-guide.html](./workflow-guide.html)** — Workflow Guide（5 builtin templates 詳解 (incl. brainstorming, content-pipeline)・YAML schema・カスタム作成方法）
