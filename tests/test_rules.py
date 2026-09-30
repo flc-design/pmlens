@@ -618,7 +618,7 @@ class TestInjectPmRules:
 
         original = rules_mod._inject_into_file
 
-        def selective_failer(path, host, *, dry_run=False):
+        def selective_failer(path, host, *, dry_run=False, force=False):
             if host == "claude-code":
                 raise OSError("simulated claude-code write failure")
             return original(path, host, dry_run=dry_run)
@@ -821,7 +821,7 @@ class TestCliUpdateRules:
 
         captured = {}
 
-        def fake_inject(root, *, target="auto", dry_run=False):
+        def fake_inject(root, *, target="auto", dry_run=False, force=False):
             captured["target"] = target
             captured["dry_run"] = dry_run
             return self._ok_summary()
@@ -842,7 +842,7 @@ class TestCliUpdateRules:
         (tmp_path / ".pm" / "project.yaml").write_text("name: t\n")
         monkeypatch.chdir(tmp_path)
 
-        def fake_inject(root, *, target="auto", dry_run=False):
+        def fake_inject(root, *, target="auto", dry_run=False, force=False):
             assert target == "codex"
             return InjectSummary(
                 results=[
@@ -878,7 +878,7 @@ class TestCliUpdateRules:
 
         captured = {}
 
-        def fake_inject(root, *, target="auto", dry_run=False):
+        def fake_inject(root, *, target="auto", dry_run=False, force=False):
             captured["dry_run"] = dry_run
             return self._ok_summary(dry_run=True)
 
@@ -900,7 +900,7 @@ class TestCliUpdateRules:
         (tmp_path / ".pm" / "project.yaml").write_text("name: t\n")
         monkeypatch.chdir(tmp_path)
 
-        def fake_inject(root, *, target="auto", dry_run=False):
+        def fake_inject(root, *, target="auto", dry_run=False, force=False):
             return self._ok_summary(source="fallback")
 
         monkeypatch.setattr("pmlens.rules.inject_pm_rules", fake_inject)
@@ -920,7 +920,7 @@ class TestCliUpdateRules:
         (tmp_path / ".pm" / "project.yaml").write_text("name: t\n")
         monkeypatch.chdir(tmp_path)
 
-        def fake_inject(root, *, target="auto", dry_run=False):
+        def fake_inject(root, *, target="auto", dry_run=False, force=False):
             return InjectSummary(
                 results=[
                     InjectResult(
@@ -955,7 +955,7 @@ class TestCliUpdateRules:
 
         backup = Path("/fake/AGENTS.md.bak.20260430-180000")
 
-        def fake_inject(root, *, target="auto", dry_run=False):
+        def fake_inject(root, *, target="auto", dry_run=False, force=False):
             return InjectSummary(
                 results=[
                     InjectResult(

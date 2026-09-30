@@ -737,11 +737,22 @@ def pm_status(project_path: str | None = None) -> dict:
     # PMSERV-165: Grok Build loads EVERY recognised rule file in a directory,
     # so a project carrying both CLAUDE.md and AGENTS.md hands it the PM rules
     # twice. Read-only (two Path.exists + two reads) — safe on this read path.
-    from .rules import ancestor_rules_warning, duplicate_rule_file_warning
+    from .rules import (
+        TEMPLATE_VERSION,
+        ancestor_rules_warning,
+        duplicate_rule_file_warning,
+        rules_version_warnings,
+    )
 
     duplicate = duplicate_rule_file_warning(root)
     if duplicate is not None:
         status_warnings.append(duplicate)
+
+    # ADR-055: deployed sections are only rewritten on request, so an old
+    # section (or one newer than this server, or two files at different
+    # versions) must be visible here or it stays unnoticed indefinitely.
+    status_warnings.extend(rules_version_warnings(root))
+    diagnostics["server_template_version"] = TEMPLATE_VERSION
 
     # ADR-053: Claude Code also loads every ANCESTOR CLAUDE.md, so a PM Lens
     # section above the project root (e.g. a stray $HOME/CLAUDE.md) doubles
@@ -3469,30 +3480,45 @@ def pm_update_rules(
     project_path: str | None = None,
     target: str = "auto",
     dry_run: bool = False,
+    force: bool = False,
 ) -> dict:
     """Inject PM Lens rules into CLAUDE.md and/or AGENTS.md.
+
+    Rule files may be committed and shared, so run this when the user asks
+    for it or agrees to a rules_outdated / rule_file_version_mismatch
+    remediation from pm_status.
 
     Args:
         project_path: Project root. Auto-detected if omitted.
         target: One of ``"auto"`` (default; detect installed hosts via
             filesystem + marker + CLAUDECODE), ``"all"`` (force every
-            known host), or a single host id — ``"claude-code"`` (only
-            CLAUDE.md), or ``"codex"`` / ``"cursor"`` / ``"grok"`` (only
-            AGENTS.md, which all three read).
+            known host), ``"existing"`` (only files that already carry the
+            PM Lens section — never creates a file), or a single host id —
+            ``"claude-code"`` (only CLAUDE.md), or ``"codex"`` /
+            ``"cursor"`` / ``"grok"`` (only AGENTS.md, which all three read).
         dry_run: If True, report what would happen without writing.
+        force: Rewrite a section even when it is newer than this server's
+            template. Without it such a section is skipped and a
+            ``rules_newer_than_server`` warning is returned — use force only
+            when the user wants the downgrade.
 
     Returns a dict with: ``overall_status``, ``detected_hosts``,
-    ``detection_source`` (``"filesystem+marker+env"`` |
-    ``"explicit"`` | ``"fallback"``), ``created``, ``updated``,
+    ``detection_source`` (``"filesystem+marker+env"`` | ``"explicit"`` |
+    ``"existing"`` | ``"fallback"``), ``created``, ``updated``,
     ``is_dry_run``, ``results`` (one entry per rule FILE — several hosts
     share AGENTS.md, so ``results[].hosts`` lists every host that reads
     it), and ``warnings``.
     """
     from .hosts import HOSTS
-    from .rules import duplicate_rule_file_warning, inject_pm_rules
+    from .rules import (
+        duplicate_rule_file_warning,
+        inject_pm_rules,
+        pm_section_versions,
+        rules_newer_than_server_warning,
+    )
 
     root = resolve_project_path(project_path)
-    summary = inject_pm_rules(root, target=target, dry_run=dry_run)
+    summary = inject_pm_rules(root, target=target, dry_run=dry_run, force=force)
 
     warnings: list[dict] = []
     if summary.detection_source == "fallback":
@@ -3508,6 +3534,11 @@ def pm_update_rules(
                 "remediation": "pm_update_rules(target='codex')",
             }
         )
+
+    refused = [r.target_file for r in summary.results if r.refused_downgrade]
+    if refused:
+        versions = pm_section_versions(root)
+        warnings.append(rules_newer_than_server_warning({f: versions[f] for f in refused}))
 
     duplicate = duplicate_rule_file_warning(root)
     if duplicate is not None:
@@ -3531,6 +3562,7 @@ def pm_update_rules(
                 "message": r.message,
                 "backup_path": str(r.backup_path) if r.backup_path else None,
                 "is_dry_run": r.is_dry_run,
+                "refused_downgrade": r.refused_downgrade,
             }
             for r in summary.results
         ],

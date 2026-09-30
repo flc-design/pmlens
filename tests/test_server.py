@@ -620,6 +620,9 @@ class TestPmUpdateRules:
             "message",
             "backup_path",
             "is_dry_run",
+            # ADR-055: a section newer than this server is skipped, not
+            # downgraded, and the result says so.
+            "refused_downgrade",
         }
         assert set(result["results"][0].keys()) == per_result_keys
 

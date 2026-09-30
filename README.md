@@ -248,11 +248,21 @@ A3 in [`docs/design.md` §6.4](docs/design.md).
 | -------------------------------- | ----------------------------------------------------- |
 | MCP (in-session)                 | `pm_update_rules(target="auto", dry_run=False)`       |
 | CLI (this project)               | `pmlens update-rules --target auto`                   |
-| CLI (every registered project)   | `pmlens update-rules --target auto --all`             |
+| CLI (every registered project)   | `pmlens update-rules --all` (plan), then `--apply`    |
 | Legacy CLAUDE.md only            | `pm_update_claudemd` / `pmlens update-claudemd`       |
 
-`AGENTS.md` is backed up to `AGENTS.md.bak.<timestamp>` before each write.
-`CLAUDE.md` backup symmetry is still pending in PMSERV-058 (originally targeted for v0.6.0).
+Both files are backed up to `<file>.bak.<timestamp>` before each write.
+
+Rule sections only move forward: a pmlens whose template is older than the
+section on disk leaves it alone and reports `rules_newer_than_server`
+(pass `force` to downgrade on purpose). `pm_status` also warns when a section
+is older than the running pmlens (`rules_outdated`) or when CLAUDE.md and
+AGENTS.md carry different versions (`rule_file_version_mismatch`).
+
+`--all` touches every registered repository, and those often commit their
+rule files, so it defaults to `--target existing` (only files that already
+carry the section; nothing is created) and prints the plan without writing
+until you add `--apply`.
 
 See [`docs/design.md` §6](docs/design.md) and ADR-008 for the multi-host
 rules-injection design (claudemd → rules module rename, marker convention,

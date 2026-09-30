@@ -240,11 +240,20 @@ pmlens uninstall --target auto
 | -------------------------------- | ----------------------------------------------------- |
 | MCP（セッション中）              | `pm_update_rules(target="auto", dry_run=False)`       |
 | CLI（このプロジェクトに適用）    | `pmlens update-rules --target auto`                   |
-| CLI（登録された全プロジェクト）  | `pmlens update-rules --target auto --all`             |
+| CLI（登録された全プロジェクト）  | `pmlens update-rules --all`（計画）→ `--apply`        |
 | レガシー CLAUDE.md 限定          | `pm_update_claudemd` / `pmlens update-claudemd`       |
 
-`AGENTS.md` は各書き込み前に `AGENTS.md.bak.<timestamp>` にバックアップされます。
-`CLAUDE.md` の対称的バックアップは PMSERV-058 として未対応のまま（当初 v0.6.0 を目標としたが deferred）。
+どちらのファイルも、書き込み前に `<file>.bak.<timestamp>` へバックアップされます。
+
+ルール節の版は後戻りしません。ディスク上の節より template が古い pmlens は、
+その節を書き換えずに `rules_newer_than_server` を報告します（意図的に戻す時は
+`force` を渡します）。`pm_status` は、節が実行中の pmlens より古い時
+（`rules_outdated`）と、CLAUDE.md と AGENTS.md の版が違う時
+（`rule_file_version_mismatch`）にも警告します。
+
+`--all` は登録済みの全リポジトリに及び、そうしたリポジトリはルールファイルを
+コミットしていることが多いので、既定は `--target existing`（既に節があるファイル
+だけ。新しいファイルは作らない）で、`--apply` を付けるまでは計画を表示するだけです。
 
 詳細は [`docs/design.md` §6](docs/design.md) と ADR-008 を参照（claudemd → rules
 モジュール rename、マーカー規約、データクラス、アトミック書き込みヘルパー）。

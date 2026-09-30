@@ -151,13 +151,16 @@ class TestAncestorRulesWarning:
         proj = isolated_home / "work" / "proj"
         proj.mkdir(parents=True)
         (isolated_home / "CLAUDE.md").write_text(_pm_section(11), encoding="utf-8")
+        (proj / "CLAUDE.md").write_text(_pm_section(9), encoding="utf-8")
 
         warning = ancestor_rules_warning(proj)
 
         assert warning is not None
         assert warning["code"] == "pm_rules_in_ancestor_claudemd"
         assert "v11" in warning["message"]
-        assert f"v{TEMPLATE_VERSION}" in warning["message"]
+        # The project's own section is named by ITS version, not the server's
+        # template version (ADR-055): the two are what Claude actually sees.
+        assert "own section (v9)" in warning["message"]
         assert warning["files"] == [str((isolated_home / "CLAUDE.md").resolve())]
         assert "claudeMdExcludes" in warning["remediation"]
 
