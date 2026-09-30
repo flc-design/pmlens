@@ -117,16 +117,21 @@ branch="${branch%$'\r'}"
 
 branch_note=""
 if [ -n "$branch" ]; then
-  branch_note=" The current git branch is \`$branch\`; pass track=\"$branch\" to pm_recall to restore this work line's context (branch-aware continuity, ADR-028), and re-pass it after any git checkout during the session."
+  branch_note=" The current git branch is \`$branch\`; pass track=\"$branch\" to pm_recall to restore this work line's context, and after any git checkout re-read .git/HEAD and pass the new branch."
 fi
 
 # --- 4. session-start directive ----------------------------------------------
 # We deliberately do NOT compute project context in the hook itself. pm-server
 # is not reliably on PATH here, and even when it is it may resolve a different
 # data store (HOME) than the bundled MCP — so a hook-computed status could be
-# from the wrong project. Instead we instruct the model to run the ritual
-# through the (correctly-scoped) MCP tools — the same contract CLAUDE.md uses.
-directive="pm-server plugin active. Begin this session with the pm-server ritual BEFORE your first reply: call pm_status (project state + warnings), pm_next (top 3 tasks), and pm_recall (restore prior-session context).${branch_note} Surface any blockers, overdue items, or tool warnings[] to the user verbatim."
+# from the wrong project. Instead we instruct the model to run the routine
+# through the (correctly-scoped) MCP tools.
+#
+# WHEN to run it is left to the project's rule file: the plugin ships
+# separately from the rule files it meets (v1-v15 coexist on real machines),
+# so a condition stated here would contradict some of them. Pointing at the
+# rule file keeps every combination consistent (ADR-054).
+directive="pm-server plugin active. This project tracks tasks, decisions and prior-session context in PM Lens.${branch_note} Follow the PM Lens section of this project's rule file (CLAUDE.md) for when to call pm_status, pm_recall and pm_next; if there is no such section, call them once before starting work on this project. Tell the user briefly about blockers, overdue tasks and each warnings[] entry the tools return, with its remediation when given."
 
 if [ -n "$dup_warning" ]; then
   payload="$(printf '%s\n\n%s' "$dup_warning" "$directive")"

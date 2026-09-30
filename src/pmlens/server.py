@@ -3326,7 +3326,8 @@ def pm_prompt_pack(
     Read-only over the SSoT (tasks/memory/decisions/project) and never touches
     git; the ONLY write is the export file. This tool is deliberately NOT in
     RO_ALLOWLIST — because it writes, a PM_LENS=1 (Lens) host must never see it
-    (a Lens read must not write; PMSERV-144). It is a Claude Code tool.
+    (a Lens read must not write; PMSERV-144). It is registered only in full
+    mode (PM_LENS unset), on any host.
 
     Args:
         filter_tag: Only tasks carrying this tag.

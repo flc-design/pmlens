@@ -597,58 +597,21 @@ YAML files are human-readable and hand-editable. Memory DB is the source of trut
 
 ## CLAUDE.md Integration
 
-Add this to your project's `CLAUDE.md` for automatic PM behavior (or run `pmlens update-rules`):
+`pm_init` adds a PM Lens section to `CLAUDE.md`, and `pmlens update-rules` keeps
+it (and `AGENTS.md` for Codex, Cursor and Grok Build) current. Let the tool write
+the section rather than copying it by hand: it is versioned, the version is shown
+in its heading, and pmlens warns when a project's copy falls behind.
 
-```markdown
-## PM Lens 自動行動ルール（必ず従うこと）
+What the section asks of the model (template v15, ADR-054):
 
-### セッション開始時（最初の応答の前に必ず実行）
-1. pm_status を MCP ツールとして実行し、現在の進捗を表示する
-2. pm_next で次に着手すべきタスクを3件表示する
-3. pm_recall で前回セッションの文脈を取得する
-4. ブロッカーや期限超過があれば警告する
-5. pm_status の claudemd.other_rule_sections に他のルールセクションが報告された場合、この CLAUDE.md 内の該当セクションのルールも全て実行する
-
-### タスクに着手する前
-1. 該当タスクを pm_update_task で in_progress に変更する
-
-### 作業中に重要な発見・判断があった時
-1. pm_remember で記憶を保存する（関連タスクIDがあれば task_id で紐付け）
-
-### コンテキスト保全（Compaction / Clear 対策）
-Claude Code はセッションが長くなるとコンテキストを自動圧縮（compaction）する。
-圧縮のタイミングは予測できないため、重要な情報は随時保存すること。
-1. 重要な発見・技術的判断は発生時点で即座に pm_remember で保存する（セッション終了を待たない）
-2. 複雑な議論や設計検討の後は、結論を pm_remember でまとめて保存する
-3. 3往復以上のやり取りで未記録の知見があれば、チェックポイントとして pm_remember で保存する
-4. ユーザーが /clear する前は必ず pm_session_summary を実行する
-5. Compaction 後にコンテキストが失われていると感じたら pm_recall で復元する
-
-### タスク完了時（コードが動作確認できたら）
-1. pm_update_task で done に変更する
-2. all_issues_resolved フラグが返された場合、親タスクの完了もユーザーに提案する
-3. pm_log に完了内容を記録する
-4. 次の推薦タスクを pm_next で表示する
-5. アトミックコミットを作成する
-
-### タスク完了確認中にイシュー（課題）が見つかった時
-1. pm_add_issue で親タスクに紐づくイシュー（子タスク）を作成する
-   - phase は親タスクから自動継承される
-   - 親タスクが done だった場合、自動で review に戻される
-2. イシューを解消したら pm_update_task で done に変更する
-3. 全イシューが解消されると all_issues_resolved フラグが返される
-4. 親タスクの完了をユーザーに提案する
-
-### 設計上の意思決定が発生した時
-1. ユーザーに「ADRとして記録しますか？」と確認する
-2. 承認されたら pm_add_decision で保存する
-
-### コーディングセッション終了時
-1. 進行中のタスクの状態を確認し、必要に応じて更新する
-2. pm_log にセッションの成果を記録する
-3. pm_session_summary で要約を保存する
-4. 未コミットの変更があればコミットする
-```
+- When starting work on the project, check `pm_status`, `pm_recall` and `pm_next`
+  once — not for unrelated one-off questions.
+- Keep tasks, the daily log and memory current as work progresses (these writes
+  stay inside `.pm/`), and relay every tool `warnings[]` entry to the user.
+- Ask before recording an ADR; wait for the user at workflow approval gates.
+- Commit only when the user asks (or a workflow they started includes it), and
+  stage only the files it changed.
+- Never show an unredacted draft, surface `raw_content`, or post / send drafts.
 
 ---
 

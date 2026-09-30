@@ -120,10 +120,10 @@ pm_status → pm_next → 実装 → テスト → pm_update_task → git commit
 ```
 
 Claude Code は CLAUDE.md の自動行動ルールに従い：
-1. セッション開始時に `pm_status` + `pm_next` を自動実行
+1. プロジェクトの作業に取りかかる時に `pm_status` + `pm_recall` + `pm_next` で状況を把握
 2. タスクを `in_progress` に変更して着手
-3. 完了後に `done` + `pm_log` + アトミックコミット
-4. 次のタスクへ自動遷移
+3. 完了後に `done` + `pm_log`（コミットはユーザーの依頼時。ADR-054）
+4. 次の推薦タスクを示す
 
 **人間の役割**: pm_dashboard で俯瞰し、方向修正が必要な時だけ介入。
 

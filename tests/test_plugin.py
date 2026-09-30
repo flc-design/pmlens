@@ -202,3 +202,49 @@ def test_directive_emitted_without_jq(empty_config: Path):
 # see, i.e. a *guarded file* with an *unguarded line*. All of it now lives in
 # tests/test_version_lockstep.py, which additionally scans the whole release
 # surface for unregistered pins. Do not re-add lockstep assertions here.
+
+
+# ─── SessionStart shell behaviour ─────────────────────────────────────────────
+
+
+def _run_session_hook(tmp_path: Path, *, branch: str) -> str:
+    """Run session-start.sh in a repo on ``branch`` and return additionalContext.
+
+    PATH is limited to the tools the script needs so the `claude mcp get`
+    duplicate probe never touches the real Claude Code configuration.
+    """
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / ".git" / "HEAD").write_text(f"ref: refs/heads/{branch}\n", encoding="utf-8")
+    bindir = tmp_path / "_bin"
+    bindir.mkdir()
+    for tool in ("bash", "cat", "grep", "head", "cut", "mkdir", "find", "dirname", "jq"):
+        real = shutil.which(tool)
+        if real is None:
+            pytest.skip(f"cannot build a restricted PATH: {tool} not found")
+        (bindir / tool).symlink_to(real)
+    env = {"PATH": str(bindir), "CLAUDE_PLUGIN_DATA": str(tmp_path / "data")}
+    stdin = json.dumps({"session_id": "s-1", "cwd": str(repo), "source": "startup"})
+    r = subprocess.run(
+        ["bash", str(SESSION_HOOK)],
+        input=stdin,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=20,
+    )
+    assert r.returncode == 0, r.stderr
+    hook_out = json.loads(r.stdout)["hookSpecificOutput"]
+    assert hook_out["hookEventName"] == "SessionStart"
+    return hook_out["additionalContext"]
+
+
+def test_session_directive_defers_timing_to_the_rule_file(tmp_path: Path):
+    context = _run_session_hook(tmp_path, branch="feat/x")
+    # The plugin meets rule files of every version, so it points at them
+    # instead of restating a condition some of them contradict (ADR-054).
+    assert "Follow the PM Lens section" in context
+    assert "BEFORE your first reply" not in context
+    assert "verbatim" not in context
+    assert 'track="feat/x"' in context
+    assert "re-read .git/HEAD" in context

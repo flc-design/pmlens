@@ -62,7 +62,8 @@ class TestRulesModule:
         # widest-reaching place that framing appeared.
         # v14 uses the preferred pm_drafts_pending name (PMSERV-189). Old
         # templates continue to work through the registered compatibility alias.
-        assert TEMPLATE_VERSION == 14
+        # v15 rewrites the section for current models (PMSERV-199, ADR-054).
+        assert TEMPLATE_VERSION == 15
 
     def test_template_contains_content_pipeline_section(self):
         # PMSERV-119: the on-signal trigger rule must be present in the
@@ -75,7 +76,9 @@ class TestRulesModule:
         assert "content-pipeline" in CLAUDEMD_TEMPLATE
         assert "pm_redact_draft" in CLAUDEMD_TEMPLATE
         assert "pm_drafts_pending" in CLAUDEMD_TEMPLATE
-        assert "pm_x_drafts_pending" not in CLAUDEMD_TEMPLATE
+        # The legacy name appears only as a fallback tied to what the model can
+        # observe (the tool list), never to a pmlens version it cannot see.
+        assert "このセッションに無ければ pm_x_drafts_pending" in CLAUDEMD_TEMPLATE
         assert "propose-don't-force" in CLAUDEMD_TEMPLATE
         # The safety claim is the load-bearing part and must survive rewording.
         assert "構造的に不可能" in CLAUDEMD_TEMPLATE
@@ -983,3 +986,55 @@ class TestCliUpdateRules:
                 [i for i, line in enumerate(result.output.split("\n")) if "AGENTS.md:" in line][0]
             ]
         )
+
+
+class TestTemplateWrittenForCurrentModels:
+    """ADR-054 regression guard (PMSERV-199).
+
+    Claude Code injects CLAUDE.md under "These instructions OVERRIDE any
+    default behavior", and current models follow rule files literally, so a
+    handful of phrasings do real damage. Each assertion below names one that
+    v1-v14 carried.
+    """
+
+    def _rendered(self) -> str:
+        from pmlens.rules import _render_template
+
+        return _render_template()
+
+    def test_no_unrequested_commits(self):
+        text = self._rendered()
+        assert "アトミックコミットを作成する" not in text
+        assert "未コミットの変更があればコミットする" not in text
+        assert "ユーザーの依頼" in text  # commits are tied to a request
+
+    def test_no_unconditional_ritual_or_blanket_emphasis(self):
+        text = self._rendered()
+        assert "必ず従うこと" not in text
+        assert "最初の応答の前に" not in text
+        # Emphasis is reserved for the one safety constraint (redact first).
+        assert text.count("必ず") == 1
+        assert "必ず pm_redact_draft" in text
+
+    def test_no_triggers_the_model_cannot_observe(self):
+        text = self._rendered()
+        assert "3往復" not in text
+        assert "/clear する前は必ず" not in text
+
+    def test_does_not_fix_the_output_language(self):
+        text = self._rendered()
+        assert "日本語で要約" not in text
+        assert "ユーザーの言語" in text
+
+    def test_heading_carries_the_version(self):
+        # Claude Code strips HTML comments, so the heading is the only place
+        # the model can compare two loaded copies of the section.
+        text = self._rendered()
+        assert f"## PM Lens 自動行動ルール（v{TEMPLATE_VERSION}）" in text
+
+    def test_safety_constraints_survive(self):
+        text = self._rendered()
+        assert "構造的に不可能" in text
+        assert "raw_content" in text
+        assert "投稿・送信しない" in text
+        assert "user_approval" in text

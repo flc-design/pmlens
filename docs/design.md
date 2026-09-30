@@ -1139,13 +1139,17 @@ data class を矛盾なく消費できる (PMSERV-039 L1 lesson の継承、§5.
 CLAUDE.md / AGENTS.md ともに同一形式のマーカーで PM Lens セクションを区切る:
 
 ```markdown
-<!-- pm-server:begin v=7 -->
-## PM Lens 自動行動ルール（必ず従うこと）
+<!-- pm-server:begin v=15 -->
+## PM Lens 自動行動ルール（v15）
 ... (テンプレート本文) ...
 <!-- pm-server:end -->
 ```
 
-- `v=N`: テンプレート version (v0.5.0 では `7`)
+- `v=N`: テンプレート version (v0.5.0 では `7`、ADR-054 で `15`)。v15 から見出しにも
+  版を出す（Claude Code は HTML コメントのマーカーをモデルに渡さないため）
+- 版は後戻りしない (ADR-055): 既存の節が TEMPLATE_VERSION より新しい時、
+  `pm_update_rules` / `update_claudemd` は書き換えずに skipped と
+  `rules_newer_than_server` を返す（`force` で意図的に戻せる）
 - `_replace_pm_section(path, content, template)` がマーカー区間のみを
   in-place 置換し、ユーザー手書き内容を完全保持
 - `pm_init` 時はマーカー区間が無ければ末尾に追記 (`status="appended"`)、

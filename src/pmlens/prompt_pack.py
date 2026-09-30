@@ -164,7 +164,13 @@ def build_prompt_body(
         body.append(f"- {ac}")
     for cmd in verify_commands:
         body.append(f"- 検証コマンド: `{cmd}`")
-    body.append("- 動作確認 → pm_update_task done → pm_log → アトミックコミット")
+    # The pack is pasted by the user as their own request, so the commit is
+    # asked for — but it is scoped to this task's files so a session never
+    # sweeps up someone else's uncommitted work (ADR-054).
+    body.append(
+        "- 動作確認 → pm_update_task done → pm_log（完了として書くのは確かめたことだけ）"
+        " → このタスクで変更したファイルだけをステージしてアトミックコミット（push はしない）"
+    )
 
     return "\n".join(body)
 
@@ -227,10 +233,10 @@ def build_prompt_pack_md(
         "",
         "## 共通運用ルール",
         "",
+        "- 各セッションは、このリポジトリの CLAUDE.md / AGENTS.md の PM Lens 節に従う",
         "- 着手前: 該当タスクを pm_update_task で in_progress にする",
-        "- 作業中に重要な発見・判断があれば pm_remember で記録（task_id で紐付け）",
-        "- 完了時: 動作確認 → pm_update_task done → pm_log → アトミックコミット",
-        "- 課題が見つかったら pm_add_issue（defect / enhancement を選ぶ）",
+        "- 完了時: 動作確認 → pm_update_task done → pm_log"
+        " → このタスクで変更したファイルだけをアトミックコミット（push はしない）",
         "",
     ]
     if discipline.strip():
