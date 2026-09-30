@@ -612,7 +612,7 @@ What the section asks of the model (template v15, ADR-054):
   are project-management records, not code), and relay every tool `warnings[]` entry to the user.
 - Ask before recording an ADR; wait for the user at workflow approval gates.
 - Commit only when the user asks (or a workflow they started includes it), and
-  stage only the files it changed.
+  only the changes it made; ask first if earlier or staged changes would mix in.
 - Never show an unredacted draft, surface `raw_content`, or post / send drafts.
 
 ---

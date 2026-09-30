@@ -356,15 +356,23 @@ def handle_post_tool_use() -> None:
     command = tool_input.get("command", "")
     cwd = data.get("cwd", "")
 
-    if not is_git_commit(command):
+    session_dir = Path(cwd or ".")
+    commit_dir = git_commit_dir(command, session_dir)
+    if commit_dir is None:
         return
 
-    # Only act on projects with PM Lens (the same walk-up pm tools use).
-    pm_path = _find_project_pm_dir(Path(cwd or "."))
+    # Only act when the commit landed in a PM Lens project — that of the
+    # repository the commit went to, which a `cd` or `git -C` can make
+    # different from the session cwd.
+    pm_path = _find_project_pm_dir(commit_dir)
     if pm_path is None:
         return
 
-    reminder = _build_commit_reminder(pm_path)
+    # When pm_* tools called without project_path would resolve somewhere
+    # else (PM_PROJECT_PATH, or a different cwd project), name the project.
+    default_pm = _default_project_pm_dir(session_dir)
+    other_project = None if default_pm == pm_path.resolve() else pm_path.resolve().parent
+    reminder = _build_commit_reminder(pm_path, project_path=other_project)
     if reminder:
         json.dump(post_tool_use_context(reminder), sys.stdout)
 
@@ -373,42 +381,132 @@ _SHELL_SEPARATORS = re.compile(r"&&|\|\||[;|\n]")
 _ENV_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 # git global options that take their value as the NEXT token.
 _GIT_OPTIONS_WITH_VALUE = frozenset({"-C", "-c", "--git-dir", "--work-tree", "--namespace"})
+# git global options that print information instead of running a command.
+_GIT_INFO_OPTIONS = frozenset(
+    {"-h", "--help", "--version", "--exec-path", "--html-path", "--man-path", "--info-path"}
+)
+# `git commit` flags that show what would be committed without committing.
+_NON_COMMIT_FLAGS = frozenset({"--dry-run", "--short", "--porcelain", "--long", "-h", "--help"})
+_SEPARATOR_CHARS = frozenset(";&|()\n")
+
+
+def _shell_commands(command: str) -> list[list[str]]:
+    """Split a shell command line into simple commands (lists of words).
+
+    Separators (``;``, ``&&``, ``||``, ``|``, ``&``, newlines, subshell
+    parentheses) only count outside quotes, and a heredoc body is skipped, so
+    ``echo "a; git commit"`` or a heredoc line reading ``git commit`` is text,
+    not a command. Input that does not tokenise (unbalanced quotes) falls back
+    to a plain split on separators.
+    """
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|()<>\n")
+    lexer.whitespace = " \t\r"
+    lexer.whitespace_split = True
+    lexer.commenters = "#"
+    try:
+        tokens = list(lexer)
+    except ValueError:
+        return [segment.split() for segment in _SHELL_SEPARATORS.split(command)]
+
+    commands: list[list[str]] = []
+    current: list[str] = []
+    pending_heredocs: list[str] = []
+    expect_delimiter = False
+    skipping: str | None = None
+    at_line_start = False
+    for token in tokens:
+        if skipping is not None:
+            if token == "\n":
+                at_line_start = True
+            elif at_line_start and token == skipping:
+                skipping = pending_heredocs.pop(0) if pending_heredocs else None
+                at_line_start = False
+            else:
+                at_line_start = False
+            continue
+        if expect_delimiter:
+            pending_heredocs.append(token)
+            expect_delimiter = False
+            current.append(token)
+            continue
+        if token in ("<<", "<<-"):
+            expect_delimiter = True
+            current.append(token)
+            continue
+        if set(token) <= _SEPARATOR_CHARS:
+            if current:
+                commands.append(current)
+                current = []
+            if token == "\n" and pending_heredocs:
+                skipping = pending_heredocs.pop(0)
+                at_line_start = True
+            continue
+        current.append(token)
+    if current:
+        commands.append(current)
+    return commands
+
+
+def _commit_target(words: list[str], cwd: Path) -> Path | None:
+    """If ``words`` is a ``git ... commit`` that creates a commit, return the
+    directory it commits in (``-C`` applied to ``cwd``); otherwise ``None``."""
+    i = 0
+    while i < len(words) and _ENV_ASSIGNMENT.match(words[i]):
+        i += 1
+    if i >= len(words) or Path(words[i]).name != "git":
+        return None
+    i += 1
+    target = cwd
+    while i < len(words) and words[i].startswith("-"):
+        option = words[i]
+        if option in _GIT_INFO_OPTIONS:
+            return None
+        if option == "-C" and i + 1 < len(words):
+            target = target / Path(words[i + 1]).expanduser()
+        i += 2 if option in _GIT_OPTIONS_WITH_VALUE else 1
+    if i >= len(words) or words[i] != "commit":
+        return None
+    if _NON_COMMIT_FLAGS & set(words[i + 1 :]):
+        return None
+    return target
+
+
+def git_commit_dir(command: str, cwd: Path) -> Path | None:
+    """Return the directory a ``git commit`` in ``command`` runs in, if any.
+
+    Follows ``cd <dir>`` and ``git -C <dir>`` so a commit made in another
+    repository is attributed to that repository, not to the session cwd.
+    """
+    current = cwd
+    for words in _shell_commands(command):
+        i = 0
+        while i < len(words) and _ENV_ASSIGNMENT.match(words[i]):
+            i += 1
+        if i + 1 < len(words) and words[i] == "cd":
+            current = current / Path(words[i + 1]).expanduser()
+            continue
+        target = _commit_target(words, current)
+        if target is not None:
+            return target
+    return None
 
 
 def is_git_commit(command: str) -> bool:
     """Return True when ``command`` runs ``git commit`` as a command.
 
     Once the reminder actually reached the model (PMSERV-196), a substring
-    test turned every ``grep "git commit"``, ``echo ... git commit`` or
-    ``git commit --dry-run`` into a false "commit recorded" claim. Each shell
-    segment is checked for ``git`` in command position (after any
-    ``VAR=value`` prefixes), skipping git's global options, followed by the
-    ``commit`` subcommand. Unbalanced quotes (a heredoc commit message split
-    across lines) fall back to whitespace tokens.
+    test turned every ``grep "git commit"``, ``echo ... git commit``, heredoc
+    line or ``git commit --dry-run`` into a false "commit recorded" claim.
     """
-    for segment in _SHELL_SEPARATORS.split(command):
-        try:
-            tokens = shlex.split(segment, comments=True)
-        except ValueError:
-            tokens = segment.split()
-        i = 0
-        while i < len(tokens) and _ENV_ASSIGNMENT.match(tokens[i]):
-            i += 1
-        if i >= len(tokens) or Path(tokens[i]).name != "git":
-            continue
-        i += 1
-        while i < len(tokens) and tokens[i].startswith("-"):
-            i += 2 if tokens[i] in _GIT_OPTIONS_WITH_VALUE else 1
-        if i < len(tokens) and tokens[i] == "commit" and "--dry-run" not in tokens[i + 1 :]:
-            return True
-    return False
+    return git_commit_dir(command, Path(".")) is not None
 
 
 def _find_project_pm_dir(start: Path) -> Path | None:
     """Return the ``.pm/`` of the project containing ``start``, if any.
 
-    Mirrors ``utils.resolve_project_path``'s walk-up: the nearest ancestor
-    whose ``.pm/`` holds ``project.yaml`` (the global ``~/.pm`` does not).
+    The nearest ancestor whose ``.pm/`` holds ``project.yaml`` (the global
+    ``~/.pm`` does not) — the same walk-up ``utils.resolve_project_path``
+    uses.
     """
     from .utils import _is_project_pm_dir
 
@@ -422,6 +520,18 @@ def _find_project_pm_dir(start: Path) -> Path | None:
     return None
 
 
+def _default_project_pm_dir(cwd: Path) -> Path | None:
+    """The ``.pm/`` a pm_* tool call without ``project_path`` would use:
+    ``PM_PROJECT_PATH`` first, then the walk-up from ``cwd``."""
+    from .utils import _is_project_pm_dir
+
+    if env_path := os.environ.get("PM_PROJECT_PATH"):
+        pm_dir = Path(env_path).expanduser() / ".pm"
+        if _is_project_pm_dir(pm_dir):
+            return pm_dir.resolve()
+    return _find_project_pm_dir(cwd)
+
+
 def post_tool_use_context(text: str) -> dict:
     """Wrap ``text`` in the envelope Claude Code reads from a PostToolUse hook.
 
@@ -433,7 +543,14 @@ def post_tool_use_context(text: str) -> dict:
     return {"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": text}}
 
 
-def _build_commit_reminder(pm_path: Path) -> str:
+# Task ids are auto-numbered PREFIX-NNN; anything else in tasks.yaml is
+# repository-controlled text and must not be spliced into model context.
+_TASK_ID = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,39}$")
+# Characters that could break out of the quoted path or start a new line.
+_UNSAFE_PATH_CHARS = re.compile(r"[\x00-\x1f\x7f\"'`]")
+
+
+def _build_commit_reminder(pm_path: Path, project_path: Path | None = None) -> str:
     """Build a contextual PM reminder after git commit.
 
     Returns an empty string (no reminder) when no task is in progress: there
@@ -452,7 +569,7 @@ def _build_commit_reminder(pm_path: Path) -> str:
     lens_mode = os.environ.get("PM_LENS", "").lower() in {"1", "true", "yes", "on"}
 
     tasks = load_tasks(pm_path)
-    active = [t for t in tasks if t.status == TaskStatus.IN_PROGRESS]
+    active = [t for t in tasks if t.status == TaskStatus.IN_PROGRESS and _TASK_ID.match(t.id)]
     task_ids = ", ".join(t.id for t in active)
 
     if lens_mode:
@@ -469,9 +586,16 @@ def _build_commit_reminder(pm_path: Path) -> str:
     if not active:
         return ""
 
+    where = ""
+    if project_path is not None:
+        if _UNSAFE_PATH_CHARS.search(str(project_path)):
+            # Naming the project is what keeps the update off the wrong one;
+            # without a safe way to name it, say nothing.
+            return ""
+        where = f' These tasks belong to the project at "{project_path}"; pass it as project_path.'
     return (
         f"[PM Lens] git commit recorded. In progress: {task_ids}. "
         "If this commit completed one of them and it is not yet marked done, "
         "mark it done with pm_update_task and add a pm_log entry. "
-        "For an intermediate commit, leave task statuses unchanged."
+        f"For an intermediate commit, leave task statuses unchanged.{where}"
     )

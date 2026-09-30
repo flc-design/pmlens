@@ -44,40 +44,57 @@ else
 fi
 [ -n "$command_str" ] || exit 0
 
-segments="${command_str//&&/$'\n'}"
+# Quoted text is data, not commands: drop it before splitting on separators,
+# then stop at the first heredoc (its body is data too; a real commit after a
+# heredoc is missed, which is the safe direction).
+stripped="$(printf '%s\n' "$command_str" | sed -E "s/'[^']*'//g; s/\"([^\"\\\\]|\\\\.)*\"//g" | awk '{print} /<</{exit}')"
+segments="${stripped//&&/$'\n'}"
 segments="${segments//||/$'\n'}"
 segments="${segments//;/$'\n'}"
 segments="${segments//|/$'\n'}"
-is_commit=0
+segments="${segments//&/$'\n'}"
+
+[ -n "$cwd" ] || cwd="$PWD"
+target_dir="$cwd"
+commit_dir=""
 git_commit_re='^([^[:space:]]*/)?git([[:space:]]+(-[Cc][[:space:]]+[^[:space:]]+|--(git-dir|work-tree|namespace)[[:space:]]+[^[:space:]]+|-[^[:space:]]+))*[[:space:]]+commit([[:space:]]|$)'
+not_a_commit_re='(^|[[:space:]])(--dry-run|--short|--porcelain|--long|--help|-h|--version)([[:space:]]|$)'
 while IFS= read -r segment; do
   segment="${segment#"${segment%%[![:space:]]*}"}"
   while [[ $segment =~ ^[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+(.*)$ ]]; do
     segment="${BASH_REMATCH[1]}"
   done
-  if [[ $segment =~ $git_commit_re ]] && [[ $segment != *--dry-run* ]]; then
-    is_commit=1
+  # Follow `cd <dir>` so a commit in another repository is judged there.
+  if [[ $segment =~ ^cd[[:space:]]+([^[:space:]]+) ]]; then
+    d="${BASH_REMATCH[1]}"; d="${d/#\~/$HOME}"
+    case "$d" in /*) target_dir="$d" ;; *) target_dir="$target_dir/$d" ;; esac
+    continue
+  fi
+  if [[ $segment =~ $git_commit_re ]] && ! [[ $segment =~ $not_a_commit_re ]]; then
+    commit_dir="$target_dir"
+    if [[ $segment =~ [[:space:]]-C[[:space:]]+([^[:space:]]+) ]]; then
+      d="${BASH_REMATCH[1]}"; d="${d/#\~/$HOME}"
+      case "$d" in /*) commit_dir="$d" ;; *) commit_dir="$commit_dir/$d" ;; esac
+    fi
     break
   fi
 done <<< "$segments"
-[ "$is_commit" -eq 1 ] || exit 0
+[ -n "$commit_dir" ] || exit 0
 
-# --- 1b. only in a PM Lens project -------------------------------------------
-# Walk up from the session cwd for .pm/project.yaml, like the pm_* tools do
-# (PM_PROJECT_PATH first). Outside a PM Lens project there is nothing to record.
-[ -n "$cwd" ] || cwd="$PWD"
-pm_found=0
-if [ -n "${PM_PROJECT_PATH:-}" ] && [ -f "$PM_PROJECT_PATH/.pm/project.yaml" ]; then
-  pm_found=1
-fi
-dir="$cwd"
-while [ "$pm_found" -eq 0 ]; do
-  if [ -f "$dir/.pm/project.yaml" ]; then pm_found=1; break; fi
-  parent="$(dirname "$dir")"
-  [ "$parent" = "$dir" ] && break
-  dir="$parent"
-done
-[ "$pm_found" -eq 1 ] || exit 0
+# --- 1b. only for a commit in a PM Lens project ------------------------------
+# Walk up from the directory the commit ran in for .pm/project.yaml, like the
+# pm_* tools do. A commit outside a PM Lens project has nothing to record.
+find_pm_root() {
+  local dir="$1" parent
+  while :; do
+    if [ -f "$dir/.pm/project.yaml" ]; then printf '%s' "$dir"; return 0; fi
+    parent="$(dirname "$dir")"
+    [ "$parent" = "$dir" ] && return 1
+    dir="$parent"
+  done
+}
+commit_root="$(find_pm_root "$commit_dir")" || exit 0
+session_root="$(find_pm_root "$cwd" || true)"
 
 # --- 2. double-fire guard: defer if the manual settings.json hook is present ---
 # The manual install writes a PostToolUse hook whose command contains
@@ -93,6 +110,13 @@ fi
 
 # --- 3. directive -------------------------------------------------------------
 directive="pm-server plugin: a git commit just completed. If it finished a task that is not yet marked done, update it with pm_update_task and record it with pm_log; for an intermediate commit, change nothing. Tell the user about any warnings[] the tools return."
+if [ "$commit_root" != "$session_root" ]; then
+  # Name the project the commit went to. Without a safe way to name it
+  # (quotes, backslashes or control characters in the path), stay silent
+  # rather than prompt an update of the session's project.
+  case "$commit_root" in *[\\\"\'\`]*|*[[:cntrl:]]*) exit 0 ;; esac
+  directive="$directive The commit was made in the project at $commit_root; pass that path as project_path."
+fi
 
 if command -v jq >/dev/null 2>&1; then
   jq -n --arg c "$directive" \

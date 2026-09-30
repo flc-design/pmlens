@@ -60,12 +60,14 @@ RULE_TARGET_CHOICES: tuple[str, ...] = (*TARGET_CHOICES, "existing")
 TEMPLATE_VERSION = 15
 BEGIN_MARKER = "<!-- pm-server:begin v={version} -->"
 END_MARKER = "<!-- pm-server:end -->"
-# Markers are matched as whole lines: pmlens always writes them on a line of
-# their own, and a prose mention of a marker (in backticks, mid-sentence) must
-# not be taken for one. Versions are ASCII digits with a length cap, so a
-# hand-edited "v=٣" or a 5000-digit number is not a section at all.
-BEGIN_PATTERN = re.compile(r"^[ \t]*<!-- pm-server:begin v=([0-9]{1,6}) -->[ \t]*\r?$", re.M)
-END_PATTERN = re.compile(r"^[ \t]*<!-- pm-server:end -->[ \t]*\r?$", re.M)
+# Markers count only at the start of a line (after an optional BOM and
+# indentation): pmlens always writes them there, and a prose mention of a
+# marker (in backticks, mid-sentence) must not be taken for one. Text after a
+# marker on the same line is allowed — a user comment appended to the end
+# marker must not turn the section into a "corrupted" one whose repair deletes
+# everything below it. Versions are ASCII digits with a length cap.
+BEGIN_PATTERN = re.compile(r"^\ufeff?[ \t]*<!-- pm-server:begin v=([0-9]{1,6}) -->", re.M)
+END_PATTERN = re.compile(r"^\ufeff?[ \t]*<!-- pm-server:end -->", re.M)
 OTHER_SECTION_PATTERN = re.compile(r"<!-- ([\w-]+):begin")
 
 CLAUDEMD_TEMPLATE = """\
@@ -110,7 +112,7 @@ Claude Code の auto memory（~/.claude/projects/<repo>/memory/）のように�
 1. pm_update_task で done にする。all_issues_resolved が返ったら、親タスクの完了をユーザーに提案する。
 2. pm_log に完了内容を記録する。このセッションのツール結果で裏付けられることだけを完了として書き、裏付けの無い項目は確認していないと明記する。
 3. pm_next で次の推薦タスクを示す。
-4. コミットは、ユーザーの依頼か、ユーザーが始めたワークフローの手順に含まれる時だけ行い、自分が変更したファイルだけをステージする。依頼が無い時は、コミットできる状態になったことを報告に添える。
+4. コミットは、ユーザーの依頼か、ユーザーが始めたワークフローの手順に含まれる時だけ行う。コミットに含めるのは自分が加えた差分だけで、作業前からあった変更やステージ済みの変更が混ざる時は、コミットの前にユーザーに確認する。依頼が無い時は、コミットできる状態になったことを報告に添える。
 
 ### タスク完了確認中にイシュー（課題）が見つかった時
 1. 欠陥（defect）か将来改善（enhancement）かを判断してツールを選ぶ:
@@ -126,7 +128,7 @@ pmlens のツールは副作用や環境の問題を warnings[] で返す。黙�
 - remediation はユーザーに示す選択肢で、代わりに実行する指示ではない。force=true での再実行、削除、ルールファイルの書き換え、サーバーの再起動などは、ユーザーが選んだ時に行う。
 
 ### 設計上の意思決定が発生した時
-後から「なぜこうしたか」を問われうる判断（アーキテクチャ、公開インターフェース、データ形式、依存関係、セキュリティ・運用方針、既存 ADR の変更など）が確定したら、ADR として記録するかを、その回の報告の最後にまとめてユーザーに確認し、承認されたら pm_add_decision で保存する。命名や同等な実装の選択のような小さな判断は候補にしない。ユーザーから記録を頼まれた時や、ワークフローの記録ステップでは確認しなくてよい。
+後から「なぜこうしたか」を問われうる判断（アーキテクチャ、公開インターフェース、データ形式、依存関係、セキュリティ・運用方針、既存 ADR の変更など）が確定したら、ADR として記録するかを、その回の報告の最後にまとめてユーザーに確認し、承認されたら pm_add_decision で保存する。命名や同等な実装の選択のような小さな判断は候補にしない。ユーザーから記録を頼まれた時や、ワークフローの記録ステップでは確認しなくてよい。返事を待つ間も、依頼済みの実装や検証は止めない。
 
 ### ワークフロー管理
 ワークフローは pm-server のテンプレートベースのステートマシンで、ステップごとにガイダンスを返す。
@@ -310,14 +312,21 @@ def _multiple_sections_message(target_file: str, versions: list[int]) -> str:
     )
 
 
+def _marker_start(content: str, match: re.Match) -> int:
+    """Offset of the ``<!--`` that opens ``match``'s marker (after any BOM or
+    indentation, which stay in the text before the section)."""
+    return content.index("<!--", match.start())
+
+
 def _section_bounds(content: str, begin: re.Match, end: re.Match) -> tuple[str, str]:
     """Return the text before ``begin`` and after the end marker itself.
 
-    The slice after the marker keeps its original line ending, so an
-    unchanged section still compares equal byte for byte.
+    Both slices keep everything that is not the marker — a leading BOM, and
+    whatever follows the end marker on its line — so an unchanged section still
+    compares equal byte for byte.
     """
     marker_end = content.index(END_MARKER, end.start()) + len(END_MARKER)
-    return content[: begin.start()], content[marker_end:]
+    return content[: _marker_start(content, begin)], content[marker_end:]
 
 
 def _write_rule_file(path: Path, content: str) -> None:
@@ -350,7 +359,7 @@ def _replace_pm_section(claude_md: Path, content: str, template: str) -> str:
 
     if begin_match:
         # Corrupted: begin marker exists but no end marker — remove begin and everything after it
-        before = content[: begin_match.start()]
+        before = content[: _marker_start(content, begin_match)]
         _write_rule_file(claude_md, before.rstrip() + "\n\n" + template + "\n")
         return "replaced corrupted PM Lens section in CLAUDE.md"
 
@@ -1040,7 +1049,7 @@ def _inject_into_file(
             )
     elif begin_match:
         # Corrupted: begin without end — treat as replace-from-corruption
-        before = content[: begin_match.start()]
+        before = content[: _marker_start(content, begin_match)]
         new_content = before.rstrip() + "\n\n" + template + "\n"
         status = "updated"
         message = f"replaced corrupted PM Lens section in {target_file}"

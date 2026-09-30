@@ -100,7 +100,7 @@ def _run_post_hook(
         # `command -v jq` probe fails and the printf fallback is exercised.
         bindir = config_dir / "_bin"
         bindir.mkdir(exist_ok=True)
-        for tool in ("bash", "env", "cat", "grep", "head", "cut", "dirname"):
+        for tool in ("bash", "env", "cat", "grep", "head", "cut", "dirname", "sed", "awk"):
             real = shutil.which(tool)
             if real is None:
                 pytest.skip(f"cannot build jq-less PATH: {tool} not found")
@@ -281,6 +281,10 @@ def test_session_hook_is_silent_outside_a_pm_lens_project(tmp_path: Path):
         'echo "remember to git commit later"',
         "git commit --dry-run -m x",
         "git commit-tree HEAD^{tree} -m x",
+        'echo "example; git commit -m x"',
+        "git --help commit",
+        "git commit --short",
+        "cat <<EOF\ngit commit -m fake\nEOF",
     ],
 )
 def test_post_hook_ignores_text_that_is_not_a_commit(
@@ -334,3 +338,26 @@ def test_skills_do_not_contradict_the_rule_template(path: Path):
     assert "アトミックコミットを作成" not in text
     assert "最初の発話の前" not in text
     assert "/clear 前に" not in text
+
+
+@pytest.mark.parametrize("no_jq", [False, True])
+def test_post_hook_ignores_a_commit_in_another_repository(
+    empty_config: Path, pm_project: Path, tmp_path: Path, no_jq: bool
+):
+    other = tmp_path / "other"
+    other.mkdir()
+    for command in (f"git -C {other} commit -m x", f"cd {other} && git commit -m x"):
+        r = _run_post_hook(_post_input(command, pm_project), config_dir=empty_config, no_jq=no_jq)
+        assert r.stdout.strip() == "", command
+
+
+def test_post_hook_names_the_project_the_commit_went_to(
+    empty_config: Path, pm_project: Path, tmp_path: Path
+):
+    other = tmp_path / "other"
+    (other / ".pm").mkdir(parents=True)
+    (other / ".pm" / "project.yaml").write_text("name: other\n", encoding="utf-8")
+    r = _run_post_hook(
+        _post_input(f"cd {other} && git commit -m x", pm_project), config_dir=empty_config
+    )
+    assert f"project at {other}" in _post_tool_use_context(r.stdout)

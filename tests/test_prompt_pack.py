@@ -1008,6 +1008,7 @@ class TestCommitScope:
             decisions_by_id={},
             verify_commands=[],
         )
-        assert "このタスクで変更したファイルだけ" in body
+        assert "このタスクで加えた差分だけ" in body
+        assert "先に確認" in body
         assert "push はしない" in body
         assert "未コミットの変更があれば" not in body

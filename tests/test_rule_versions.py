@@ -358,6 +358,33 @@ class TestMarkerRobustness:
         assert "old rules" not in once
         assert second.status == "skipped"  # idempotent
 
+    def test_text_after_the_end_marker_keeps_the_rest_of_the_file(self, tmp_path: Path):
+        # Codex cross-check: whole-line end matching turned this into a
+        # "corrupted" section whose repair deleted everything below it.
+        (tmp_path / "CLAUDE.md").write_text(
+            f"# T\n\n{BEGIN_MARKER.format(version=OLDER)}\nold\n"
+            f"{END_MARKER} <!-- user-notes -->\n\n## User rules\nkeep me\n",
+            encoding="utf-8",
+        )
+
+        (result,) = inject_pm_rules(tmp_path, target="existing").results
+
+        text = (tmp_path / "CLAUDE.md").read_text(encoding="utf-8")
+        assert result.status == "updated"
+        assert "keep me" in text
+        assert f"{END_MARKER} <!-- user-notes -->" in text
+
+    def test_a_bom_before_the_first_marker(self, tmp_path: Path):
+        (tmp_path / "AGENTS.md").write_text("\ufeff" + _section(OLDER).split("\n", 2)[2])
+        assert rules.pm_section_versions(tmp_path) == {"AGENTS.md": OLDER}
+
+        (result,) = inject_pm_rules(tmp_path, target="existing").results
+
+        raw = (tmp_path / "AGENTS.md").read_bytes()
+        assert result.status == "updated"
+        assert raw.startswith(b"\xef\xbb\xbf<!-- pm-server:begin")
+        assert raw.count(b"pm-server:begin") == 1
+
     def test_a_marker_quoted_in_prose_is_not_a_section(self, tmp_path: Path):
         prose = "The section starts at `<!-- pm-server:begin v=99 -->` in this file.\n"
         (tmp_path / "CLAUDE.md").write_text(prose, encoding="utf-8")

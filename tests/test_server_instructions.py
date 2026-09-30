@@ -69,6 +69,8 @@ def test_full_mode_keeps_the_safety_constraints():
     assert "raw_content" in text
     assert "never post or send" in text
     assert "user_approval" in text
+    # Codex cross-check: the draft rules are scoped to pmlens's own drafts.
+    assert "content pipeline" in text
 
 
 @pytest.mark.parametrize("mode", ["lens", "lens+outbox"])
