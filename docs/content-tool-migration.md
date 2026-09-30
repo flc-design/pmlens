@@ -1,6 +1,6 @@
 # Content pipeline names and database compatibility
 
-Status: unreleased development change after v0.15.1 (PMSERV-182).
+Status: released in v0.16.0 (PMSERV-182).
 
 The content pipeline prepares drafts for human review and publication to any
 destination. New integrations should use these destination-neutral names:
@@ -31,8 +31,8 @@ entries are not rewritten or copied to the new names. Approve the new names
 through the host's normal permission flow when adopting them; an existing
 permission for an old name does not imply permission for a new name.
 
-Rule template v14 and newly created built-in `content-pipeline` workflows use
-the preferred names. Existing copied/custom workflows can continue using the
+Rule templates v14 and later and newly created built-in `content-pipeline`
+workflows use the preferred names. Existing copied/custom workflows can continue using the
 legacy names. Update them when convenient after installing a version that
 exposes the preferred names. v0.15.1 and earlier expose only the legacy names.
 

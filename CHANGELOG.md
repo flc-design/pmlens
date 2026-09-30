@@ -2,8 +2,42 @@
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-09-30
+
+Rewrites the PM Lens rule section for current models (template v15) and makes
+its delivery safe: rule sections no longer move backwards, outdated or
+conflicting sections are reported, the post-commit reminder finally reaches the
+model, and the MCP server now ships instructions of its own. Also includes the
+destination-neutral content tool names, neutral draft storage and the
+configuration-drift checks developed since 0.15.1.
+
+MCP tool count: 46 names for 44 operations in full mode (the two content tool
+aliases); Lens 16, or 18 with Desktop outbox writes. Test suite: 1,740 passing.
+
+**Upgrade notes.** Existing projects keep their current rule section until you
+update it: `pm_status` now reports `rules_outdated`, and
+`pmlens update-rules --all` shows the plan (it writes only with `--apply`).
+`pmlens update-claudemd --all` is retired. Rule sections before v15 tell the
+model to commit without being asked; v15 does not.
+
 ### Added
 
+- **MCP server instructions (PMSERV-201 / ADR-055)**: the server sends
+  instructions for its registration mode (full, Lens, Lens with Desktop
+  outbox). They ship with the server build, so the tool names they mention
+  always exist on the running server.
+- **Rule-section version warnings in `pm_status` (PMSERV-198 / ADR-055)**:
+  `rules_outdated`, `rules_newer_than_server`, `rule_file_version_mismatch`
+  (CLAUDE.md and AGENTS.md at different versions) and `multiple_pm_sections`,
+  plus `diagnostics.server_template_version`.
+- **Safer rule updates (PMSERV-197 / PMSERV-198)**: `pm_update_rules` and
+  `pmlens update-rules` accept `target="existing"` (only files that already
+  carry the section; never creates one) and `force` / `--force` (rewrite a
+  section newer than this build on purpose). `pmlens update-rules --all` gains
+  `--apply`.
+- `pm_session_summary` returns `session_summary_pending_dropped` when a save
+  drops pending items the previous save for the same server connection still
+  listed.
 - **Configuration-drift detection in `pm_status` (PMSERV-193 / ADR-053)**:
   two new read-only `warnings[]` codes. `pm_rules_in_ancestor_claudemd` fires
   when a `CLAUDE.md` in a directory ABOVE the project root also carries the
@@ -25,6 +59,31 @@
 
 ### Changed
 
+- **PM rule template v15 (PMSERV-199 / ADR-054)**: rewritten for models that
+  follow rule files literally. The model commits only when the user asks (or a
+  workflow they started includes it) and only its own changes; the start-of-work
+  routine applies to project work, not to unrelated questions; emphasis is kept
+  for the one safety rule; triggers the model cannot observe (`/clear`, session
+  end, every N exchanges) are gone; the wording is host-neutral for AGENTS.md
+  readers; posting or sending a content-pipeline draft stays off limits even on
+  request; and the heading carries the version. 80 lines, down from 129.
+- **`pmlens update-rules --all` plans by default (PMSERV-198)**: it targets only
+  files that already carry the section and prints the plan until `--apply` is
+  given. `--apply` without `--all`, or with `--dry-run`, is an error.
+  **`pmlens update-claudemd --all` is retired** (exit 1, pointing at
+  `update-rules --all`); the single-project form still works.
+- **Plugin hooks act only in PM Lens projects**: both hooks look for
+  `.pm/project.yaml` above the directory that matters (the session cwd, or the
+  repository a commit went to) and stay silent elsewhere. The SessionStart
+  directive defers the timing of `pm_status` / `pm_recall` / `pm_next` to the
+  project's rule file instead of "before your first reply".
+- The prompt pack's commit step is scoped to the task's own changes, without
+  push; its common rules point at the project's rule file.
+- `pm_init` and `pmlens update-claudemd` back up an existing CLAUDE.md before
+  rewriting it and write atomically, like `pm_update_rules`.
+- Rule markers count at the start of a line (a BOM and indentation allowed, text
+  after a marker allowed), and a file with several PM Lens sections is reported
+  instead of half-rewritten; the newest section decides the version.
 - **`pmlens install-hooks` repairs unhealthy PM Lens entries (ADR-053)**:
   stale or duplicate PM Lens hook commands are replaced by one fresh entry.
   Healthy entries are still skipped, and hooks that belong to other tools are
@@ -40,8 +99,8 @@
   releases. Initial alignment moves 18 uv pins to the versions already in
   `requirements.lock`, preserves uv's newer pip 26.2.1, and includes the
   Python-conditional dependencies already present in uv.lock.
-- Rule template v14 and new built-in content workflows use the preferred tool
-  names. Existing host permissions and copied workflows using the legacy names
+- Rule templates (v14 and later) and new built-in content workflows use the
+  preferred tool names. Existing host permissions and copied workflows using the legacy names
   continue to work.
 - **Neutral draft storage names with legacy database support (PMSERV-190)**:
   new projects use `.pm/drafts.db`; existing `.pm/x_drafts.db` files continue
@@ -56,6 +115,20 @@
 
 ### Fixed
 
+- **The post-commit reminder never reached the model (PMSERV-196)**: the
+  manual hook printed a top-level `additionalContext`, which Claude Code drops,
+  and the plugin's jq-less fallback printed bare text. Both now emit
+  `hookSpecificOutput`. A commit is recognised only when `git ... commit` runs
+  as a command — not in quotes, heredoc bodies, `grep` / `echo` text, `--help`
+  or `--dry-run` style invocations — the reminder names the project a commit
+  went to when that differs from the session's, it is silent when no task is in
+  progress, and task ids are included only when well formed.
+- **An older pmlens silently downgraded newer rule sections (PMSERV-197)**:
+  sections were replaced without comparing versions, so a pipx release next to
+  a newer build rewrote the newer section. A newer section is now left alone
+  and reported (`rules_newer_than_server`); `pm_update_claudemd` returns the
+  same warning.
+- Non-UTF-8 rule files no longer abort `update-rules --all`.
 - **PM rules can no longer be written into `$HOME` (ADR-053)**: `pm_init`,
   `pm_update_claudemd`, `pm_update_rules` and the matching CLI commands refuse
   when the project root resolves to the home directory. An MCP host running

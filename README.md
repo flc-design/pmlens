@@ -438,7 +438,7 @@ Deterministic redaction is the one safety layer, and raw content never leaves th
 | `pm_drafts_pending` | Review queue for staged drafts — exposes ONLY redacted / safe fields |
 | `pm_reject_draft` | Discard a staged draft with a mandatory, auditable reason |
 
-The preferred names above are an **unreleased change after v0.15.1**.
+The preferred names above were added in **v0.16.0**.
 `pm_draft_x` and `pm_x_drafts_pending` remain supported compatibility aliases,
 using the same arguments, results and project-local store. New projects use
 `.pm/drafts.db`; existing `.pm/x_drafts.db` files stay in place and remain in use.
