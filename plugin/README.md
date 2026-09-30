@@ -11,8 +11,8 @@ this plugin adds a Claude-Code-native install + integration layer on top
 |-----------|------|---------|
 | Manifest | `.claude-plugin/plugin.json` | Plugin metadata |
 | Bundled MCP | `.mcp.json` | Runs `uvx pm-server@x.y` — no prior `pip install` needed |
-| SessionStart hook | `hooks/hooks.json` + `hooks/session-start.sh` | Re-homes the `CLAUDE.md` session ritual: injects a directive to run pm_status/pm_next/pm_recall, warns on duplicate registration, per-session double-fire guard |
-| PostToolUse hook | `hooks/hooks.json` + `hooks/post-tool-use.sh` | Re-homes the git-commit reminder (run pm_update_task/pm_log/pm_next). Directive-only; **defers** when the manual `pm-server hook` is also in `settings.json`, so a user with both never gets a doubled reminder |
+| SessionStart hook | `hooks/hooks.json` + `hooks/session-start.sh` | In a PM Lens project (`.pm/project.yaml` found upward from the session cwd), points the model at the project's rule file for when to run pm_status/pm_recall/pm_next and surfaces the git branch for `pm_recall(track=...)`; warns on duplicate registration; per-session double-fire guard |
+| PostToolUse hook | `hooks/hooks.json` + `hooks/post-tool-use.sh` | After a `git ... commit` command in a PM Lens project, reminds the model to mark a task it completed done (pm_update_task) and log it (pm_log); an intermediate commit changes nothing. Directive-only; **defers** when the manual `pm-server hook` is also in `settings.json`, so a user with both never gets a doubled reminder |
 | Skill | `skills/pm/SKILL.md` | Model-invoked restatement of PM Lens's behavioural rules |
 
 ### Why a hook + skill instead of CLAUDE.md
@@ -21,8 +21,9 @@ Plugins **cannot** ship a `CLAUDE.md` (no system-prompt-level persistent
 instructions). PM Lens's auto-behaviour (run `pm_status` at session start,
 flip tasks to `in_progress`, surface `warnings[]`, …) is therefore re-homed to:
 
-1. **`SessionStart` hook** — deterministically injects a *directive* to run the
-   ritual (`pm_status` / `pm_next` / `pm_recall`) through the bundled MCP. It does
+1. **`SessionStart` hook** — in a PM Lens project, deterministically injects a
+   *directive* pointing at the project's rule file for when to run `pm_status` /
+   `pm_recall` / `pm_next` through the bundled MCP. It does
    NOT compute status itself: pmlens may not be on the hook's PATH, and even
    when it is it can resolve a different `~/.pm` than the bundled MCP (HOME
    override) — so the hook defers to the correctly-scoped MCP tools. This is

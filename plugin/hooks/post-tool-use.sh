@@ -21,21 +21,80 @@ set -uo pipefail
 
 input="$(cat 2>/dev/null || true)"
 
-# --- 1. only act on `git commit` ---------------------------------------------
-# Prefer jq to read tool_input.command; fall back to a substring scan of the
-# whole payload when jq is absent. The canonical Python hook also matches on the
-# "git commit" substring, so the looser fallback only risks a rare spurious
-# reminder (e.g. an echo that literally contains "git commit"), never a missed
-# or wrong-project mutation.
+# --- 1. only act on `git commit` run as a command -----------------------------
+# The reminder reaches the model, so a false match is a false "a commit just
+# completed" claim. Read ONLY tool_input.command — never the whole payload,
+# whose tool_response can contain text such as `git status`'s
+# '(use "git add" and/or "git commit -a")' — and require `git ... commit` in
+# command position, mirroring hooks.is_git_commit.
 command_str=""
+cwd=""
 if command -v jq >/dev/null 2>&1; then
   command_str="$(printf '%s' "$input" | jq -r '.tool_input.command // empty' 2>/dev/null || true)"
+  cwd="$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null || true)"
+else
+  # Claude Code serialises tool_input before tool_response, so the first
+  # "command" key is tool_input.command. Undo the JSON escapes that matter here.
+  if [[ $input =~ \"command\"[[:space:]]*:[[:space:]]*\"(([^\"\\]|\\.)*)\" ]]; then
+    command_str="${BASH_REMATCH[1]}"
+    command_str="${command_str//\\n/$'\n'}"
+    command_str="${command_str//\\\"/\"}"
+  fi
+  cwd="$(printf '%s' "$input" | grep -o '"cwd"[^,}]*' | head -1 | cut -d'"' -f4 || true)"
 fi
-haystack="${command_str:-$input}"
-case "$haystack" in
-  *"git commit"*) ;;
-  *) exit 0 ;;
-esac
+[ -n "$command_str" ] || exit 0
+
+# Quoted text is data, not commands: drop it before splitting on separators,
+# then stop at the first heredoc (its body is data too; a real commit after a
+# heredoc is missed, which is the safe direction).
+stripped="$(printf '%s\n' "$command_str" | sed -E "s/'[^']*'//g; s/\"([^\"\\\\]|\\\\.)*\"//g" | awk '{print} /<</{exit}')"
+segments="${stripped//&&/$'\n'}"
+segments="${segments//||/$'\n'}"
+segments="${segments//;/$'\n'}"
+segments="${segments//|/$'\n'}"
+segments="${segments//&/$'\n'}"
+
+[ -n "$cwd" ] || cwd="$PWD"
+target_dir="$cwd"
+commit_dir=""
+git_commit_re='^([^[:space:]]*/)?git([[:space:]]+(-[Cc][[:space:]]+[^[:space:]]+|--(git-dir|work-tree|namespace)[[:space:]]+[^[:space:]]+|-[^[:space:]]+))*[[:space:]]+commit([[:space:]]|$)'
+not_a_commit_re='(^|[[:space:]])(--dry-run|--short|--porcelain|--long|--help|-h|--version)([[:space:]]|$)'
+while IFS= read -r segment; do
+  segment="${segment#"${segment%%[![:space:]]*}"}"
+  while [[ $segment =~ ^[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+(.*)$ ]]; do
+    segment="${BASH_REMATCH[1]}"
+  done
+  # Follow `cd <dir>` so a commit in another repository is judged there.
+  if [[ $segment =~ ^cd[[:space:]]+([^[:space:]]+) ]]; then
+    d="${BASH_REMATCH[1]}"; d="${d/#\~/$HOME}"
+    case "$d" in /*) target_dir="$d" ;; *) target_dir="$target_dir/$d" ;; esac
+    continue
+  fi
+  if [[ $segment =~ $git_commit_re ]] && ! [[ $segment =~ $not_a_commit_re ]]; then
+    commit_dir="$target_dir"
+    if [[ $segment =~ [[:space:]]-C[[:space:]]+([^[:space:]]+) ]]; then
+      d="${BASH_REMATCH[1]}"; d="${d/#\~/$HOME}"
+      case "$d" in /*) commit_dir="$d" ;; *) commit_dir="$commit_dir/$d" ;; esac
+    fi
+    break
+  fi
+done <<< "$segments"
+[ -n "$commit_dir" ] || exit 0
+
+# --- 1b. only for a commit in a PM Lens project ------------------------------
+# Walk up from the directory the commit ran in for .pm/project.yaml, like the
+# pm_* tools do. A commit outside a PM Lens project has nothing to record.
+find_pm_root() {
+  local dir="$1" parent
+  while :; do
+    if [ -f "$dir/.pm/project.yaml" ]; then printf '%s' "$dir"; return 0; fi
+    parent="$(dirname "$dir")"
+    [ "$parent" = "$dir" ] && return 1
+    dir="$parent"
+  done
+}
+commit_root="$(find_pm_root "$commit_dir")" || exit 0
+session_root="$(find_pm_root "$cwd" || true)"
 
 # --- 2. double-fire guard: defer if the manual settings.json hook is present ---
 # The manual install writes a PostToolUse hook whose command contains
@@ -50,13 +109,21 @@ if [ -f "$settings" ] && grep -Eq 'pm-server hook|pmlens hook' "$settings" 2>/de
 fi
 
 # --- 3. directive -------------------------------------------------------------
-directive="pm-server plugin: a git commit just completed. Run the post-commit ritual through the pm-server MCP tools: pm_update_task (mark any finished task done), pm_log (record what was accomplished), then pm_next (surface the recommended next tasks). Surface any tool warnings[] to the user verbatim."
+directive="pm-server plugin: a git commit just completed. If it finished a task that is not yet marked done, update it with pm_update_task and record it with pm_log; for an intermediate commit, change nothing. Tell the user about any warnings[] the tools return."
+if [ "$commit_root" != "$session_root" ]; then
+  # Name the project the commit went to. Without a safe way to name it
+  # (quotes, backslashes or control characters in the path), stay silent
+  # rather than prompt an update of the session's project.
+  case "$commit_root" in *[\\\"\'\`]*|*[[:cntrl:]]*) exit 0 ;; esac
+  directive="$directive The commit was made in the project at $commit_root; pass that path as project_path."
+fi
 
 if command -v jq >/dev/null 2>&1; then
   jq -n --arg c "$directive" \
     '{hookSpecificOutput: {hookEventName: "PostToolUse", additionalContext: $c}}'
 else
-  # Fallback: PostToolUse stdout is injected as context even without the
-  # structured envelope (mirrors the manual hook's flat additionalContext).
-  printf '%s\n' "$directive"
+  # Claude Code ignores plain PostToolUse stdout, so the fallback must emit the
+  # same envelope. The directive is a fixed string with no double quotes or
+  # backslashes, so it can be embedded without escaping.
+  printf '{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"%s"}}\n' "$directive"
 fi

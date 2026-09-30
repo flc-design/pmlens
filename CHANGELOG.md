@@ -2,6 +2,67 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Configuration-drift detection in `pm_status` (PMSERV-193 / ADR-053)**:
+  two new read-only `warnings[]` codes. `pm_rules_in_ancestor_claudemd` fires
+  when a `CLAUDE.md` in a directory ABOVE the project root also carries the
+  PM Lens section (Claude Code loads every ancestor `CLAUDE.md`, so the rules
+  were being injected twice, often at different template versions).
+  `stale_pm_hook_command` fires when a PM Lens PostToolUse hook entry points
+  at an executable that no longer exists, or is registered twice.
+  `hooks` in the `pm_status` response gains additive `commands`, `stale`,
+  `duplicates` and `healthy` keys. `pm_status` only reports; it never edits
+  existing hook entries.
+- **Destination-neutral content tool names with compatibility aliases
+  (PMSERV-182 / PMSERV-189)**: `pm_draft_content` and
+  `pm_drafts_pending` are the preferred names. `pm_draft_x` and
+  `pm_x_drafts_pending` remain callable with the same arguments and results,
+  sharing the same project-local store. Full mode exposes 46 tool names for
+  44 operations; Lens remains at 16 names, or 18 with Desktop outbox writes.
+  No legacy-name removal version is scheduled. See
+  [the migration guide](docs/content-tool-migration.md).
+
+### Changed
+
+- **`pmlens install-hooks` repairs unhealthy PM Lens entries (ADR-053)**:
+  stale or duplicate PM Lens hook commands are replaced by one fresh entry.
+  Healthy entries are still skipped, and hooks that belong to other tools are
+  never touched — including a user hook that shares a group with ours, which
+  `uninstall-hooks` now also preserves.
+- **Executable dependency lock synchronization (PMSERV-186)**: `uv.lock` now
+  owns the resolution and `requirements.lock` is its universal hash-bearing
+  export. CI and release verification reject project/lock/export drift with
+  the same offline check. `make lock-sync` preserves compatible pins;
+  `make lock-refresh` explicitly upgrades them. The hash-verified CI install
+  also runs `pip check`, so `--no-deps` cannot hide incompatible project ranges.
+  This verifies the selected resolution, not the availability of newer PyPI
+  releases. Initial alignment moves 18 uv pins to the versions already in
+  `requirements.lock`, preserves uv's newer pip 26.2.1, and includes the
+  Python-conditional dependencies already present in uv.lock.
+- Rule template v14 and new built-in content workflows use the preferred tool
+  names. Existing host permissions and copied workflows using the legacy names
+  continue to work.
+- **Neutral draft storage names with legacy database support (PMSERV-190)**:
+  new projects use `.pm/drafts.db`; existing `.pm/x_drafts.db` files continue
+  being used in place, including their WAL/SHM files. The implementation moves
+  to `pmlens.draft_store` and five test files lose their `x` prefix. The old
+  Python module re-exports the same implementation and factory cache. SQL
+  schema, IDs, states and append-only triggers stay unchanged. If both database
+  names exist, content tools report `draft_store_conflict` without opening
+  either; `pm_status` warns and reports an unknown pending count. Older versions
+  cannot discover a new `drafts.db`; see the migration guide before mixing
+  versions or downgrading.
+
+### Fixed
+
+- **PM rules can no longer be written into `$HOME` (ADR-053)**: `pm_init`,
+  `pm_update_claudemd`, `pm_update_rules` and the matching CLI commands refuse
+  when the project root resolves to the home directory. An MCP host running
+  with `cwd=$HOME` (Claude Desktop does) could previously turn the global
+  `~/.pm` registry directory into a "project" and leave a `CLAUDE.md` that
+  every Claude Code session on the machine loaded.
+
 ## [0.15.1] - 2026-09-07
 
 Maintenance release with accurate MCP server identity, FastMCP 4.x support,

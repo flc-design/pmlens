@@ -36,7 +36,7 @@ Track tasks, visualize progress, record decisions — through natural language i
 ## Features
 
 - **🔌 Multi-host first** — registers in **Claude Code, Codex CLI, Cursor and Grok Build** with one command (`pmlens install --target=auto`). Project rules sync to `CLAUDE.md` and `AGENTS.md` automatically (ADR-008). Switch hosts mid-project without losing context — same `.pm/` data, same workflows
-- **44 MCP tools** — task CRUD, child issues, status, blockers, velocity, dashboard, prompt packs, ADR, session memory, workflows, knowledge records, multi-host rules injection, cross-host outbox bridge, content pipeline (recorded knowledge → redacted drafts), and more
+- **44 MCP tools + 2 compatibility aliases** — task CRUD, child issues, status, blockers, velocity, dashboard, prompt packs, ADR, session memory, workflows, knowledge records, multi-host rules injection, cross-host outbox bridge, content pipeline (recorded knowledge → redacted drafts), and more
 - **Workflow engine** — template-based development workflows with loops, user gates, and chaining (Discovery → Development)
 - **Knowledge records** — structured findings between casual memory and formal ADR (research, tradeoff, spec, etc.)
 - **Super Research skill** — 3 parallel agents (Domain Expert, Critical Analyst, Lateral Thinker) + Depth Check (6 dimensions) + Fact Check + Cross-Check
@@ -73,11 +73,13 @@ pipx upgrade pmlens
 > `error: externally-managed-environment`). Inside a virtualenv, `pip install pmlens`
 > and `pip install -U pmlens` work the same way.
 
-After upgrading, the CLAUDE.md auto-action rules in each project are automatically updated:
+After upgrading, each project's rule section is updated with the user's agreement:
 
-1. On the next session start, `pm_status` detects the template version mismatch
-2. Claude Code runs `pm_update_rules` to update the rules section (covers both CLAUDE.md and AGENTS.md when applicable)
-3. New features (e.g., child issue workflow) become active immediately
+1. On the next session start, `pm_status` returns a `rules_outdated` (or
+   `rule_file_version_mismatch`) warning, which the model passes on
+2. When the user agrees, `pm_update_rules(target='existing')` rewrites only the
+   files that already carry the section, keeping a `.bak.<timestamp>` copy
+3. Rule files are often committed, so review the diff before committing it
 
 You can also update manually:
 ```
@@ -248,11 +250,21 @@ A3 in [`docs/design.md` §6.4](docs/design.md).
 | -------------------------------- | ----------------------------------------------------- |
 | MCP (in-session)                 | `pm_update_rules(target="auto", dry_run=False)`       |
 | CLI (this project)               | `pmlens update-rules --target auto`                   |
-| CLI (every registered project)   | `pmlens update-rules --target auto --all`             |
+| CLI (every registered project)   | `pmlens update-rules --all` (plan), then `--apply`    |
 | Legacy CLAUDE.md only            | `pm_update_claudemd` / `pmlens update-claudemd`       |
 
-`AGENTS.md` is backed up to `AGENTS.md.bak.<timestamp>` before each write.
-`CLAUDE.md` backup symmetry is still pending in PMSERV-058 (originally targeted for v0.6.0).
+Both files are backed up to `<file>.bak.<timestamp>` before each write.
+
+Rule sections only move forward: a pmlens whose template is older than the
+section on disk leaves it alone and reports `rules_newer_than_server`
+(pass `force` to downgrade on purpose). `pm_status` also warns when a section
+is older than the running pmlens (`rules_outdated`) or when CLAUDE.md and
+AGENTS.md carry different versions (`rule_file_version_mismatch`).
+
+`--all` touches every registered repository, and those often commit their
+rule files, so it defaults to `--target existing` (only files that already
+carry the section; nothing is created) and prints the plan without writing
+until you add `--apply`.
 
 See [`docs/design.md` §6](docs/design.md) and ADR-008 for the multi-host
 rules-injection design (claudemd → rules module rename, marker convention,
@@ -260,7 +272,7 @@ dataclasses, atomic-write helpers).
 
 ---
 
-## MCP Tools (44 tools)
+## MCP Tools (44 tools + 2 compatibility aliases)
 
 ### Project Management
 
@@ -421,10 +433,19 @@ Deterministic redaction is the one safety layer, and raw content never leaves th
 
 | Tool | Description |
 |---|---|
-| `pm_draft_x` | Stage a draft from a `.pm` signal — raw content stays internal (PMSERV-113) |
+| `pm_draft_content` | Stage a draft from a `.pm` signal — raw content stays internal (PMSERV-113) |
 | `pm_redact_draft` | Layer-1 deterministic redaction prefilter — scrubs hook + each body segment, count-only report |
-| `pm_x_drafts_pending` | Review queue for staged drafts — exposes ONLY redacted / safe fields |
+| `pm_drafts_pending` | Review queue for staged drafts — exposes ONLY redacted / safe fields |
 | `pm_reject_draft` | Discard a staged draft with a mandatory, auditable reason |
+
+The preferred names above are an **unreleased change after v0.15.1**.
+`pm_draft_x` and `pm_x_drafts_pending` remain supported compatibility aliases,
+using the same arguments, results and project-local store. New projects use
+`.pm/drafts.db`; existing `.pm/x_drafts.db` files stay in place and remain in use.
+v0.15.1 and earlier use only the legacy tool names and database filename.
+Existing permissions keep working for the legacy tool names; see
+[the migration guide](docs/content-tool-migration.md) for older-client limits
+and recovery when both database names exist.
 
 ### Outbox (Cross-Host Bridge)
 
@@ -578,58 +599,21 @@ YAML files are human-readable and hand-editable. Memory DB is the source of trut
 
 ## CLAUDE.md Integration
 
-Add this to your project's `CLAUDE.md` for automatic PM behavior (or run `pmlens update-rules`):
+`pm_init` adds a PM Lens section to `CLAUDE.md`, and `pmlens update-rules` keeps
+it (and `AGENTS.md` for Codex, Cursor and Grok Build) current. Let the tool write
+the section rather than copying it by hand: it is versioned, the version is shown
+in its heading, and pmlens warns when a project's copy falls behind.
 
-```markdown
-## PM Lens 自動行動ルール（必ず従うこと）
+What the section asks of the model (template v15, ADR-054):
 
-### セッション開始時（最初の応答の前に必ず実行）
-1. pm_status を MCP ツールとして実行し、現在の進捗を表示する
-2. pm_next で次に着手すべきタスクを3件表示する
-3. pm_recall で前回セッションの文脈を取得する
-4. ブロッカーや期限超過があれば警告する
-5. pm_status の claudemd.other_rule_sections に他のルールセクションが報告された場合、この CLAUDE.md 内の該当セクションのルールも全て実行する
-
-### タスクに着手する前
-1. 該当タスクを pm_update_task で in_progress に変更する
-
-### 作業中に重要な発見・判断があった時
-1. pm_remember で記憶を保存する（関連タスクIDがあれば task_id で紐付け）
-
-### コンテキスト保全（Compaction / Clear 対策）
-Claude Code はセッションが長くなるとコンテキストを自動圧縮（compaction）する。
-圧縮のタイミングは予測できないため、重要な情報は随時保存すること。
-1. 重要な発見・技術的判断は発生時点で即座に pm_remember で保存する（セッション終了を待たない）
-2. 複雑な議論や設計検討の後は、結論を pm_remember でまとめて保存する
-3. 3往復以上のやり取りで未記録の知見があれば、チェックポイントとして pm_remember で保存する
-4. ユーザーが /clear する前は必ず pm_session_summary を実行する
-5. Compaction 後にコンテキストが失われていると感じたら pm_recall で復元する
-
-### タスク完了時（コードが動作確認できたら）
-1. pm_update_task で done に変更する
-2. all_issues_resolved フラグが返された場合、親タスクの完了もユーザーに提案する
-3. pm_log に完了内容を記録する
-4. 次の推薦タスクを pm_next で表示する
-5. アトミックコミットを作成する
-
-### タスク完了確認中にイシュー（課題）が見つかった時
-1. pm_add_issue で親タスクに紐づくイシュー（子タスク）を作成する
-   - phase は親タスクから自動継承される
-   - 親タスクが done だった場合、自動で review に戻される
-2. イシューを解消したら pm_update_task で done に変更する
-3. 全イシューが解消されると all_issues_resolved フラグが返される
-4. 親タスクの完了をユーザーに提案する
-
-### 設計上の意思決定が発生した時
-1. ユーザーに「ADRとして記録しますか？」と確認する
-2. 承認されたら pm_add_decision で保存する
-
-### コーディングセッション終了時
-1. 進行中のタスクの状態を確認し、必要に応じて更新する
-2. pm_log にセッションの成果を記録する
-3. pm_session_summary で要約を保存する
-4. 未コミットの変更があればコミットする
-```
+- When starting work on the project, check `pm_status`, `pm_recall` and `pm_next`
+  once — not for unrelated one-off questions.
+- Keep tasks, the daily log and memory current as work progresses (these writes
+  are project-management records, not code), and relay every tool `warnings[]` entry to the user.
+- Ask before recording an ADR; wait for the user at workflow approval gates.
+- Commit only when the user asks (or a workflow they started includes it), and
+  only the changes it made; ask first if earlier or staged changes would mix in.
+- Never show an unredacted draft, surface `raw_content`, or post / send drafts.
 
 ---
 
@@ -677,12 +661,20 @@ Session 1                          Session 2
 
 ### Automatic Hooks (Lifecycle Enforcement)
 
-PM Lens automatically installs Claude Code hooks at first session start (`pm_status`). After a `git commit`, a PostToolUse hook injects a reminder into the conversation, prompting Claude to call `pm_log`, `pm_update_task`, and `pm_next`.
+PM Lens automatically installs Claude Code hooks at first session start (`pm_status`). After a `git ... commit` command in a PM Lens project with a task in progress, a PostToolUse hook adds a reminder (as `hookSpecificOutput.additionalContext`): if the commit completed a task, mark it done with `pm_update_task` and record it with `pm_log`; an intermediate commit changes nothing.
 
 - Hooks are installed globally in `~/.claude/settings.json`
 - Existing user hooks are preserved (PM Lens hooks are appended, not replaced)
 - No manual setup needed — hooks are auto-installed on upgrade
 - To manage manually: `pmlens install-hooks` / `pmlens uninstall-hooks`
+- Health check (ADR-053): `pm_status` reports `hooks.stale` (entries whose
+  executable no longer exists, e.g. after removing an old distribution) and
+  `hooks.duplicates`, and surfaces a `stale_pm_hook_command` warning. It never
+  edits existing entries — run `pmlens install-hooks` to replace them with one
+  fresh entry. `pm_status` also warns with `pm_rules_in_ancestor_claudemd` when
+  a `CLAUDE.md` above the project root carries the PM Lens section, because
+  Claude Code loads every ancestor `CLAUDE.md` and would read the rules twice.
+  Writing the section into `$HOME/CLAUDE.md` is refused for the same reason.
 
 ### Multi-Project Management
 
@@ -713,7 +705,7 @@ pmlens migrate             # Migrate from pm-agent (rename transition)
 pmlens update-rules        # Inject PM Lens rules into CLAUDE.md and/or AGENTS.md (ADR-008).
                            # --target {auto,all,claude-code,codex,cursor,grok} (default: auto)
                            # --dry-run / --all (apply to every registered project)
-pmlens update-claudemd     # Legacy alias of `update-rules --target=claude-code`. Deprecated since v0.6.0.
+pmlens update-claudemd     # Legacy: CLAUDE.md of this project only (--all is retired; use update-rules --all). Deprecated since v0.6.0.
 pmlens install-hooks       # Manually install Claude Code hooks (auto-installed via pm_status)
 pmlens uninstall-hooks     # Remove PM Lens hooks from Claude Code settings
 ```
@@ -738,7 +730,7 @@ Claude Code Session
   └── MCP Server (stdio)
         └── pmlens serve
               │
-              ├── server.py    → 44 MCP tools (FastMCP)
+              ├── server.py    → 44 MCP tools + 2 compatibility aliases (FastMCP)
               ├── models.py    → Pydantic v2 data models (18 models, 16 enums)
               ├── storage.py   → YAML read/write
               ├── workflow.py  → Workflow engine (state machine)

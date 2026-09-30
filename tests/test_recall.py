@@ -268,7 +268,10 @@ class TestClaudeMdV3:
         # for the AGENTS.md hosts (PMSERV-165).
         # v13: content pipeline section reframed away from the "X /
         # build-in-public" naming (PMSERV-181) — behaviour unchanged.
-        assert TEMPLATE_VERSION == 13
+        # v14: prefer pm_drafts_pending, retaining the old MCP name as an alias
+        # for existing injected templates (PMSERV-189).
+        # v15: rewritten for current models (PMSERV-199, ADR-054).
+        assert TEMPLATE_VERSION == 15
 
     def test_template_has_pm_recall(self):
         from pmlens.claudemd import CLAUDEMD_TEMPLATE
@@ -314,10 +317,12 @@ class TestClaudeMdV3:
 
         assert "タスク完了確認中にイシュー" in CLAUDEMD_TEMPLATE
 
-    def test_template_has_other_rule_sections_instruction(self):
+    def test_template_drops_the_execute_other_sections_rule(self):
+        # v15 (ADR-054): the model reads the whole rule file anyway; telling it
+        # to "execute every rule" of other sections only amplified them.
         from pmlens.claudemd import CLAUDEMD_TEMPLATE
 
-        assert "other_rule_sections" in CLAUDEMD_TEMPLATE
+        assert "other_rule_sections" not in CLAUDEMD_TEMPLATE
 
     def test_template_has_memory_routing_section(self):
         # PMSERV-111 / ADR-023 (v8): pm_remember=SSoT vs Claude Code auto

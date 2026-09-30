@@ -1139,13 +1139,17 @@ data class を矛盾なく消費できる (PMSERV-039 L1 lesson の継承、§5.
 CLAUDE.md / AGENTS.md ともに同一形式のマーカーで PM Lens セクションを区切る:
 
 ```markdown
-<!-- pm-server:begin v=7 -->
-## PM Lens 自動行動ルール（必ず従うこと）
+<!-- pm-server:begin v=15 -->
+## PM Lens 自動行動ルール（v15）
 ... (テンプレート本文) ...
 <!-- pm-server:end -->
 ```
 
-- `v=N`: テンプレート version (v0.5.0 では `7`)
+- `v=N`: テンプレート version (v0.5.0 では `7`、ADR-054 で `15`)。v15 から見出しにも
+  版を出す（Claude Code は HTML コメントのマーカーをモデルに渡さないため）
+- 版は後戻りしない (ADR-055): 既存の節が TEMPLATE_VERSION より新しい時、
+  `pm_update_rules` / `update_claudemd` は書き換えずに skipped と
+  `rules_newer_than_server` を返す（`force` で意図的に戻せる）
 - `_replace_pm_section(path, content, template)` がマーカー区間のみを
   in-place 置換し、ユーザー手書き内容を完全保持
 - `pm_init` 時はマーカー区間が無ければ末尾に追記 (`status="appended"`)、
@@ -1230,8 +1234,9 @@ v0.4.x 利用者は新形式を観測しないため後方互換が確保され�
   filelock の 5s タイムアウトと統一。`_apply_pragmas()` を `MemoryStore.__init__` /
   `sync_to_global` / `search_global` の 3 接続箇所で呼ぶ。WAL モードは `.db` ヘッダに
   persistent なので既存ファイルは初回接続時に自動マイグレート、データ移行不要
-- **テンプレート version の bump**: `TEMPLATE_VERSION = 7` を変更すると
-  既存ユーザーの CLAUDE.md / AGENTS.md が次回 `pm_status` で自動更新を促される。
+- **テンプレート version の bump**: `TEMPLATE_VERSION` を上げると、既存ユーザーの
+  CLAUDE.md / AGENTS.md について次回 `pm_status` が `rules_outdated` を警告し、
+  ユーザーの同意の上で `pm_update_rules(target='existing')` が更新する (ADR-055)。
   v0.5.0 では v7 据え置きのため、v0.4.x からアップグレードしてもユーザーの
   指示ファイルは破壊されない
 

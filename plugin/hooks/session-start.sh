@@ -115,20 +115,47 @@ done
 # CR; without this the track= the model passes would never match the saved row.
 branch="${branch%$'\r'}"
 
+# --- 3b. only direct the routine inside a PM Lens project ----------------------
+# The directive states "this project tracks ... in PM Lens" and the MCP server
+# instructions say to use pmlens only where .pm/ exists, so outside such a
+# project the hook must stay quiet (it still reports a duplicate registration,
+# which is an environment problem unrelated to the repository). Same walk-up as
+# the pm_* tools: PM_PROJECT_PATH first, then cwd and its parents for
+# .pm/project.yaml (the global ~/.pm has no project.yaml).
+pm_found=0
+if [ -n "${PM_PROJECT_PATH:-}" ] && [ -f "$PM_PROJECT_PATH/.pm/project.yaml" ]; then
+  pm_found=1
+fi
+dir="$cwd"
+while [ "$pm_found" -eq 0 ]; do
+  if [ -f "$dir/.pm/project.yaml" ]; then pm_found=1; break; fi
+  parent="$(dirname "$dir")"
+  [ "$parent" = "$dir" ] && break
+  dir="$parent"
+done
+
 branch_note=""
 if [ -n "$branch" ]; then
-  branch_note=" The current git branch is \`$branch\`; pass track=\"$branch\" to pm_recall to restore this work line's context (branch-aware continuity, ADR-028), and re-pass it after any git checkout during the session."
+  branch_note=" The current git branch is \`$branch\`; pass track=\"$branch\" to pm_recall to restore this work line's context, and after any git checkout re-read .git/HEAD and pass the new branch."
 fi
 
 # --- 4. session-start directive ----------------------------------------------
 # We deliberately do NOT compute project context in the hook itself. pm-server
 # is not reliably on PATH here, and even when it is it may resolve a different
 # data store (HOME) than the bundled MCP — so a hook-computed status could be
-# from the wrong project. Instead we instruct the model to run the ritual
-# through the (correctly-scoped) MCP tools — the same contract CLAUDE.md uses.
-directive="pm-server plugin active. Begin this session with the pm-server ritual BEFORE your first reply: call pm_status (project state + warnings), pm_next (top 3 tasks), and pm_recall (restore prior-session context).${branch_note} Surface any blockers, overdue items, or tool warnings[] to the user verbatim."
+# from the wrong project. Instead we instruct the model to run the routine
+# through the (correctly-scoped) MCP tools.
+#
+# WHEN to run it is left to the project's rule file: the plugin ships
+# separately from the rule files it meets (v1-v15 coexist on real machines),
+# so a condition stated here would contradict some of them. Pointing at the
+# rule file keeps every combination consistent (ADR-054).
+directive="pm-server plugin active. This project tracks tasks, decisions and prior-session context in PM Lens.${branch_note} Follow the PM Lens section of this project's rule file (CLAUDE.md) for when to call pm_status, pm_recall and pm_next; if there is no such section, call them once before starting work on this project. Tell the user briefly about blockers, overdue tasks and each warnings[] entry the tools return, with its remediation when given."
 
-if [ -n "$dup_warning" ]; then
+if [ "$pm_found" -eq 0 ]; then
+  [ -n "$dup_warning" ] || exit 0
+  payload="$dup_warning"
+elif [ -n "$dup_warning" ]; then
   payload="$(printf '%s\n\n%s' "$dup_warning" "$directive")"
 else
   payload="$directive"

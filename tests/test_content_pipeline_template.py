@@ -44,6 +44,9 @@ def test_content_pipeline_steps_and_hints_reference_real_tools() -> None:
     data = yaml.safe_load(_TEMPLATE.read_text(encoding="utf-8"))
     step_ids = [s["id"] for s in data["steps"]]
     assert step_ids == ["extract", "draft", "redact", "review"]
+    hints = {step["id"]: step.get("tool_hint") for step in data["steps"]}
+    assert hints["draft"] == "pm_draft_content"
+    assert hints["review"] == "pm_drafts_pending"
     for step in data["steps"]:
         hint = step.get("tool_hint")
         if hint:

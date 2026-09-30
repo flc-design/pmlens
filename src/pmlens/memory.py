@@ -904,6 +904,13 @@ class MemoryStore:
         ).fetchone()
         return row["id"]
 
+    def get_summary(self, session_id: str) -> SessionSummary | None:
+        """Return the summary saved under ``session_id``, if any."""
+        row = self._conn.execute(
+            "SELECT * FROM session_summaries WHERE session_id = ?", (session_id,)
+        ).fetchone()
+        return None if row is None else self._row_to_summary(row)
+
     def get_latest_summary(self) -> SessionSummary | None:
         """Get the most recent session summary (across all branches).
 

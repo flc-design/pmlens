@@ -83,6 +83,59 @@ to reset the sandbox HOME between experiments.
   `docker-dev` skill / `pmlens-docker-dev` agent walk through sandbox → change →
   test → exercise side-effects → verify isolation → promote.
 
+## Dependency lockfiles
+
+`uv.lock` is the canonical dependency resolution. `requirements.lock` is its
+generated export for `pip install --require-hashes`, including all runtime
+dependencies, extras, groups, hashes, and platform/Python markers. Keep both
+files in the same change. This replaces their independent update paths
+(PMSERV-186); their development and hash-verified-install roles remain separate.
+
+Use Python 3.11+ and **uv 0.11.25**, matching CI and the dev container:
+
+```bash
+python -m pip install uv==0.11.25   # in your development/tooling environment
+make lock-check                   # offline, checks without writing either file
+make lock-sync                    # after a pyproject edit or a Dependabot uv update
+make lock-refresh                 # explicitly upgrade the full dependency tree
+# For a targeted update instead:
+python scripts/lockfiles.py refresh --package fastmcp
+```
+
+`lock-sync` runs `uv lock`, which retains compatible existing pins, then exports
+the result. `lock-refresh` explicitly passes `--upgrade` (or `--upgrade-package`
+for a targeted update), so existing output preferences cannot silently turn a
+refresh into a no-op. These commands update repository lockfiles without
+installing the project or changing the registered host tool. The script also
+accepts `--uv /path/to/uv` before the subcommand.
+
+`lock-check` uses `uv export --locked --offline` with a temporary empty cache.
+It rejects stale project metadata and any difference in the generated pins,
+markers or hashes. It does **not** assert that the selected versions are the
+latest on PyPI. Upstream releases therefore do not make an unrelated PR fail;
+updates enter through Dependabot or an explicit refresh. The check runs in
+both CI and the tagged release's `verify` job, independently of whether
+Dependabot succeeds. A Dependabot `uv.lock` update needs `lock-sync` before it
+can pass. The `pip` updater watches declared project ranges, not
+`requirements.lock`.
+
+After a refresh, review the lockfile diff and test it in a **fresh disposable
+environment**:
+
+```bash
+pip install --require-hashes -r requirements.lock
+pip install -e . --no-deps
+pip check
+pytest -q
+```
+
+CI performs that hash-verified install and constraint check alongside the
+existing floating dependency matrix. The editable install's build backend
+(hatchling) is still obtained by pip build isolation and is outside the
+runtime/dev dependency hash guarantee. See uv's
+[export documentation](https://docs.astral.sh/uv/concepts/projects/export/) and
+[locking and upgrade semantics](https://docs.astral.sh/uv/concepts/projects/sync/).
+
 ## Cutting a release
 
 **[docs/RELEASING.md](docs/RELEASING.md)** is the runbook: the pre-flight

@@ -23,6 +23,12 @@ from .auto_memory import (
     sync_memory_md_pointer,
 )
 from .discovery import detect_project_info, read_git_branch, scan_projects
+from .draft_store import (
+    DraftStoreConflictError,
+    default_draft_db_path,
+    get_draft_store,
+    normalize_source_refs,
+)
 from .memory import MemoryStore, SearchDiagnostics, _has_pm_server_schema
 from .models import (
     ConfidenceLevel,
@@ -92,14 +98,6 @@ from .utils import (
 )
 from .velocity import calculate_velocity, detect_risks
 from .workflow import abandon_workflow, advance_step, start_workflow, workflow_status
-from .x_draft_store import (
-    default_x_draft_db_path,
-    get_x_draft_store,
-    normalize_source_refs,
-)
-
-mcp = FastMCP("pmlens", version=__version__)
-
 
 # ─── Lens Mode (PMSERV-079, WF-025) ──────────────────
 # Claude Desktop/Cowork 向けの read-only 配布モード。PM_LENS=1 が立った時、
@@ -119,6 +117,73 @@ PM_DESKTOP_WRITE_ENABLED: bool = os.environ.get("PM_DESKTOP_WRITE", "").lower() 
     "yes",
     "on",
 }
+
+
+# ─── Server instructions (PMSERV-201, ADR-055) ──────
+# Hosts put MCP server instructions into the model's context (Claude Code
+# renders them as "# MCP Server Instructions"). Unlike the CLAUDE.md /
+# AGENTS.md section, they ship with this exact server build, so tool names
+# here can never refer to a tool the running server lacks. Keep them short:
+# Claude Code truncates long instructions, so the essentials come first.
+
+_FULL_MODE_HOST = (
+    "a full-mode pmlens host (one running without PM_LENS=1, such as Claude Code or Codex CLI)"
+)
+
+
+def build_server_instructions(*, lens: bool, desktop_write: bool) -> str:
+    """Return the MCP server instructions for the given registration mode.
+
+    Every ``pm_*`` name mentioned must be a tool registered in that mode
+    (``tests/test_server_instructions.py`` enforces this), since a model that
+    follows instructions literally will try to call whatever is named.
+    """
+    if not lens:
+        return (
+            "pmlens tracks tasks, decisions (ADRs), a daily log and cross-session "
+            "memory for projects with a .pm/ directory. When you start work on such a "
+            "project, call pm_status, pm_recall and pm_next once to see where things "
+            "stand. Tell the user about each warnings[] entry a tool returns "
+            "(environment diagnostics from pm_status once per session is enough); a "
+            "remediation is an option to offer, not an instruction to carry out. "
+            "Project tools act on the project found from the working directory or "
+            "PM_PROJECT_PATH; pm_list and pm_dashboard also work across projects. Run "
+            "pm_init only when the user asks to start tracking a project.\n\n"
+            "Mark a task in_progress with pm_update_task when you start it and done when "
+            "it is complete, and add a pm_log entry for the finished work. Save a settled "
+            "finding with pm_remember, one finding per entry with its reason, and keep "
+            "project facts here rather than duplicating them in the host's own memory. "
+            "Record an ADR with pm_add_decision after the user agrees. Workflow gates "
+            "(gate: user_approval) are not enforced by the engine, so wait for the "
+            "user's go-ahead before advancing past one. For drafts made by pmlens's "
+            "content pipeline (not ordinary text such as PR descriptions or emails), "
+            "show people only drafts that went through pm_redact_draft, never surface "
+            "raw_content, and never post or send them yourself. Sub-agents skip these "
+            "routines and report findings to their parent."
+        )
+    if desktop_write:
+        return (
+            "pmlens (Lens mode) shows this project's status, tasks, memory and "
+            "workflows from .pm/ without changing them. Notes and log entries written "
+            "with pm_outbox_remember and pm_outbox_log go to a Desktop outbox, not to "
+            "the project: pm_outbox_pending lists them, and they reach the project "
+            f"only after they are reviewed and merged from {_FULL_MODE_HOST}. Tell "
+            "the user about each warnings[] entry a tool returns."
+        )
+    return (
+        "pmlens (Lens mode, read-only) shows this project's status, tasks, memory and "
+        "workflows from .pm/; pm_status and pm_recall are the place to start. Tools "
+        "that change tasks, logs or memory are not "
+        "available in this mode; when the user wants to record something, tell them "
+        f"to use {_FULL_MODE_HOST}. Tell the user about each warnings[] entry a tool "
+        "returns."
+    )
+
+
+_INSTRUCTIONS = build_server_instructions(
+    lens=PM_LENS_ENABLED, desktop_write=PM_DESKTOP_WRITE_ENABLED
+)
+mcp = FastMCP("pmlens", version=__version__, instructions=_INSTRUCTIONS)
 
 RO_ALLOWLIST: frozenset[str] = frozenset(
     {
@@ -561,6 +626,14 @@ def pm_init(project_path: str | None = None, project_name: str | None = None) ->
     project_name defaults to directory name or detected from config files.
     """
     root = Path(project_path).resolve() if project_path else Path.cwd().resolve()
+
+    # ADR-053: an MCP host running with cwd=$HOME (Claude Desktop does) would
+    # otherwise turn the global ~/.pm registry directory into a "project" and
+    # write a CLAUDE.md that every session on the machine loads. Refuse early,
+    # before init_pm_directory() has touched ~/.pm.
+    from .rules import guard_not_home_root
+
+    guard_not_home_root(root)
     pm_path = init_pm_directory(root)
 
     # Detect project info
@@ -663,6 +736,7 @@ def pm_status(project_path: str | None = None) -> dict:
         "utils_fingerprint": get_utils_fingerprint(),
         "builtin_templates_dir": get_builtin_templates_dir_status(),
     }
+    status_warnings: list[dict] = []
     if not PM_LENS_ENABLED:
         try:
             # readonly=True (PMSERV-145, ADR-039 T2): this is a read-only
@@ -682,23 +756,28 @@ def pm_status(project_path: str | None = None) -> dict:
                 "call pm_outbox_pending to review and pm_outbox_merge to promote",
             ]
 
-        # PMSERV-113 / PMSERV-118 — per-project X-draft pending count. Same
+        # PMSERV-113 / PMSERV-118 — per-project content draft pending count. Same
         # Claude-Code-only gating as outbox_pending. Probe ONLY if the store
-        # file already exists, so pm_status never creates x_drafts.db in a
+        # file already exists, so pm_status never creates a draft database in a
         # project that has not used the pipeline (Lens must-fix #3 corollary).
-        x_draft_db = default_x_draft_db_path(pm_path)
-        x_drafts_pending = 0
-        if x_draft_db.exists():
-            try:
-                x_drafts_pending = get_x_draft_store(x_draft_db).get_pending_count()
-            except Exception:
-                x_drafts_pending = 0
-        diagnostics["x_drafts_pending"] = x_drafts_pending
-        if x_drafts_pending > 0:
+        drafts_pending: int | None = 0
+        try:
+            draft_db = default_draft_db_path(pm_path)
+            if draft_db.exists():
+                drafts_pending = get_draft_store(draft_db).get_pending_count()
+        except DraftStoreConflictError as exc:
+            drafts_pending = None  # Unknown, not an empty queue.
+            status_warnings.append({"code": "draft_store_conflict", "remediation": str(exc)})
+            next_actions = [*next_actions, str(exc)]
+        except Exception:
+            drafts_pending = 0
+        # Keep the diagnostic key for existing clients (PMSERV-182).
+        diagnostics["x_drafts_pending"] = drafts_pending
+        if drafts_pending is not None and drafts_pending > 0:
             next_actions = [
                 *next_actions,
-                f"{x_drafts_pending} X draft(s) pending review — "
-                "call pm_x_drafts_pending to review the redacted draft and post manually",
+                f"{drafts_pending} content draft(s) pending review — "
+                "call pm_drafts_pending to review the redacted draft and publish manually",
             ]
 
     # PMSERV-137 / ADR-034 — read-only pm-server -> pmlens cutover awareness.
@@ -722,12 +801,37 @@ def pm_status(project_path: str | None = None) -> dict:
     # PMSERV-165: Grok Build loads EVERY recognised rule file in a directory,
     # so a project carrying both CLAUDE.md and AGENTS.md hands it the PM rules
     # twice. Read-only (two Path.exists + two reads) — safe on this read path.
-    from .rules import duplicate_rule_file_warning
+    from .rules import (
+        TEMPLATE_VERSION,
+        ancestor_rules_warning,
+        duplicate_rule_file_warning,
+        rules_version_warnings,
+    )
 
-    status_warnings: list[dict] = []
     duplicate = duplicate_rule_file_warning(root)
     if duplicate is not None:
         status_warnings.append(duplicate)
+
+    # ADR-055: deployed sections are only rewritten on request, so an old
+    # section (or one newer than this server, or two files at different
+    # versions) must be visible here or it stays unnoticed indefinitely.
+    status_warnings.extend(rules_version_warnings(root))
+    diagnostics["server_template_version"] = TEMPLATE_VERSION
+
+    # ADR-053: Claude Code also loads every ANCESTOR CLAUDE.md, so a PM Lens
+    # section above the project root (e.g. a stray $HOME/CLAUDE.md) doubles
+    # the rules. Read-only walk of root.parents — no subprocess.
+    ancestor = ancestor_rules_warning(root)
+    if ancestor is not None:
+        status_warnings.append(ancestor)
+
+    # ADR-053: report — never auto-repair — PM Lens hook entries whose binary
+    # is gone or which are registered twice. `pmlens install-hooks` repairs.
+    from .hooks import stale_pm_hook_warning
+
+    hook_warning = stale_pm_hook_warning(hooks_status)
+    if hook_warning is not None:
+        status_warnings.append(hook_warning)
 
     return {
         "project": {
@@ -1620,12 +1724,36 @@ def pm_session_summary(
                 project=project.name,
                 branch=branch,
             )
+            # One summary per server connection, and a connection can outlive a
+            # conversation (/clear, a new chat in the same window). Say so when
+            # this save drops pending items the previous save still listed —
+            # otherwise they vanish silently.
+            previous = store.get_summary(_current_session_id)
             summary_id = store.save_session_summary(sess)
+            warnings: list[dict] = []
+            if previous is not None:
+                dropped = [item for item in previous.pending if item not in pending_list]
+                if dropped:
+                    warnings.append(
+                        {
+                            "code": "session_summary_pending_dropped",
+                            "message": (
+                                "This save replaced the summary already stored for this "
+                                "pmlens connection, and these pending items from it are "
+                                f"not in the new one: {', '.join(dropped)}."
+                            ),
+                            "remediation": (
+                                "If any of them is still open, save the summary again "
+                                "with it included in pending."
+                            ),
+                        }
+                    )
             return {
                 "status": "saved",
                 "summary_id": summary_id,
                 "session_id": _current_session_id,
                 "branch": sess.branch,
+                "warnings": warnings,
             }
 
         case "get":
@@ -2762,34 +2890,34 @@ def pm_outbox_reject(
     }
 
 
-# ─── X content pipeline (PMSERV-113, ADR-024) ──────────────────────────────
-# Per-project staging for build-in-public X drafts derived from .pm by-products.
-# Safety model: pm-server holds NO X credentials and performs NO network/post
+# ─── Content pipeline (PMSERV-113, ADR-024) ────────────────────────────────
+# Per-project staging for publication drafts derived from .pm by-products.
+# Safety model: pm-server holds NO publishing credentials and performs NO network/post
 # action — "never auto-post" is structural, not a gate. The human reviews
-# redacted drafts (pm_x_drafts_pending) and posts manually on X, outside the
+# redacted drafts (pm_drafts_pending) and publishes manually, outside the
 # system. All these tools are mutators on the per-project store and are
 # deliberately NOT in any allowlist, so they are hidden under PM_LENS=1
 # (mirroring the pm_outbox_* review tools). The review queue exposes ONLY
-# redacted fields — enforced structurally in XDraftStore.pending.
+# redacted fields — enforced structurally in DraftStore.pending.
 
-_VALID_X_SIGNAL_TYPES = {"lesson", "insight", "adr", "mistake"}
-_VALID_X_KINDS = {"single", "thread"}
-_VALID_X_DRAFT_STATUSES = {"draft", "redacted", "rejected", "posted", "all"}
+_VALID_DRAFT_SIGNAL_TYPES = {"lesson", "insight", "adr", "mistake"}
+_VALID_DRAFT_KINDS = {"single", "thread"}
+_VALID_DRAFT_STATUSES = {"draft", "redacted", "rejected", "posted", "all"}
 
 # Debounce window (PMSERV-121): if a live draft was staged within this many
-# seconds, a second *distinct* pm_draft_x is suppressed so one session's many
+# seconds, a second *distinct* draft is suppressed so one session's many
 # lessons don't each spawn a draft. Pass force=true to override.
 _DRAFT_DEBOUNCE_SECONDS = 600
 
 
-def _get_x_draft_store(project_path: str | None):
-    """Resolve the per-project XDraftStore via the db_path-keyed factory."""
+def _get_draft_store(project_path: str | None):
+    """Resolve the per-project DraftStore via the db_path-keyed factory."""
     pm_path = _get_pm_path(project_path)
-    return get_x_draft_store(default_x_draft_db_path(pm_path))
+    return get_draft_store(default_draft_db_path(pm_path))
 
 
 @_tool()
-def pm_draft_x(
+def pm_draft_content(
     signal_type: str,
     source_refs: list[str],
     raw_content: str,
@@ -2801,7 +2929,7 @@ def pm_draft_x(
     force: bool = False,
     project_path: str | None = None,
 ) -> dict:
-    """Stage a build-in-public X draft derived from a .pm signal (PMSERV-113).
+    """Stage a publication draft derived from a .pm signal (PMSERV-113).
 
     Persists the draft as the FIRST action (compaction-safe). Two guards run
     before the insert:
@@ -2816,24 +2944,25 @@ def pm_draft_x(
 
     signal_type: lesson | insight | adr | mistake
     source_refs: provenance ids (memory:NN / ADR-NNN / PMSERV-NNN) — frozen
-    body: ordered thread segments (each ideally <=280 chars)
+    body: ordered content segments
     force: bypass the debounce window (NOT the source_refs dedupe)
     NOTE: raw_content is the unscrubbed concentrate and is NEVER surfaced by
-    the review queue (pm_x_drafts_pending). Call pm_redact_draft next.
+    the review queue (pm_drafts_pending). Call pm_redact_draft next.
     """
-    if signal_type not in _VALID_X_SIGNAL_TYPES:
+    if signal_type not in _VALID_DRAFT_SIGNAL_TYPES:
         return {
             "status": "error",
             "code": "invalid_signal_type",
             "message": (
-                f"signal_type must be one of {sorted(_VALID_X_SIGNAL_TYPES)}, got {signal_type!r}"
+                f"signal_type must be one of {sorted(_VALID_DRAFT_SIGNAL_TYPES)}, "
+                f"got {signal_type!r}"
             ),
         }
-    if kind not in _VALID_X_KINDS:
+    if kind not in _VALID_DRAFT_KINDS:
         return {
             "status": "error",
             "code": "invalid_kind",
-            "message": f"kind must be one of {sorted(_VALID_X_KINDS)}, got {kind!r}",
+            "message": f"kind must be one of {sorted(_VALID_DRAFT_KINDS)}, got {kind!r}",
         }
     if not source_refs:
         return {
@@ -2843,7 +2972,10 @@ def pm_draft_x(
         }
 
     normalized = normalize_source_refs(source_refs)
-    store = _get_x_draft_store(project_path)
+    try:
+        store = _get_draft_store(project_path)
+    except DraftStoreConflictError as exc:
+        return {"status": "error", "code": "draft_store_conflict", "message": str(exc)}
 
     existing = store.find_live_by_source_refs(normalized)
     if existing:
@@ -2901,6 +3033,38 @@ def pm_draft_x(
 
 
 @_tool()
+def pm_draft_x(
+    signal_type: str,
+    source_refs: list[str],
+    raw_content: str,
+    hook: str,
+    body: list[str] | None = None,
+    kind: str = "thread",
+    hashtags: list[str] | None = None,
+    workflow_id: str | None = None,
+    force: bool = False,
+    project_path: str | None = None,
+) -> dict:
+    """Compatibility alias for pm_draft_content; prefer the new name in new integrations.
+
+    Arguments, defaults, results and the project-local draft store are identical.
+    The legacy name remains available for existing host permissions and workflows.
+    """
+    return pm_draft_content(
+        signal_type=signal_type,
+        source_refs=source_refs,
+        raw_content=raw_content,
+        hook=hook,
+        body=body,
+        kind=kind,
+        hashtags=hashtags,
+        workflow_id=workflow_id,
+        force=force,
+        project_path=project_path,
+    )
+
+
+@_tool()
 def pm_redact_draft(draft_id: int, project_path: str | None = None) -> dict:
     """Run the Layer-1 deterministic redaction prefilter on a staged draft.
 
@@ -2908,9 +3072,12 @@ def pm_redact_draft(draft_id: int, project_path: str | None = None) -> dict:
     fields plus a count-only report, and transitions draft -> redacted. Returns
     the count-only report (never cleartext). After this, run the Layer-2
     semantic pass (/secret-scan + /privacy-check) on the redacted fields, then
-    have the human review via pm_x_drafts_pending and post manually on X.
+    have the human review via pm_drafts_pending and publish manually.
     """
-    store = _get_x_draft_store(project_path)
+    try:
+        store = _get_draft_store(project_path)
+    except DraftStoreConflictError as exc:
+        return {"status": "error", "code": "draft_store_conflict", "message": str(exc)}
     row = store.get(draft_id)
     if row is None:
         return {"status": "error", "code": "not_found", "message": f"draft {draft_id} not found"}
@@ -2960,7 +3127,7 @@ def pm_redact_draft(draft_id: int, project_path: str | None = None) -> dict:
         "flagged": result.flagged,
         "skill_hint": (
             "Run /secret-scan and /privacy-check on the redacted fields "
-            "(visible via pm_x_drafts_pending) for a semantic second pass before posting."
+            "(visible via pm_drafts_pending) for a semantic second pass before publishing."
         ),
     }
     if result.flagged:
@@ -2976,14 +3143,17 @@ def pm_redact_draft(draft_id: int, project_path: str | None = None) -> dict:
 
 @_tool()
 def pm_reject_draft(draft_id: int, reason: str, project_path: str | None = None) -> dict:
-    """Discard a staged X draft with a mandatory, auditable reason."""
+    """Discard a staged draft with a mandatory, auditable reason."""
     if not reason or not reason.strip():
         return {
             "status": "error",
             "code": "reason_required",
             "message": "reason is required and must be non-empty",
         }
-    store = _get_x_draft_store(project_path)
+    try:
+        store = _get_draft_store(project_path)
+    except DraftStoreConflictError as exc:
+        return {"status": "error", "code": "draft_store_conflict", "message": str(exc)}
     row = store.get(draft_id)
     if row is None:
         return {"status": "error", "code": "not_found", "message": f"draft {draft_id} not found"}
@@ -2996,28 +3166,28 @@ def pm_reject_draft(draft_id: int, reason: str, project_path: str | None = None)
 
 
 @_tool()
-def pm_x_drafts_pending(
+def pm_drafts_pending(
     filter_status: str = "redacted",
     limit: int = 50,
     offset: int = 0,
     project_path: str | None = None,
 ) -> dict:
-    """Review queue for staged X drafts — exposes ONLY redacted/safe fields.
+    """Review queue for staged drafts — exposes ONLY redacted/safe fields.
 
     raw_content and the un-redacted hook/body are NEVER returned (must-fix #1):
     the human copy-pastes from here, so the queue must never carry the
     unscrubbed concentrate. Default lists status='redacted' (ready for human
     review); use 'all' to also see draft/rejected/posted rows. Posting happens
-    manually on X, outside the system — pm-server never posts.
+    manually, outside the system — pm-server never publishes.
 
     filter_status: draft | redacted | rejected | posted | all
     """
-    if filter_status not in _VALID_X_DRAFT_STATUSES:
+    if filter_status not in _VALID_DRAFT_STATUSES:
         return {
             "status": "error",
             "code": "invalid_filter_status",
             "message": (
-                f"filter_status must be one of {sorted(_VALID_X_DRAFT_STATUSES)}, "
+                f"filter_status must be one of {sorted(_VALID_DRAFT_STATUSES)}, "
                 f"got {filter_status!r}"
             ),
         }
@@ -3027,9 +3197,29 @@ def pm_x_drafts_pending(
             "code": "invalid_pagination",
             "message": "limit and offset must be non-negative",
         }
-    store = _get_x_draft_store(project_path)
+    try:
+        store = _get_draft_store(project_path)
+    except DraftStoreConflictError as exc:
+        return {"status": "error", "code": "draft_store_conflict", "message": str(exc)}
     page = store.pending(filter_status=filter_status, limit=limit, offset=offset)
     return {"status": "ok", **page}
+
+
+@_tool()
+def pm_x_drafts_pending(
+    filter_status: str = "redacted",
+    limit: int = 50,
+    offset: int = 0,
+    project_path: str | None = None,
+) -> dict:
+    """Compatibility alias for pm_drafts_pending; prefer the new name in new integrations.
+
+    Uses the same filters and pagination and exposes only redacted/safe fields.
+    The legacy name remains available for existing host permissions and workflows.
+    """
+    return pm_drafts_pending(
+        filter_status=filter_status, limit=limit, offset=offset, project_path=project_path
+    )
 
 
 @_tool()
@@ -3162,7 +3352,8 @@ def pm_prompt_pack(
     Read-only over the SSoT (tasks/memory/decisions/project) and never touches
     git; the ONLY write is the export file. This tool is deliberately NOT in
     RO_ALLOWLIST — because it writes, a PM_LENS=1 (Lens) host must never see it
-    (a Lens read must not write; PMSERV-144). It is a Claude Code tool.
+    (a Lens read must not write; PMSERV-144). It is registered only in full
+    mode (PM_LENS unset), on any host.
 
     Args:
         filter_tag: Only tasks carrying this tag.
@@ -3351,7 +3542,12 @@ def pm_update_claudemd(project_path: str | None = None) -> dict:
         shape (status, message, template_version, before, after) is
         byte-stable with v0.4.x.
     """
-    from .rules import TEMPLATE_VERSION, get_claudemd_status, inject_pm_rules
+    from .rules import (
+        TEMPLATE_VERSION,
+        get_claudemd_status,
+        inject_pm_rules,
+        rules_newer_than_server_warning,
+    )
 
     root = resolve_project_path(project_path)
     before = get_claudemd_status(root)
@@ -3359,7 +3555,15 @@ def pm_update_claudemd(project_path: str | None = None) -> dict:
     after = get_claudemd_status(root)
 
     # Single-host invocation always yields exactly one result.
-    legacy_message = summary.results[0].message if summary.results else ""
+    result = summary.results[0] if summary.results else None
+    legacy_message = result.message if result else ""
+
+    # A refused downgrade leaves the file unchanged. The legacy "updated"
+    # status below cannot say so, so the refusal travels as a warning (an
+    # added key, which v0.4.x callers ignore) — ADR-055.
+    warnings: list[dict] = []
+    if result is not None and result.refused_downgrade:
+        warnings.append(rules_newer_than_server_warning({"CLAUDE.md": result.section_version}))
 
     # Status field hard-coded to "updated" preserves v0.4.x parity:
     # callers rely on this exact literal regardless of whether the
@@ -3370,6 +3574,7 @@ def pm_update_claudemd(project_path: str | None = None) -> dict:
         "template_version": TEMPLATE_VERSION,
         "before": before,
         "after": after,
+        "warnings": warnings,
     }
 
 
@@ -3378,30 +3583,44 @@ def pm_update_rules(
     project_path: str | None = None,
     target: str = "auto",
     dry_run: bool = False,
+    force: bool = False,
 ) -> dict:
     """Inject PM Lens rules into CLAUDE.md and/or AGENTS.md.
+
+    Rule files may be committed and shared, so run this when the user asks
+    for it or agrees to a rules_outdated / rule_file_version_mismatch
+    remediation from pm_status.
 
     Args:
         project_path: Project root. Auto-detected if omitted.
         target: One of ``"auto"`` (default; detect installed hosts via
             filesystem + marker + CLAUDECODE), ``"all"`` (force every
-            known host), or a single host id — ``"claude-code"`` (only
-            CLAUDE.md), or ``"codex"`` / ``"cursor"`` / ``"grok"`` (only
-            AGENTS.md, which all three read).
+            known host), ``"existing"`` (only files that already carry the
+            PM Lens section — never creates a file), or a single host id —
+            ``"claude-code"`` (only CLAUDE.md), or ``"codex"`` /
+            ``"cursor"`` / ``"grok"`` (only AGENTS.md, which all three read).
         dry_run: If True, report what would happen without writing.
+        force: Rewrite a section even when it is newer than this server's
+            template. Without it such a section is skipped and a
+            ``rules_newer_than_server`` warning is returned — use force only
+            when the user wants the downgrade.
 
     Returns a dict with: ``overall_status``, ``detected_hosts``,
-    ``detection_source`` (``"filesystem+marker+env"`` |
-    ``"explicit"`` | ``"fallback"``), ``created``, ``updated``,
+    ``detection_source`` (``"filesystem+marker+env"`` | ``"explicit"`` |
+    ``"existing"`` | ``"fallback"``), ``created``, ``updated``,
     ``is_dry_run``, ``results`` (one entry per rule FILE — several hosts
     share AGENTS.md, so ``results[].hosts`` lists every host that reads
     it), and ``warnings``.
     """
     from .hosts import HOSTS
-    from .rules import duplicate_rule_file_warning, inject_pm_rules
+    from .rules import (
+        duplicate_rule_file_warning,
+        inject_pm_rules,
+        rules_newer_than_server_warning,
+    )
 
     root = resolve_project_path(project_path)
-    summary = inject_pm_rules(root, target=target, dry_run=dry_run)
+    summary = inject_pm_rules(root, target=target, dry_run=dry_run, force=force)
 
     warnings: list[dict] = []
     if summary.detection_source == "fallback":
@@ -3417,6 +3636,10 @@ def pm_update_rules(
                 "remediation": "pm_update_rules(target='codex')",
             }
         )
+
+    refused = {r.target_file: r.section_version for r in summary.results if r.refused_downgrade}
+    if refused:
+        warnings.append(rules_newer_than_server_warning(refused))
 
     duplicate = duplicate_rule_file_warning(root)
     if duplicate is not None:
@@ -3440,6 +3663,7 @@ def pm_update_rules(
                 "message": r.message,
                 "backup_path": str(r.backup_path) if r.backup_path else None,
                 "is_dry_run": r.is_dry_run,
+                "refused_downgrade": r.refused_downgrade,
             }
             for r in summary.results
         ],

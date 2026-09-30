@@ -46,6 +46,9 @@ Thumbs.db
 #  cannot have its children re-included.)
 .claude/*
 !.claude/agents/
+# .claude/rules/ holds path-scoped coding rules the whole team should get
+# (Claude Code loads them only when matching files are touched).
+!.claude/rules/
 CLAUDE.md
 CLAUDE.md.bak.*
 
@@ -60,10 +63,13 @@ AGENTS.md.bak.*
 # who choose to commit .pm/ to git; PMSERV-048)
 .pm/.locks/
 
-# PM Lens X-content drafts — x_drafts.db carries raw_content (the unscrubbed
+# PM Lens content drafts — both database names carry raw_content (the unscrubbed
 # concentrate, a secret at rest; ADR-024). Defensive explicit exclusion for
 # users who choose to commit .pm/ to git (PMSERV-113 / PMSERV-120). Covers the
 # WAL/SHM sidecars too.
+.pm/drafts.db
+.pm/drafts.db-wal
+.pm/drafts.db-shm
 .pm/x_drafts.db
 .pm/x_drafts.db-wal
 .pm/x_drafts.db-shm

@@ -36,7 +36,7 @@
 ## 特徴
 
 - **🔌 マルチホストファースト** — `pmlens install --target=auto` 一発で **Claude Code / Codex CLI / Cursor / Grok Build に登録**。プロジェクトのルールも `CLAUDE.md` と `AGENTS.md` の両方に自動同期 (ADR-008)。プロジェクト途中でホストを切り替えてもコンテキストを失わない — 同じ `.pm/` データ、同じワークフロー
-- **44 の MCP ツール** — タスク CRUD、子イシュー、ステータス、ブロッカー、ベロシティ、ダッシュボード、プロンプトパック、ADR、セッションメモリ、ワークフロー、ナレッジレコード、マルチホストルール注入、クロスホスト Outbox ブリッジ、コンテンツパイプライン（記録済み知見 → redact 済み下書き） 等
+- **44 の MCP ツール + 互換名2個** — タスク CRUD、子イシュー、ステータス、ブロッカー、ベロシティ、ダッシュボード、プロンプトパック、ADR、セッションメモリ、ワークフロー、ナレッジレコード、マルチホストルール注入、クロスホスト Outbox ブリッジ、コンテンツパイプライン（記録済み知見 → redact 済み下書き） 等
 - **ワークフローエンジン** — テンプレートベースの開発ワークフロー（ループ、ユーザーゲート、チェイン対応：Discovery → Development）
 - **ナレッジレコード** — カジュアルなメモリとフォーマルな ADR の中間に位置する構造化された知見記録（research、tradeoff、spec 等）
 - **Super Research スキル** — 3 並列エージェント（Domain Expert、Critical Analyst、Lateral Thinker）+ Depth Check（6 次元）+ Fact Check + Cross-Check
@@ -72,11 +72,13 @@ pipx upgrade pmlens
 > （PEP 668、`error: externally-managed-environment`）。virtualenv の中であれば
 > `pip install pmlens` / `pip install -U pmlens` でも同じように動きます。
 
-アップグレード後、各プロジェクトの CLAUDE.md 自動行動ルールは自動的に更新されます:
+アップグレード後、各プロジェクトのルール節はユーザーの同意を得て更新されます:
 
-1. 次のセッション開始時に `pm_status` がテンプレートバージョンの不一致を検出
-2. Claude Code が `pm_update_rules` を実行してルールセクションを更新（CLAUDE.md / AGENTS.md 両対応）
-3. 新機能（子イシューワークフロー等）が即座に有効化
+1. 次のセッション開始時に `pm_status` が `rules_outdated`（または
+   `rule_file_version_mismatch`）の warning を返し、モデルがそれを伝える
+2. ユーザーが同意したら `pm_update_rules(target='existing')` が、既に節のある
+   ファイルだけを書き換える（`.bak.<timestamp>` を残す）
+3. ルールファイルはコミットされていることが多いので、差分を確認してからコミットする
 
 手動で更新することもできます:
 ```
@@ -240,18 +242,27 @@ pmlens uninstall --target auto
 | -------------------------------- | ----------------------------------------------------- |
 | MCP（セッション中）              | `pm_update_rules(target="auto", dry_run=False)`       |
 | CLI（このプロジェクトに適用）    | `pmlens update-rules --target auto`                   |
-| CLI（登録された全プロジェクト）  | `pmlens update-rules --target auto --all`             |
+| CLI（登録された全プロジェクト）  | `pmlens update-rules --all`（計画）→ `--apply`        |
 | レガシー CLAUDE.md 限定          | `pm_update_claudemd` / `pmlens update-claudemd`       |
 
-`AGENTS.md` は各書き込み前に `AGENTS.md.bak.<timestamp>` にバックアップされます。
-`CLAUDE.md` の対称的バックアップは PMSERV-058 として未対応のまま（当初 v0.6.0 を目標としたが deferred）。
+どちらのファイルも、書き込み前に `<file>.bak.<timestamp>` へバックアップされます。
+
+ルール節の版は後戻りしません。ディスク上の節より template が古い pmlens は、
+その節を書き換えずに `rules_newer_than_server` を報告します（意図的に戻す時は
+`force` を渡します）。`pm_status` は、節が実行中の pmlens より古い時
+（`rules_outdated`）と、CLAUDE.md と AGENTS.md の版が違う時
+（`rule_file_version_mismatch`）にも警告します。
+
+`--all` は登録済みの全リポジトリに及び、そうしたリポジトリはルールファイルを
+コミットしていることが多いので、既定は `--target existing`（既に節があるファイル
+だけ。新しいファイルは作らない）で、`--apply` を付けるまでは計画を表示するだけです。
 
 詳細は [`docs/design.md` §6](docs/design.md) と ADR-008 を参照（claudemd → rules
 モジュール rename、マーカー規約、データクラス、アトミック書き込みヘルパー）。
 
 ---
 
-## MCP ツール一覧（44ツール）
+## MCP ツール一覧（44ツール + 互換名2個）
 
 ### プロジェクト管理
 
@@ -381,10 +392,17 @@ auto-memory ノートは自由記述なので、この閾値を日常的に超�
 
 | ツール | 説明 |
 |---|---|
-| `pm_draft_x` | `.pm` シグナルから下書きをステージング — 原文（原液）は内部保持（PMSERV-113） |
+| `pm_draft_content` | `.pm` シグナルから下書きをステージング — 原文（原液）は内部保持（PMSERV-113） |
 | `pm_redact_draft` | Layer-1 決定論的 redaction 前処理 — hook と各 body セグメントを除去し件数のみレポート |
-| `pm_x_drafts_pending` | ステージング済み下書きのレビューキュー — redact 済み / 安全フィールドのみ公開 |
+| `pm_drafts_pending` | ステージング済み下書きのレビューキュー — redact 済み / 安全フィールドのみ公開 |
 | `pm_reject_draft` | ステージング済み下書きを必須・監査可能な理由付きで破棄 |
+
+上記の新名は **v0.15.1以降の未リリース変更**。
+旧名 `pm_draft_x` / `pm_x_drafts_pending` も互換名として利用でき、引数・結果・
+プロジェクト単位の保存先を共有する。新規は `.pm/drafts.db` を使用し、既存の
+`.pm/x_drafts.db` は移動せず継続利用する。v0.15.1以前は旧ツール名・旧DB名のみ対応。
+旧名への権限設定も引き続き有効。旧版との混在の制約や両DBが存在する場合の対処は
+[移行ガイド](docs/content-tool-migration.md)を参照。
 
 ### Outbox（クロスホストブリッジ）
 
@@ -575,58 +593,22 @@ YAML ファイルは人間が読め、手動編集しても壊れません。メ
 
 ## CLAUDE.md / AGENTS.md 統合
 
-プロジェクトの `CLAUDE.md` に以下を追加すると、セッション中の PM 操作が自動化されます（`pmlens update-rules` で自動追加も可能）:
+`pm_init` が `CLAUDE.md` に PM Lens 節を追加し、`pmlens update-rules` がそれ
+（と Codex・Cursor・Grok Build 向けの `AGENTS.md`）を最新に保ちます。節は手で
+写さず、ツールに書かせてください。節には版があり、見出しに版番号が出て、
+プロジェクトの節が古くなると pmlens が警告します。
 
-```markdown
-## PM Lens 自動行動ルール（必ず従うこと）
+節がモデルに求めること（template v15、ADR-054）:
 
-### セッション開始時（最初の応答の前に必ず実行）
-1. pm_status を MCP ツールとして実行し、現在の進捗を表示する
-2. pm_next で次に着手すべきタスクを3件表示する
-3. pm_recall で前回セッションの文脈を取得する
-4. ブロッカーや期限超過があれば警告する
-5. pm_status の claudemd.other_rule_sections に他のルールセクションが報告された場合、この CLAUDE.md 内の該当セクションのルールも全て実行する
-
-### タスクに着手する前
-1. 該当タスクを pm_update_task で in_progress に変更する
-
-### 作業中に重要な発見・判断があった時
-1. pm_remember で記憶を保存する（関連タスクIDがあれば task_id で紐付け）
-
-### コンテキスト保全（Compaction / Clear 対策）
-Claude Code はセッションが長くなるとコンテキストを自動圧縮（compaction）する。
-圧縮のタイミングは予測できないため、重要な情報は随時保存すること。
-1. 重要な発見・技術的判断は発生時点で即座に pm_remember で保存する（セッション終了を待たない）
-2. 複雑な議論や設計検討の後は、結論を pm_remember でまとめて保存する
-3. 3往復以上のやり取りで未記録の知見があれば、チェックポイントとして pm_remember で保存する
-4. ユーザーが /clear する前は必ず pm_session_summary を実行する
-5. Compaction 後にコンテキストが失われていると感じたら pm_recall で復元する
-
-### タスク完了時（コードが動作確認できたら）
-1. pm_update_task で done に変更する
-2. all_issues_resolved フラグが返された場合、親タスクの完了もユーザーに提案する
-3. pm_log に完了内容を記録する
-4. 次の推薦タスクを pm_next で表示する
-5. アトミックコミットを作成する
-
-### タスク完了確認中にイシュー（課題）が見つかった時
-1. pm_add_issue で親タスクに紐づくイシュー（子タスク）を作成する
-   - phase は親タスクから自動継承される
-   - 親タスクが done だった場合、自動で review に戻される
-2. イシューを解消したら pm_update_task で done に変更する
-3. 全イシューが解消されると all_issues_resolved フラグが返される
-4. 親タスクの完了をユーザーに提案する
-
-### 設計上の意思決定が発生した時
-1. ユーザーに「ADRとして記録しますか？」と確認する
-2. 承認されたら pm_add_decision で保存する
-
-### コーディングセッション終了時
-1. 進行中のタスクの状態を確認し、必要に応じて更新する
-2. pm_log にセッションの成果を記録する
-3. pm_session_summary で要約を保存する
-4. 未コミットの変更があればコミットする
-```
+- プロジェクトの作業に取りかかる時に `pm_status`・`pm_recall`・`pm_next` で一度
+  状況を把握する（無関係な単発の質問では行わない）。
+- 作業に合わせてタスク・日次ログ・記憶を更新し（コードではなくプロジェクト管理の記録）、
+  ツールの `warnings[]` はすべてユーザーに伝える。
+- ADR の記録は確認してから行い、ワークフローの承認ゲートではユーザーを待つ。
+- コミットはユーザーの依頼（またはユーザーが始めたワークフローの手順）がある時
+  だけ行い、自分が加えた差分だけを含める（既存の変更が混ざる時は先に確認する）。
+- redact していない下書きを見せない、`raw_content` を表に出さない、下書きを
+  投稿・送信しない。
 
 ---
 
@@ -674,7 +656,7 @@ PM Lens のメモリ層が、セッション間の情報断絶を防ぎます：
 
 ### 自動 Hook（ライフサイクル強制）
 
-PM Lens は初回セッション開始時（`pm_status`）に Claude Code の hook を自動インストールします。`git commit` 後に PostToolUse hook がリマインドを会話に注入し、`pm_log`、`pm_update_task`、`pm_next` の呼び出しを促します。
+PM Lens は初回セッション開始時（`pm_status`）に Claude Code の hook を自動インストールします。進行中のタスクがある PM Lens プロジェクトで `git ... commit` を実行すると、PostToolUse hook が `hookSpecificOutput.additionalContext` としてリマインドを会話に加えます。そのコミットでタスクが完了したなら `pm_update_task` で done にして `pm_log` に記録し、中間コミットなら何も変えないよう促します。
 
 - Hook は `~/.claude/settings.json` にグローバルにインストール
 - 既存のユーザー hook は保全（PM Lens の hook は追記、上書きしない）
@@ -710,7 +692,7 @@ pmlens migrate             # pm-agent からの移行（MCP 登録の切り替�
 pmlens update-rules        # PM Lens ルールを CLAUDE.md / AGENTS.md に注入（ADR-008）。
                            # --target {auto,all,claude-code,codex} (default: auto)
                            # --dry-run / --all (登録された全プロジェクトに適用)
-pmlens update-claudemd     # レガシー alias of `update-rules --target=claude-code`。v0.6.0 以降 deprecated
+pmlens update-claudemd     # レガシー: このプロジェクトの CLAUDE.md のみ（--all は廃止。update-rules --all を使う）。v0.6.0 以降 deprecated
 pmlens install-hooks       # Claude Code の hook を手動インストール（通常は pm_status で自動）
 pmlens uninstall-hooks     # PM Lens の hook を削除
 ```
@@ -735,7 +717,7 @@ Claude Code Session
   └── MCP Server (stdio)
         └── pmlens serve
               │
-              ├── server.py    → 44 MCP ツール (FastMCP)
+              ├── server.py    → 44 MCP ツール + 互換名2個 (FastMCP)
               ├── models.py    → Pydantic v2 データモデル (18 models, 16 enums)
               ├── storage.py   → YAML 読み書き
               ├── workflow.py  → ワークフローエンジン (state machine)

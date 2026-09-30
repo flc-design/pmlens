@@ -995,3 +995,20 @@ def test_run_prompt_pack_filter_phase_and_priority(tmp_path):
     assert set(run_prompt_pack(pm_path, filter_phase="p1")["task_ids"]) == {"A", "C"}
     assert set(run_prompt_pack(pm_path, filter_priority="P0")["task_ids"]) == {"A", "B"}
     assert run_prompt_pack(pm_path, filter_phase="p1", filter_priority="P0")["task_ids"] == ["A"]
+
+
+class TestCommitScope:
+    """ADR-054 (PMSERV-200): the pasted body asks for a commit, because the
+    user sends it as their own request, but only of this task's files."""
+
+    def test_body_scopes_the_commit_to_this_task(self):
+        body = build_prompt_body(
+            _task(id="P-9", title="scoped"),
+            memories=[],
+            decisions_by_id={},
+            verify_commands=[],
+        )
+        assert "このタスクで加えた差分だけ" in body
+        assert "先に確認" in body
+        assert "push はしない" in body
+        assert "未コミットの変更があれば" not in body

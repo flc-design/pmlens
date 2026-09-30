@@ -5,6 +5,7 @@ from __future__ import annotations
 import click
 
 from . import __version__
+from .rules import RULE_TARGET_CHOICES as _RULE_TARGET_CHOICES
 from .utils import TARGET_CHOICES
 
 
@@ -47,7 +48,10 @@ def _print_inject_summary(summary) -> None:
     consume the same data class.
     """
     if not summary.results:
-        click.echo("✗ No hosts processed.")
+        if summary.detection_source == "existing":
+            click.echo("- no PM Lens section in CLAUDE.md or AGENTS.md (nothing to update)")
+        else:
+            click.echo("✗ No hosts processed.")
         return
 
     # Surface a fallback warning ahead of the per-host lines so the user
@@ -61,7 +65,7 @@ def _print_inject_summary(summary) -> None:
         )
 
     for r in summary.results:
-        prefix = "✗" if r.status == "failed" else "✓"
+        prefix = "✗" if r.status == "failed" else "⚠" if r.refused_downgrade else "✓"
         dry_tag = "[dry-run] " if r.is_dry_run else ""
         click.echo(f"{prefix} {dry_tag}{r.target_file}: {r.message}")
         if r.backup_path:
@@ -391,37 +395,34 @@ def uninstall_hooks_cmd():
 
 
 @cli.command("update-claudemd")
-@click.option("--all", "all_projects", is_flag=True, help="Update all registered projects.")
+@click.option(
+    "--all",
+    "all_projects",
+    is_flag=True,
+    help="Retired; use `pmlens update-rules --all` (plan) and `--apply`.",
+)
 def update_claudemd_cmd(all_projects: bool):
     """Update PM Lens rules in CLAUDE.md.
 
-    Without --all: updates current project only.
-    With --all: updates all registered projects.
+    Updates the current project only. ``--all`` is retired: use
+    ``pmlens update-rules --all``, which shows a plan before writing.
 
     .. deprecated:: 0.6.0
         Backward-compat alias. Prefer ``pm-server update-rules`` which
         supports AGENTS.md (Codex CLI) in addition to CLAUDE.md.
         Output format is byte-stable with v0.4.x for this command.
     """
-    from pathlib import Path
-
     from .claudemd import update_claudemd
 
     if all_projects:
-        from .storage import load_registry
-
-        registry = load_registry()
-        if not registry.projects:
-            click.echo("No registered projects found.")
-            return
-
-        for entry in registry.projects:
-            root = Path(entry.path)
-            if root.exists():
-                result = update_claudemd(root)
-                click.echo(f"  {entry.name}: {result}")
-            else:
-                click.echo(f"  {entry.name}: path not found (skipped)")
+        # Retired (ADR-055): it rewrote — or created — CLAUDE.md in every
+        # registered repository at once, with no plan to review first.
+        click.echo(
+            "update-claudemd --all is retired: it wrote every registered repository "
+            "without a plan. Run `pmlens update-rules --all` to see the plan, then "
+            "`pmlens update-rules --all --apply` to write it."
+        )
+        raise click.exceptions.Exit(1)
     else:
         from .utils import resolve_project_path
 
@@ -437,12 +438,13 @@ def update_claudemd_cmd(all_projects: bool):
 @click.option(
     "--target",
     "-t",
-    type=click.Choice(_TARGET_CHOICES),
-    default="auto",
-    show_default=True,
+    type=click.Choice(list(_RULE_TARGET_CHOICES)),
+    default=None,
+    show_default="auto; existing with --all",
     help=(
         "Which host's rule file to update. 'auto' detects via "
-        "filesystem/marker/env; 'all' forces every known host."
+        "filesystem/marker/env; 'all' forces every known host; 'existing' "
+        "only rewrites files that already carry the PM Lens section."
     ),
 )
 @click.option(
@@ -456,25 +458,62 @@ def update_claudemd_cmd(all_projects: bool):
     "all_projects",
     is_flag=True,
     default=False,
-    help="Apply to every registered project (target/dry_run apply per-project).",
+    help=(
+        "Plan the update for every registered project. Nothing is written "
+        "unless --apply is also given."
+    ),
 )
-def update_rules_cmd(target: str, dry_run: bool, all_projects: bool):
+@click.option(
+    "--apply",
+    "apply_changes",
+    is_flag=True,
+    default=False,
+    help="With --all, write the planned changes.",
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    default=False,
+    help="Also rewrite sections that are newer than this pmlens (a downgrade).",
+)
+def update_rules_cmd(
+    target: str | None,
+    dry_run: bool,
+    all_projects: bool,
+    apply_changes: bool,
+    force: bool,
+):
     """Inject PM Lens rules into CLAUDE.md and/or AGENTS.md.
 
     Compared to ``update-claudemd``: also handles AGENTS.md for Codex
     CLI (ADR-008). Default ``target=auto`` detects which hosts are
     installed on this machine and updates only those rule files.
+
+    ``--all`` rewrites files in every registered repository, many of which
+    commit their rule files, so it defaults to ``--target existing`` (never
+    creating a rule file) and only prints the plan until ``--apply`` is
+    given (ADR-055).
     """
     from pathlib import Path
 
     from . import rules
     from .utils import resolve_project_path
 
+    if apply_changes and not all_projects:
+        raise click.UsageError(
+            "--apply only applies to --all; without --all, update-rules writes "
+            "directly (use --dry-run to preview)."
+        )
+    if apply_changes and dry_run:
+        raise click.UsageError("--dry-run and --apply contradict each other; pass one.")
+
     any_failed = False
 
     if all_projects:
         from .storage import load_registry
 
+        target = target or "existing"
+        plan_only = dry_run or not apply_changes
         registry = load_registry()
         if not registry.projects:
             click.echo("No registered projects found.")
@@ -486,16 +525,21 @@ def update_rules_cmd(target: str, dry_run: bool, all_projects: bool):
                 click.echo(f"  {entry.name}: path not found (skipped)")
                 continue
             click.echo(f"\n{entry.name}:")
-            summary = rules.inject_pm_rules(root, target=target, dry_run=dry_run)
+            summary = rules.inject_pm_rules(root, target=target, dry_run=plan_only, force=force)
             _print_inject_summary(summary)
             any_failed = any_failed or any(r.status == "failed" for r in summary.results)
+        if plan_only and not dry_run:
+            click.echo(
+                "\nPlan only — nothing was written. Re-run with --apply to write these changes."
+            )
     else:
+        target = target or "auto"
         try:
             root = resolve_project_path()
         except Exception as e:
             click.echo(f"Error: {e}")
             raise click.exceptions.Exit(1) from e
-        summary = rules.inject_pm_rules(root, target=target, dry_run=dry_run)
+        summary = rules.inject_pm_rules(root, target=target, dry_run=dry_run, force=force)
         _print_inject_summary(summary)
         any_failed = any(r.status == "failed" for r in summary.results)
 

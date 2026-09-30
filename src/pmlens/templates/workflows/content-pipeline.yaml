@@ -35,11 +35,11 @@ steps:
     name: Draft (reader-voice)
     description: >
       Rewrite the by-product into a reader-facing hook + body, in a voice that
-      works without internal context. Call pm_draft_x FIRST so the draft row is
+      works without internal context. Call pm_draft_content FIRST so the draft row is
       persisted immediately (compaction-safe); record the returned draft id as
       an artifact. raw_content is kept for provenance but is never shown in the
       review queue.
-    tool_hint: pm_draft_x
+    tool_hint: pm_draft_content
     consumes:
       - source_refs
     produces:
@@ -62,12 +62,12 @@ steps:
   - id: review
     name: Human Review (manual publish)
     description: >
-      Show the redacted draft from pm_x_drafts_pending to the human. The human
+      Show the redacted draft from pm_drafts_pending to the human. The human
       reviews it and, if happy, publishes it MANUALLY wherever they choose —
       pm-server never publishes and holds no credentials for any destination.
       This is NOT an engine-enforced approval gate;
       the decision happens outside the system. Do not advance until the human
       has reviewed the redacted draft.
-    tool_hint: pm_x_drafts_pending
+    tool_hint: pm_drafts_pending
     consumes:
       - redacted_draft

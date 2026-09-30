@@ -29,42 +29,20 @@ jobs:
         run: pip install -e ".[dev]"
 
       - name: Lint with ruff
-        run: ruff check src/ tests/
+        run: ruff check src/ tests/ scripts/lockfiles.py
 
       - name: Format check with ruff
-        run: ruff format --check src/ tests/
+        run: ruff format --check src/ tests/ scripts/lockfiles.py
 
       - name: Run tests with coverage
         run: pytest --cov
 
   test-locked:
-    # PMSERV-178: the reproducible, hash-verified install.
-    #
-    # The `test` matrix above resolves dependencies fresh every run. That is
-    # deliberate and stays — it is the early warning for upstream breakage,
-    # which matters because this project ships a floating range
-    # (`fastmcp>=3.2.0,<5.0`) and users get whatever resolves at install time.
-    # A future fastmcp 4.x could change what `mcp` resolves to while still
-    # satisfying that range; the floating job is what would notice.
-    #
-    # It already has. The fastmcp 3 -> 4 bump (PMSERV-185) swapped the
-    # transitive MCP SDK from `mcp` 1.x to `mcp` 2.x and httpx for httpx2 —
-    # a resolution change no pinned job would have surfaced, and this matrix
-    # is where it first ran.
-    #
-    # What was missing is the other half. requirements.lock has carried
-    # SHA-256 hashes since v0.6.1 and the changelog advertised
-    # `pip install --require-hashes -r requirements.lock` as the structural
-    # defense against mid-flight package replacement — but no CI, release, or
-    # Makefile path ever ran it. The file was inert, and had drifted two minor
-    # versions from what anyone actually installed. A documented-but-unexecuted
-    # security control is worse than none: it reads as a guarantee.
-    #
-    # SCOPE OF THE GUARANTEE, precisely: every runtime and dev dependency
-    # installed here is hash-verified. The build backend for the editable
-    # install (hatchling) is fetched by pip's build isolation and is NOT
-    # hash-pinned — it is a build-time input, not a shipped dependency.
-    # Do not describe this job as "everything is hash-pinned".
+    # Runtime and dev dependencies are installed with hashes from uv.lock's
+    # checked export. The editable build backend (hatchling) is fetched by
+    # pip build isolation and is outside this hash guarantee (ADR-052).
+    # The floating matrix above still tests what fresh user installs resolve.
+    needs: lockfile-freshness
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -73,83 +51,29 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
-          # Single version on purpose. requirements.lock is a UNIVERSAL
-          # resolution (see below), so it is not tied to one interpreter — but
-          # cross-version coverage is the floating matrix's job, and running
-          # this one everywhere would buy little for the runtime it costs.
           python-version: "3.13"
 
       - name: Install locked dependencies (hash-verified)
-        # Fails closed: any package whose contents differ from the recorded
-        # hash, or any requirement missing a hash, aborts before code runs.
-        #
-        # requirements.lock MUST be regenerated with:
-        #   uv pip compile --universal --generate-hashes --all-extras \
-        #     --upgrade --output-file requirements.lock pyproject.toml
-        #
-        # `--upgrade` is load-bearing and its absence here was a real defect
-        # (PMSERV-185). `uv pip compile` reads the EXISTING output file as
-        # resolution preferences, exactly as pip-compile does. Run against a
-        # lock that already exists, the command as previously written pins the
-        # resolution to what is already in the file: measured on uv 0.11.25, it
-        # produced a byte-identical pin set while fastmcp 4 was sitting on
-        # PyPI. Anyone following this comment to the letter would have
-        # concluded the lock was already fresh.
-        #
-        # Use `--upgrade-package <name>` when the intent is to move one
-        # dependency rather than refresh the whole tree. The file as committed
-        # is the product of targeted moves, so a bare `--upgrade` will also
-        # pull unrelated transitives forward — that is not drift in this file,
-        # it is the backlog of every refresh that did not happen while the
-        # command above was a no-op. PMSERV-186 decides how that gets paid off.
-        #
-        # --universal is load-bearing, not a preference. This job failed on its
-        # very first run because the lock had been generated with pip-compile on
-        # macOS: pip-compile resolves for the environment it runs in, and
-        # `keyring` pulls `SecretStorage`/`jeepney` only under
-        # sys_platform == "linux". Those two were therefore absent from the
-        # lock, and on this Linux runner pip refused —
-        #   "In --require-hashes mode, all requirements must have their versions
-        #    pinned with ==. These do not: SecretStorage>=3.2"
-        # A universal resolution emits every platform's dependencies with
-        # environment markers, so one file installs correctly on Linux and macOS
-        # alike. Regenerating on Linux instead would only move the hole.
+        # Universal export retains platform and Python markers, including
+        # Linux-only dependencies. Do not regenerate via platform-local pip-compile.
         run: pip install --require-hashes -r requirements.lock
 
       - name: Install the project itself
-        # --no-deps so this cannot pull an unlocked, unverified package in
-        # behind the hash check that just ran.
         run: pip install -e . --no-deps
+
+      - name: Check installed dependency constraints
+        # --no-deps must not hide a pyproject range that excludes a locked pin.
+        run: pip check
 
       - name: Run tests against the locked tree
         run: pytest -q
 
   lockfile-freshness:
-    # PMSERV-178: the two lockfiles have distinct jobs, and both must track
-    # pyproject.toml or they rot into the state that caused this task —
-    # requirements.lock pinned fastmcp 3.2.4, uv.lock pinned 3.3.1, and the
-    # environment everyone actually ran had 3.4.5.
-    #
-    #   requirements.lock — the hash-verified install above. NOT kept fresh by
-    #                       Dependabot, despite what this comment used to say.
-    #                       Across every Dependabot PR this repo has received,
-    #                       not one has touched the file; the only
-    #                       `pip`-ecosystem PR it has ever opened changed
-    #                       pyproject.toml alone (PMSERV-185). That ecosystem
-    #                       matches `requirements*.txt`, not a `.lock` name,
-    #                       whatever tool wrote the contents. Refreshing it is
-    #                       a MANUAL step — the `--upgrade` form above.
-    #                       PMSERV-186 tracks replacing this paragraph with a
-    #                       guard, since a comment cannot fail a build.
-    #   uv.lock          — the development environment: the devcontainer and
-    #                       `uv run --project` in plugin/README.md.
-    #
-    # This job guards the second one. `uv lock --check` fails if uv.lock no
-    # longer matches pyproject.toml, so the guard does not depend on
-    # Dependabot's uv support working — that support is documented by Astral
-    # but explicitly incomplete, with open reports of uv.lock not being
-    # updated. requirements.lock needs no equivalent check: if it drifts from
-    # pyproject, test-locked fails on a missing import.
+    # PMSERV-186: uv.lock owns the resolution; requirements.lock is its
+    # hash-bearing export for pip. This fails on project/lock/export drift,
+    # independently of Dependabot. It runs offline and never upgrades pins.
+    # Upstream freshness is an explicit `make lock-refresh` operation; it is
+    # not a requirement that changes whenever a new package is published.
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -161,12 +85,11 @@ jobs:
           python-version: "3.13"
 
       - name: Install uv
-        # Pinned to the version .devcontainer/Dockerfile already trusts, so the
-        # tool that validates the lock is not itself an unpinned dependency.
+        # Keep aligned with scripts/lockfiles.py and .devcontainer/Dockerfile.
         run: pip install uv==0.11.25
 
-      - name: uv.lock must match pyproject.toml
-        run: uv lock --check
+      - name: Both lockfiles must match the project and each other
+        run: python scripts/lockfiles.py check
 
   identity-guard:
     # PMSERV-137 / ADR-034 step 6: an INDEPENDENT mechanical gate for the

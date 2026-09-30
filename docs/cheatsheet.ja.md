@@ -1,6 +1,6 @@
 # PM Lens チートシート
 
-> Claude Code / Codex CLI / Cursor / Grok Build 用プロジェクト管理 MCP Server — **44 ツール**
+> Claude Code / Codex CLI / Cursor / Grok Build 用プロジェクト管理 MCP Server — **44 ツール + 互換名2個**
 > Version 0.15.1 | Python 3.11+ | PyPI: `pmlens`
 
 ---
@@ -74,12 +74,15 @@ Claude Code セッション:
 
 ### コンテンツパイプライン (ADR-024)
 
+以下の新名は開発中の未リリース変更。旧名も引き続き利用できる。
+公開済みのパッケージでは旧名を使用する。詳細は[移行ガイド](content-tool-migration.md)を参照。
+
 | ツール | 説明 | 主要パラメータ |
 |------|-------------|------------|
-| `pm_draft_x` | 記録済み知見から公開用の下書きを生成 | `source?`, `angle?` |
+| `pm_draft_content`（互換名 `pm_draft_x`） | 記録済み知見から公開用の下書きを生成 | `signal_type`, `source_refs`, `raw_content`, `hook` |
 | `pm_redact_draft` | 下書きを redact（手動公開前の唯一の安全層） | `draft_id` |
-| `pm_reject_draft` | 下書きを却下 | `draft_id` |
-| `pm_x_drafts_pending` | redact 済みで人手レビュー待ちの下書き一覧 | _(なし)_ |
+| `pm_reject_draft` | 下書きを却下 | `draft_id`, `reason` |
+| `pm_drafts_pending`（互換名 `pm_x_drafts_pending`） | redact 済みで人手レビュー待ちの下書き一覧 | `filter_status?`, `limit?`, `offset?` |
 
 ### 記録・分析
 
@@ -411,8 +414,9 @@ pmlens status               # プロジェクト状況表示
 pmlens discover [path]      # プロジェクト検出・登録
 pmlens update-rules         # CLAUDE.md / AGENTS.md ルール更新（multi-host）
 pmlens update-rules -t auto --dry-run  # 検知された host をプレビュー
-pmlens update-rules --all   # 登録された全プロジェクトに適用
-pmlens update-claudemd      # レガシー: update-rules -t claude-code と等価
+pmlens update-rules --all   # 登録済み全プロジェクトの計画を表示（PM 節のあるファイルのみ）
+pmlens update-rules --all --apply  # その計画を書き込む
+pmlens update-claudemd      # レガシー: このプロジェクトの CLAUDE.md のみ（--all は廃止）
 pm-server hook post-tool-use   # PostToolUse フックハンドラ
 ```
 

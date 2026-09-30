@@ -24,7 +24,8 @@ from pathlib import Path
 from typing import Literal
 
 from .hosts import HOSTS, hosts_reading_both_rule_files, rule_files
-from .utils import _atomic_write_text, _timestamped_backup
+from .models import PmServerError
+from .utils import TARGET_CHOICES, _atomic_write_text, _timestamped_backup
 
 # Mapping from host id (used by `target` arg) to the rule-file basename
 # managed in the project root. Same marker scheme is reused across hosts
@@ -39,146 +40,116 @@ from .utils import _atomic_write_text, _timestamped_backup
 TARGET_FILES: dict[str, str] = rule_files()
 assert set(TARGET_FILES) == set(HOSTS), "TARGET_FILES drifted from the host registry"
 
+#: Targets accepted by :func:`inject_pm_rules`: the shared install targets plus
+#: ``"existing"``, which only applies to rule injection (installing an MCP
+#: server has no notion of "files that already carry the section").
+RULE_TARGET_CHOICES: tuple[str, ...] = (*TARGET_CHOICES, "existing")
+
 # v12 (PMSERV-165): the template is injected into AGENTS.md for Codex, Cursor
 # and Grok Build as well as into CLAUDE.md, so its self-references had to stop
 # naming CLAUDE.md; and the ADR-028 branch clause was factually wrong — it keyed
 # on "hosts without hooks", but Cursor and Grok Build both HAVE session hooks;
 # what they lack is a pmlens-installed one.
-TEMPLATE_VERSION = 13
+# v14 (PMSERV-189): prefer pm_drafts_pending in the content pipeline rule;
+# the old tool name remains callable for previously injected templates.
+# v15 (PMSERV-199, ADR-054): rewritten for current models, which follow rule
+# files literally — no unrequested commits, the start routine only for project
+# work, emphasis kept for the safety constraints, no triggers the model cannot
+# observe (/clear, session end, "every 3 turns"), host-neutral wording, and the
+# version in the heading because Claude Code strips the marker comments.
+TEMPLATE_VERSION = 15
 BEGIN_MARKER = "<!-- pm-server:begin v={version} -->"
 END_MARKER = "<!-- pm-server:end -->"
-BEGIN_PATTERN = re.compile(r"<!-- pm-server:begin v=(\d+) -->")
+# Markers count only at the start of a line (after an optional BOM and
+# indentation): pmlens always writes them there, and a prose mention of a
+# marker (in backticks, mid-sentence) must not be taken for one. Text after a
+# marker on the same line is allowed — a user comment appended to the end
+# marker must not turn the section into a "corrupted" one whose repair deletes
+# everything below it. Versions are ASCII digits with a length cap.
+BEGIN_PATTERN = re.compile(r"^\ufeff?[ \t]*<!-- pm-server:begin v=([0-9]{1,6}) -->", re.M)
+END_PATTERN = re.compile(r"^\ufeff?[ \t]*<!-- pm-server:end -->", re.M)
 OTHER_SECTION_PATTERN = re.compile(r"<!-- ([\w-]+):begin")
 
 CLAUDEMD_TEMPLATE = """\
 <!-- pm-server:begin v={version} -->
-## PM Lens 自動行動ルール（必ず従うこと）
+## PM Lens 自動行動ルール（v{version}）
 
-### セッション開始時（最初の応答の前に必ず実行）
-1. pm_status を MCP ツールとして実行し、現在の進捗を表示する
-2. pm_next で次に着手すべきタスクを3件表示する
-3. pm_recall で前回セッションの文脈を取得する（複数の作業ラインを行き来している場合は
-   track= を渡す。下記「ブランチ単位のセッション継続」を参照）
-4. ブロッカーや期限超過があれば警告する
-5. pm_status の claudemd.other_rule_sections に他のルールセクションが報告された場合、
-   このルールファイル内の該当セクションのルールも全て実行する
+このプロジェクトでは、タスク・設計判断（ADR）・作業記録・記憶を PM Lens（pm_* ツール、データは .pm/）で管理している。
+次のセッションはこの記録から作業を再開し、ユーザーはダッシュボードで進捗と判断の経緯を確認する。以下は、その記録を途切れさせないことと、ツールの副作用（warnings[]）をユーザーに見える形にすることのための既定の進め方である。
+- ユーザーの明示的な指示と食い違う時はユーザーの指示に従う。例外はコンテンツパイプライン節の安全上の制約（redact していない下書きを人に見せない、raw_content を表に出さない、モデルから下書きを投稿・送信しない）で、求められても理由を伝えて守る。
+- PM Lens への記録（タスク・イシュー・ログ・記憶・調査結果・セッション要約・ワークフローの進行）はコードや外部サービスに影響せず、誤りは記録の追加で正せるので、呼び出しごとに確認を取らなくてよい。削除・破棄系の操作（pm_cleanup、pm_memory_cleanup など）と git のコミットはこれに含まれない。
+- サブエージェントとして動いている時は PM Lens の手順とコミットを行わず、重要な発見は結果として親に返す（記録は親が行う）。親から PM 操作やコミットを明示的に任された時は、その指示に従う。
+- この節が指す pm_* ツールがこのセッションに無い時（MCP が未接続、読み取り専用モードなど）は、その手順を飛ばす。ツールの定義を必要な時に読み込むホストでは、名前が一覧にあれば使える。
+- ルールファイル（CLAUDE.md / AGENTS.md）の PM Lens 節が版違いで複数読み込まれていて内容が食い違う時は、見出しの版番号が大きい方に従い、食い違いをユーザーに一度伝える（見出しに版番号が無いものは v14 以前）。
 
-### ブランチ単位のセッション継続（branch-aware recall, ADR-028）
-複数の作業ライン（feature ブランチ / worktree）を行き来する場合、pm_recall に track= を
-渡すと、そのライン専用の前回コンテキストだけを復元できる（track 未指定なら従来どおり全体の
-最新を返すので後方互換）。track= に渡す値の決め方:
-1. **プラグイン環境（Claude Code plugin）**: session-start hook が現在のブランチを提示する
-   ので、その値をそのまま pm_recall(track=...) に渡す。
-2. **pmlens の hook が入っていないホスト（手動 MCP 接続・Codex CLI・Cursor・Grok Build 等）**:
-   Cursor と Grok Build 自体は session hook を持つが、pmlens はそれらに hook を導入しない。
-   したがってブランチを提示してくれる hook が無く、ホスト側（=あなた）が自分でブランチを
-   求める責務を負う。セッション開始時、および git checkout / switch で
-   ブランチを切り替えた直後に、リポジトリの .git/HEAD を読んで現在のブランチ名を求め
-   （`ref: refs/heads/<branch>` の <branch> 部分。HEAD が SHA だけの detached HEAD や、
-   .git が file の worktree はブランチ無しとして扱う）、その値を pm_recall(track="<branch>")
-   に渡す。pm-server は read 経路で git を一切触らない（RO 不変条件 / ADR-028）ため、
-   ブランチの再取得はホスト側で行うこと。
-3. **論理ラベル**: .pm/tracks.yaml に `tracks: {{ラベル: [glob, ...]}}`（例: 本流→main、
-   論文→feat/p3-*）が定義されていれば、ブランチ名の代わりにラベルを track= に渡せる
-   （glob にマッチする複数ブランチを束ねた最新を返す。解決はクエリ時なので rename 耐性あり）。
-4. **結果の解釈**: 応答の track_matched=false は「そのラインにまだ記録が無い」を意味し、
-   overall-latest にフォールバックする。track_branch でどのブランチ由来かを確認できる。
+### セッション開始時
+このプロジェクトの作業（実装・タスク・計画・前回の続き）に取りかかる時は、先に pm_status・pm_recall・pm_next で現状と前回の文脈を把握する（pm_recall の track= は次節）。PM と無関係な単発の質問だけの時は不要。
+ブロッカー・期限超過・warnings は、依頼との関係にかかわらず要点を短く伝える。タスクは進行中のものと依頼に関係する次の候補（最大3件）を数行にまとめ、ツールの出力全体は貼らない。
+hook などから同じ手順の指示が重ねて届いても、実行は1回でよい。
+
+### ブランチ単位のセッション継続
+複数の作業ライン（feature ブランチ / worktree）を行き来する場合は、pm_recall に track= を渡すと、そのラインで最後に記録されたセッションの文脈が返る（省略すると全体の最新）。
+1. pmlens の session hook がブランチを示していればその値を使う。示していなければ .git/HEAD を読み、`ref: refs/heads/<branch>` の <branch> 部分を渡す。git checkout / switch の後は .git/HEAD を読み直す。
+2. HEAD が SHA だけの detached HEAD や、.git がファイルの worktree ではブランチ無しとして track を省く。保存側（pm_session_summary）も同じ規則で記録するので値が一致する。pm-server は読み取り経路で git を実行しないので、ブランチの取得はこちらで行う。
+3. .pm/tracks.yaml に `tracks: {{ラベル: [glob, ...]}}`（例: 本流→main、論文→feat/p3-*）があれば、ブランチ名の代わりにラベルを渡せる（glob に合うブランチを束ねた最新が返る）。
+4. 応答の track_matched=false は、そのラインにまだ記録が無く全体の最新にフォールバックしたことを示す。track_branch で由来を確かめる。
 
 ### タスクに着手する前
-1. 該当タスクを pm_update_task で in_progress に変更する
+該当タスクを pm_update_task で in_progress にする。
 
-### 作業中に重要な発見・判断があった時
-1. pm_remember で記憶を保存する（関連タスクIDがあれば task_id で紐付け）
+### 作業中に重要な発見・判断があった時（コンテキスト保全）
+会話の履歴はホストによって圧縮（Compaction）やリセットをされることがあり、途中で得た結論は後から参照できなくなる。後の作業で必要になる発見・判断・結論は、確定した時点で理由とともに pm_remember に1件ずつ保存する（関連タスクがあれば task_id、type は lesson / insight / observation）。
+- 1件に1つの知見を書き、1行目に要約、続けて理由を書く。プロジェクトについてユーザーが訂正したことや、うまくいった方針も記録する。
+- コミット・ADR・タスク・pm_log・pm_record・コードから分かることや、既に保存した内容は保存しない。誤りの訂正は、どの記録を訂正したかを書いて新しく保存する。
+- 圧縮やリセットの後で以前の判断や作業状態が必要になったら、pm_recall（該当すれば track= 付き）で取り直す。
 
-### コンテキスト保全（Compaction / Clear 対策）
-Claude Code はセッションが長くなるとコンテキストを自動圧縮（compaction）する。
-圧縮のタイミングは予測できないため、重要な情報は随時保存すること。
-1. 重要な発見・技術的判断は発生時点で即座に pm_remember で保存する（セッション終了を待たない）
-2. 複雑な議論や設計検討の後は、結論を pm_remember でまとめて保存する
-3. 3往復以上のやり取りで未記録の知見があれば、チェックポイントとして pm_remember で保存する
-4. ユーザーが /clear する前は必ず pm_session_summary を実行する
-5. Compaction 後にコンテキストが失われていると感じたら pm_recall で復元する
+### 記憶の二重化を避ける（pm_remember とホスト自身の記憶機能の分担）
+Claude Code の auto memory（~/.claude/projects/<repo>/memory/）のように、ホスト自身が記憶機能を持つ場合がある。両者は互いを参照しないので、同じ事実を両方に書くと内容が食い違っていく。二重書き込みはしない。
+- プロジェクトの事実は pmlens 側を正（SSoT）とする。タスクは pm_add_task / pm_update_task、判断は pm_add_decision、調査結果は pm_record、それ以外の知見は pm_remember に書き、過去の知見は pm_recall を先に引く。
+- ユーザー本人の好みや作業の進め方へのフィードバック（どのプロジェクトにも当てはまるもの）、ビルドコマンドや環境の癖は、ホスト側の記憶機能に保存してよい。
 
-### 記憶の二重化を避ける（pm_remember と Claude Code auto memory の役割分担）
-Claude Code には pm-server とは独立した「auto memory」(~/.claude/projects/<repo>/memory/) がある。
-両者は互いを参照しない別ストアのため、同じ知識を両方へ書くと内容が分岐（drift）し、
-片方のクエリからもう一方が見えなくなる（split-brain）。役割を固定すること:
-1. プロジェクト知識（タスク・判断・教訓・設計・進捗）は pm_remember を正（SSoT）として保存する
-2. auto memory には harness/ツール固有のメモ（build コマンド、環境の癖等）のみ委ねる
-3. 同一の知識を pm_remember と auto memory の両方へ二重書き込みしない
-4. 過去の知見を想起する時は pm_recall を一次情報源とする（auto memory は補助）
-
-### タスク完了時（コードが動作確認できたら）
-1. pm_update_task で done に変更する
-2. all_issues_resolved フラグが返された場合、親タスクの完了もユーザーに提案する
-3. pm_log に完了内容を記録する
-4. 次の推薦タスクを pm_next で表示する
-5. アトミックコミットを作成する
+### タスク完了時（動作確認ができたら）
+1. pm_update_task で done にする。all_issues_resolved が返ったら、親タスクの完了をユーザーに提案する。
+2. pm_log に完了内容を記録する。このセッションのツール結果で裏付けられることだけを完了として書き、裏付けの無い項目は確認していないと明記する。
+3. pm_next で次の推薦タスクを示す。
+4. コミットは、ユーザーの依頼か、ユーザーが始めたワークフローの手順に含まれる時だけ行う。コミットに含めるのは自分が加えた差分だけで、作業前からあった変更やステージ済みの変更が混ざる時は、コミットの前にユーザーに確認する。依頼が無い時は、コミットできる状態になったことを報告に添える。
 
 ### タスク完了確認中にイシュー（課題）が見つかった時
-1. 「欠陥（defect）」か「将来改善（enhancement）」かを判断し、適切なツールを選択する:
-   - **欠陥**: pm_add_issue(..., severity="defect") を使う（既定）
-     - phase は親タスクから自動継承される
-     - 親タスクが done だった場合、自動で review に戻される（warnings[] で通知される）
-   - **将来改善・親に紐付く提案**: pm_add_issue(..., severity="enhancement") を使う
-     - 親の status は変更されない
-   - **独立したバックログ項目**: pm_add_task を使う（親子関係は不要）
-2. 欠陥イシューを解消したら pm_update_task で done に変更する
-3. 全イシューが解消されると all_issues_resolved フラグが返される
-4. 親タスクの完了をユーザーに提案する
+1. 欠陥（defect）か将来改善（enhancement）かを判断してツールを選ぶ:
+   - 欠陥: pm_add_issue(..., severity="defect")（既定）。phase は親から継承され、親が done なら自動で review に戻る（warnings[] で通知される）
+   - 親に紐付く改善提案: pm_add_issue(..., severity="enhancement")。親の status は変わらない
+   - 独立したバックログ項目: pm_add_task
+2. 欠陥イシューを解消したら pm_update_task で done にする。全イシューが解消されると all_issues_resolved が返るので、親タスクの完了をユーザーに提案する。
 
 ### MCP ツールのレスポンスに warnings[] が含まれる場合
-pm-server のツールは副作用（例: 親タスクの自動 revert）を warnings[] で返す。
-サイレントに進めると「バグっぽく見える」ため、必ずユーザーに明示的に伝えること。
-1. warnings[] の各エントリを日本語で要約してユーザーに明示する（要約に埋めない）
-2. warnings[].remediation があれば、その対応を次の選択肢としてユーザーに提示する
-3. 警告を拾い損ねたまま次の話題へ進まない
+pmlens のツールは副作用や環境の問題を warnings[] で返す。黙って進めるとユーザーには不具合に見えるので、ユーザーの言語で、他の説明に埋もれさせずに伝える。
+- 状態が変わったことを知らせるもの（親タスクの自動 revert、記憶や要約の削除・取り込みなど）は毎回伝え、remediation があれば次の選択肢として示す。
+- 環境診断（ルールファイルの版や重複、ホスト検出など pm_status が毎回返すもの）は、セッションで一度簡潔に伝えれば足りる。
+- remediation はユーザーに示す選択肢で、代わりに実行する指示ではない。force=true での再実行、削除、ルールファイルの書き換え、サーバーの再起動などは、ユーザーが選んだ時に行う。
 
 ### 設計上の意思決定が発生した時
-1. ユーザーに「ADRとして記録しますか？」と確認する
-2. 承認されたら pm_add_decision で保存する
+後から「なぜこうしたか」を問われうる判断（アーキテクチャ、公開インターフェース、データ形式、依存関係、セキュリティ・運用方針、既存 ADR の変更など）が確定したら、ADR として記録するかを、その回の報告の最後にまとめてユーザーに確認し、承認されたら pm_add_decision で保存する。命名や同等な実装の選択のような小さな判断は候補にしない。ユーザーから記録を頼まれた時や、ワークフローの記録ステップでは確認しなくてよい。返事を待つ間も、依頼済みの実装や検証は止めない。
 
 ### ワークフロー管理
-ワークフローはpm-serverの構造化された開発プロセスである。
-テンプレートベースのステートマシンで、ステップごとにガイダンスを提供する。
+ワークフローは pm-server のテンプレートベースのステートマシンで、ステップごとにガイダンスを返す。
+- 開始: ユーザーがワークフローでの進行を求めた時に、pm_workflow_templates で確認して pm_workflow_start で開始する（discovery: 調査・ブレスト、development: 実装）。複数のセッションにまたがる大きな開発・調査では、最初に一度だけ提案してよい。それ以外の依頼には提案しない。
+- 各ステップの tool_hint / skill_hint / agent_hint は目安なので、作業の規模に合わないものや今のホストで使えないものは省いてよい。gate（user_approval）と、redact（pm_redact_draft）のような安全に関わる手順は省かない。
+- 進行: ステップの作業が済んだら pm_workflow_advance で進め、artifacts（ADR ID、タスクID等）を記録する。gate（user_approval）はエンジンが強制しないので、ユーザーの承認を待ってから進む。loop ステップは proceed=false でループバック、proceed=true で終了する。pm_workflow_status で進捗を確認できる。
+- 完了: chain_to があれば（例: discovery → development）次のワークフローの開始を提案し、完了を pm_log に記録する。
 
-#### ワークフロー開始時
-1. ユーザーが機能開発やリサーチを始める時、pm_workflow_templates で利用可能なテンプレートを確認する
-2. pm_workflow_start でワークフローを開始する（discovery: 調査・ブレスト、development: 実装）
-3. 最初のステップのガイダンス（tool_hint, skill_hint, agent_hint）に従って作業を進める
+### コンテンツパイプライン（.pm の知見 → 公開用下書き）
+pm-server は公開先の認証情報も送信機能も持たないので、pm-server からの自動公開は構造的に不可能で、redact が唯一の安全層になる。下書きを作るところまでがこのパイプラインの責務で、出力先は問わない。
+1. トリガ（質>頻度）: type が lesson / insight の pm_remember、採択された ADR、severity=defect のイシューのうち、内部文脈なしで読者に伝わり未公開の計画に結びつかないものを記録した時だけ、下書きの作成を一度提案してよい（propose-don't-force: 強制しない）。ユーザーが乗ったら pm_workflow_start で content-pipeline ワークフローを開始し、その手順に従う。
+2. 下書きは人に見せる前に必ず pm_redact_draft(draft_id) で redact する（1回の呼び出しで全セグメントが処理される）。redact 済みの本文は pm_drafts_pending（このセッションに無ければ pm_x_drafts_pending）で取り出し、シークレットや個人情報が残っていないか確かめる。/secret-scan・/privacy-check のようなスキャン用コマンドがあれば使い、無ければ追加のスキャンをしていないことをユーザーに伝える。
+3. 公開の判断と操作はユーザーがこのシステムの外で行う。求められても、モデルから下書きを投稿・送信しない。redact 済みで人間が確認した下書きをユーザーに渡し、手作業での公開を促す（redact は機械的な一次フィルタで、公開の可否は人間が判断するため）。
+4. raw_content（redact 前の原文）はシークレットや個人情報を含みうるので、下書き作成ツールへの入力以外では表示せず、他のツールにも渡さない。
 
-#### ワークフロー進行中
-1. 各ステップの作業が完了したら pm_workflow_advance で次へ進む
-2. artifacts（ADR ID、タスクID等）があれば artifacts パラメータで記録する
-3. gate（user_approval）のあるステップでは、ユーザーの承認を待ってから進む
-4. loop ステップでは proceed=false でループバック、proceed=true でループ終了
-5. pm_workflow_status でいつでも進捗を確認できる
-
-#### ワークフロー完了時
-1. chain_to がある場合（例: discovery → development）、次のワークフロー開始を提案する
-2. ワークフロー完了を pm_log に記録する
-
-### コンテンツパイプライン（.pm の知見 → 公開用下書き、ADR-024）
-公開価値のある知見を記録した時、下書きの作成をユーザーに提案できる（強制しない）。
-pm-server は公開先の認証情報も送信機能も持たず、自動公開は構造的に不可能。redact が唯一の安全層。
-出力先（ブログ・社内共有・SNS 等）は問わず、下書きを作るところまでが本パイプラインの責務。
-1. トリガ（質>頻度）: 次を記録した時のみ提案を検討する — pm_remember の type が lesson か insight、
-   採択された pm_add_decision（ADR）、severity=defect の pm_add_issue。observation・enhancement・
-   ルーチンな進捗は対象外。かつ内部文脈なしで読者に伝わる自己完結した知見に限る（未公開計画に結合した
-   ものは除外）。
-2. propose-don't-force: 提案を強制しない。ユーザーが乗ったら pm_workflow_start で content-pipeline
-   ワークフローを開始する。
-3. 必ず pm_redact_draft で redact してから（hook + 各 body セグメントを個別に）、/secret-scan と
-   /privacy-check で Layer-2 確認。redact 済み下書きは pm_x_drafts_pending で確認する。
-4. 公開はユーザーがシステム外で手動で行う。pm-server から公開・送信してはならない。
-5. トリガもレビューも規約であり強制ではない（workflow gate は助言）。唯一の構造的保証は
-   「ネットワーク/認証情報がスコープ外」であること。raw_content（原液）は決して表に出さない。
-
-### コーディングセッション終了時
-1. 進行中のタスクの状態を確認し、必要に応じて更新する
-2. pm_log にセッションの成果を記録する
-3. pm_session_summary で要約を保存する
-4. 未コミットの変更があればコミットする
+### 作業の区切りとセッションの終了
+/clear の直前にモデルのターンは来ないので、終了の合図を待たずに、タスク完了や議論の結論などの区切りと、ユーザーが作業の終了を告げた時に次を行う。
+1. 進行中タスクの状態を必要なら更新する。
+2. タスク完了以外の区切り（調査の結論、ブロッカーの発見、設計判断）は、pm_log に category=milestone / blocker / decision で1件記録する（タスク完了時に記録済みなら不要）。
+3. pm_session_summary に要約（summary と pending）を保存する。要約は pmlens サーバーへの接続ごとに1件で、保存のたびに上書きされ、/clear の後も接続が続くことがある。pm_recall が返した前回の要約の session_id が current_session_id と同じなら、その未完了の項目も引き継いで書く。完了として書くのは、ツール結果で裏付けられることだけ。
+4. 未コミットの変更があれば、有無と概略をユーザーに伝える（コミットするかはユーザーが決める）。
 <!-- pm-server:end -->"""
 
 
@@ -200,11 +171,16 @@ def get_claudemd_status(project_root: Path) -> dict:
     if not claude_md.exists():
         return result
 
-    content = claude_md.read_text(encoding="utf-8")
-    match = BEGIN_PATTERN.search(content)
-    if match:
+    try:
+        content = claude_md.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return result
+    versions = _section_versions(content)
+    if versions:
         result["has_pm_section"] = True
-        result["version"] = int(match.group(1))
+        # With several sections the newest one decides (ADR-055): comparing
+        # the first one alone let an older build rewrite around a newer copy.
+        result["version"] = max(versions)
         result["up_to_date"] = result["version"] >= TEMPLATE_VERSION
 
     # Detect other MCP rule sections (any <!-- name:begin --> marker except pm-server)
@@ -242,19 +218,20 @@ def ensure_claudemd(project_root: Path) -> str:
     Returns:
         Status message describing what was done.
     """
+    guard_not_home_root(project_root)
     status = get_claudemd_status(project_root)
     claude_md = project_root / "CLAUDE.md"
     template = _render_template()
 
     if not status["exists"]:
-        claude_md.write_text(template + "\n", encoding="utf-8")
+        _atomic_write_text(claude_md, template + "\n")
         return "created CLAUDE.md with PM Lens rules"
 
     content = claude_md.read_text(encoding="utf-8")
 
     if not status["has_pm_section"]:
         separator = _separator_for(content)
-        claude_md.write_text(content + separator + template + "\n", encoding="utf-8")
+        _write_rule_file(claude_md, content + separator + template + "\n")
         return "appended PM Lens rules to CLAUDE.md"
 
     if status["up_to_date"]:
@@ -264,57 +241,131 @@ def ensure_claudemd(project_root: Path) -> str:
     return _replace_pm_section(claude_md, content, template)
 
 
-def update_claudemd(project_root: Path) -> str:
+def update_claudemd(project_root: Path, *, force: bool = False) -> str:
     """Update the PM Lens rules section to the latest template.
 
-    Called from the pm_update_claudemd MCP tool. Unlike ensure_claudemd,
-    this always replaces regardless of version.
+    Called by the deprecated ``update-claudemd`` CLI. Unlike ensure_claudemd,
+    this rewrites a section of the same or an older version, but — like
+    :func:`inject_pm_rules` — it leaves a section NEWER than this build's
+    template alone unless ``force`` is set (ADR-055).
 
     Returns:
         Status message describing what was done.
     """
+    guard_not_home_root(project_root)
     status = get_claudemd_status(project_root)
     claude_md = project_root / "CLAUDE.md"
     template = _render_template()
 
     if not status["exists"]:
-        claude_md.write_text(template + "\n", encoding="utf-8")
+        _atomic_write_text(claude_md, template + "\n")
         return "created CLAUDE.md with PM Lens rules"
 
     content = claude_md.read_text(encoding="utf-8")
 
     if not status["has_pm_section"]:
         separator = _separator_for(content)
-        claude_md.write_text(content + separator + template + "\n", encoding="utf-8")
+        _write_rule_file(claude_md, content + separator + template + "\n")
         return "appended PM Lens rules to CLAUDE.md"
+
+    if status["version"] > TEMPLATE_VERSION and not force:
+        return _downgrade_refusal_message("CLAUDE.md", status["version"]) + " (skipped)"
 
     return _replace_pm_section(claude_md, content, template)
 
 
+def _downgrade_refusal_message(target_file: str, version: int) -> str:
+    """Explain why a section newer than this build's template was left alone."""
+    return (
+        f"PM Lens rules in {target_file} are v{version}, newer than this pmlens "
+        f"(template v{TEMPLATE_VERSION}); left unchanged. Upgrade pmlens, or rewrite "
+        f"them with v{TEMPLATE_VERSION} on purpose via pm_update_rules(force=True) / "
+        "`pmlens update-rules --force`"
+    )
+
+
+def _pm_sections(content: str) -> list[tuple[re.Match, re.Match | None]]:
+    """Every PM Lens section in ``content`` as ``(begin, end-or-None)`` pairs.
+
+    An end marker is only looked for after its own begin marker (and before
+    the next one), so an end-marker line written earlier in the file can never
+    pair with a later section.
+    """
+    begins = list(BEGIN_PATTERN.finditer(content))
+    sections: list[tuple[re.Match, re.Match | None]] = []
+    for i, begin in enumerate(begins):
+        limit = begins[i + 1].start() if i + 1 < len(begins) else len(content)
+        sections.append((begin, END_PATTERN.search(content, begin.end(), limit)))
+    return sections
+
+
+def _section_versions(content: str) -> list[int]:
+    """Versions of every PM Lens section in ``content``, in file order."""
+    return [int(begin.group(1)) for begin, _ in _pm_sections(content)]
+
+
+def _multiple_sections_message(target_file: str, versions: list[int]) -> str:
+    listing = ", ".join(f"v{v}" for v in versions)
+    return (
+        f"{target_file} contains {len(versions)} PM Lens sections ({listing}); left "
+        "unchanged. Keep one section and delete the others by hand, then update it"
+    )
+
+
+def _marker_start(content: str, match: re.Match) -> int:
+    """Offset of the ``<!--`` that opens ``match``'s marker (after any BOM or
+    indentation, which stay in the text before the section)."""
+    return content.index("<!--", match.start())
+
+
+def _section_bounds(content: str, begin: re.Match, end: re.Match) -> tuple[str, str]:
+    """Return the text before ``begin`` and after the end marker itself.
+
+    Both slices keep everything that is not the marker — a leading BOM, and
+    whatever follows the end marker on its line — so an unchanged section still
+    compares equal byte for byte.
+    """
+    marker_end = content.index(END_MARKER, end.start()) + len(END_MARKER)
+    return content[: _marker_start(content, begin)], content[marker_end:]
+
+
+def _write_rule_file(path: Path, content: str) -> None:
+    """Back up an existing rule file, then replace it atomically.
+
+    Every writer goes through here or through ``_inject_into_file`` so the
+    README's "backed up before each write" holds for pm_init and the legacy
+    update-claudemd path too (ADR-055).
+    """
+    target = path.resolve(strict=False) if path.is_symlink() else path
+    if target.exists():
+        _timestamped_backup(target)
+    _atomic_write_text(target, content)
+
+
 def _replace_pm_section(claude_md: Path, content: str, template: str) -> str:
     """Replace the marker-delimited PM section with new template."""
-    begin_match = BEGIN_PATTERN.search(content)
-    end_idx = content.find(END_MARKER)
+    sections = _pm_sections(content)
+    if len(sections) > 1:
+        versions = [int(begin.group(1)) for begin, _ in sections]
+        return _multiple_sections_message("CLAUDE.md", versions) + " (skipped)"
+    begin_match, end_match = sections[0] if sections else (None, None)
 
-    if begin_match and end_idx != -1:
+    if begin_match and end_match:
         # Normal: replace between begin and end markers
-        before = content[: begin_match.start()]
-        after = content[end_idx + len(END_MARKER) :]
-        new_content = before + template + after
-        claude_md.write_text(new_content, encoding="utf-8")
+        before, after = _section_bounds(content, begin_match, end_match)
+        _write_rule_file(claude_md, before + template + after)
         old_version = int(begin_match.group(1))
         return f"updated PM Lens rules in CLAUDE.md (v{old_version} → v{TEMPLATE_VERSION})"
 
-    if begin_match and end_idx == -1:
+    if begin_match:
         # Corrupted: begin marker exists but no end marker — remove begin and everything after it
-        before = content[: begin_match.start()]
-        new_content = before.rstrip() + "\n\n" + template + "\n"
-        claude_md.write_text(new_content, encoding="utf-8")
+        before = content[: _marker_start(content, begin_match)]
+        _write_rule_file(claude_md, before.rstrip() + "\n\n" + template + "\n")
         return "replaced corrupted PM Lens section in CLAUDE.md"
 
     # No markers at all — fallback to append
     separator = _separator_for(content)
-    claude_md.write_text(content + separator + template + "\n", encoding="utf-8")
+    _write_rule_file(claude_md, content + separator + template + "\n")
     return "appended PM Lens rules to CLAUDE.md (no markers found)"
 
 
@@ -340,12 +391,12 @@ def _scan_rule_file(path: Path) -> dict:
         return result
     try:
         content = path.read_text(encoding="utf-8")
-    except OSError:  # pragma: no cover — defensive FS guard (PMSERV-059)
+    except (OSError, UnicodeDecodeError):
         return result
-    match = BEGIN_PATTERN.search(content)
-    if match:
+    versions = _section_versions(content)
+    if versions:
         result["has_pm_section"] = True
-        result["version"] = int(match.group(1))
+        result["version"] = max(versions)
         result["up_to_date"] = result["version"] >= TEMPLATE_VERSION
     all_sections = OTHER_SECTION_PATTERN.findall(content)
     result["other_rule_sections"] = [s for s in all_sections if s != "pm-server"]
@@ -384,7 +435,10 @@ def _has_pm_marker(path: Path) -> bool:
         return False
     try:
         content = path.read_text(encoding="utf-8")
-    except OSError:  # pragma: no cover — defensive FS guard (PMSERV-059)
+    except (OSError, UnicodeDecodeError):
+        # An unreadable or non-UTF-8 file is not a pm-managed one; raising here
+        # would abort a whole `update-rules --all` run from outside the
+        # per-file failure guard.
         return False
     return bool(BEGIN_PATTERN.search(content))
 
@@ -467,12 +521,15 @@ def duplicate_rule_file_warning(project_root: Path) -> dict | None:
     if not doubling:
         return None
 
+    claude_version = _scan_rule_file(project_root / "CLAUDE.md")["version"]
     affected = [
         spec
         for spec in doubling
         if spec.rule_file != "CLAUDE.md"
-        and _has_pm_marker(project_root / spec.rule_file)
-        and _has_pm_marker(project_root / "CLAUDE.md")
+        and claude_version is not None
+        # Different versions are not a harmless duplicate but a conflict;
+        # rules_version_warnings reports that as rule_file_version_mismatch.
+        and _scan_rule_file(project_root / spec.rule_file)["version"] == claude_version
     ]
     if not affected:
         return None
@@ -489,10 +546,293 @@ def duplicate_rule_file_warning(project_root: Path) -> dict | None:
             "file, so removing one is not the fix."
         ),
         "remediation": (
-            "Harmless but wasteful. To avoid it in a repo used ONLY with "
-            f"{names}, keep AGENTS.md and drop the CLAUDE.md PM section "
-            "(pm_update_rules(target='codex') writes AGENTS.md alone)."
+            "Harmless but wasteful, since both copies are the same version. To drop "
+            f"the duplicate in a repo used only with {names}, remove the PM Lens "
+            "section from CLAUDE.md by hand; pm_update_rules(target='codex') keeps "
+            "AGENTS.md current."
         ),
+    }
+
+
+#: The first template version that stops telling the model to commit on its
+#: own (ADR-054). Named in the rules_outdated warning so the user can see why
+#: an old section is worth replacing.
+_FIRST_VERSION_WITHOUT_AUTO_COMMIT = 15
+
+
+def pm_section_versions(project_root: Path) -> dict[str, int]:
+    """Map each rule file that carries a PM Lens section to its version.
+
+    Ordered by the host registry (CLAUDE.md first), one entry per file. A
+    file with several sections reports the newest one.
+    """
+    versions: dict[str, int] = {}
+    for rule_file in dict.fromkeys(TARGET_FILES.values()):
+        status = _scan_rule_file(project_root / rule_file)
+        if status["has_pm_section"]:
+            versions[rule_file] = status["version"]
+    return versions
+
+
+def _file_section_versions(path: Path) -> list[int]:
+    """Versions of every PM Lens section in ``path`` ([] if unreadable)."""
+    try:
+        return _section_versions(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError):
+        return []
+
+
+def rules_newer_than_server_warning(files: dict[str, int]) -> dict:
+    """Build the warning for sections newer than this build's template.
+
+    Shared by ``pm_status`` (detection) and ``pm_update_rules`` (a refused
+    downgrade) so both say the same thing.
+    """
+    listing = ", ".join(f"{name} (v{version})" for name, version in files.items())
+    return {
+        "code": "rules_newer_than_server",
+        "message": (
+            f"The PM Lens section in {listing} is newer than the template this "
+            f"pmlens ships (v{TEMPLATE_VERSION}), so this MCP server is older than "
+            "the pmlens that last wrote the file. The section is left as it is: "
+            "pm_update_rules skips it instead of downgrading it."
+        ),
+        "remediation": (
+            "Upgrade the pmlens this host runs (for example `pipx upgrade pmlens`, "
+            "or raise the plugin's pinned version) so the server and the rule "
+            "files agree."
+        ),
+    }
+
+
+def rules_version_warnings(project_root: Path) -> list[dict]:
+    """Report PM Lens sections that disagree with this build or each other.
+
+    Three conditions, each a ``warnings[]``-shaped dict (ADR-055):
+
+    * ``rules_outdated`` — a section older than :data:`TEMPLATE_VERSION`.
+      Deployed sections are only rewritten on request, so without this the
+      older guidance stays in the project indefinitely.
+    * ``rules_newer_than_server`` — a section newer than this build: another,
+      newer pmlens wrote it, and this server would downgrade it if asked to
+      rewrite it (it now refuses to).
+    * ``rule_file_version_mismatch`` — CLAUDE.md and AGENTS.md carry
+      different versions, so hosts that read both get two rule sets.
+
+    Read-only (``_scan_rule_file`` per file), so it is legal on the
+    ``pm_status`` read path (ADR-028).
+    """
+    versions = pm_section_versions(project_root)
+    warnings: list[dict] = []
+
+    for rule_file in dict.fromkeys(TARGET_FILES.values()):
+        found = _file_section_versions(project_root / rule_file)
+        if len(found) > 1:
+            listing = ", ".join(f"v{v}" for v in found)
+            warnings.append(
+                {
+                    "code": "multiple_pm_sections",
+                    "message": (
+                        f"{rule_file} contains {len(found)} PM Lens sections ({listing}). "
+                        "The model reads all of them, and pm_update_rules leaves the file "
+                        "unchanged until only one is left."
+                    ),
+                    "remediation": (
+                        "Keep one PM Lens section (normally the newest) and delete the "
+                        "others by hand; pm_update_rules(target='existing') can then bring "
+                        "it up to date."
+                    ),
+                }
+            )
+
+    outdated = {name: v for name, v in versions.items() if v < TEMPLATE_VERSION}
+    if outdated:
+        listing = ", ".join(f"{name} (v{v})" for name, v in outdated.items())
+        reason = ""
+        if (
+            min(outdated.values()) < _FIRST_VERSION_WITHOUT_AUTO_COMMIT
+            and TEMPLATE_VERSION >= _FIRST_VERSION_WITHOUT_AUTO_COMMIT
+        ):
+            reason = (
+                f" Sections before v{_FIRST_VERSION_WITHOUT_AUTO_COMMIT} tell the "
+                "model to commit without being asked."
+            )
+        warnings.append(
+            {
+                "code": "rules_outdated",
+                "message": (
+                    f"The PM Lens section in {listing} is older than the template "
+                    f"this pmlens ships (v{TEMPLATE_VERSION}).{reason}"
+                ),
+                "remediation": (
+                    "With the user's agreement, run pm_update_rules(target='existing') "
+                    "from a full-mode pmlens host to rewrite only the files that "
+                    "already carry the section (a timestamped backup is kept). The "
+                    "files may be committed and shared, so the user should review "
+                    "the diff."
+                ),
+            }
+        )
+
+    newer = {name: v for name, v in versions.items() if v > TEMPLATE_VERSION}
+    if newer:
+        warnings.append(rules_newer_than_server_warning(newer))
+
+    if len(set(versions.values())) > 1:
+        listing = " and ".join(f"{name} v{v}" for name, v in versions.items())
+        readers = ", ".join(HOSTS[h].display_name for h in hosts_reading_both_rule_files())
+        warnings.append(
+            {
+                "code": "rule_file_version_mismatch",
+                "message": (
+                    f"This project carries PM Lens rules {listing}. Hosts that read "
+                    f"both files ({readers}) receive two different rule sets and may "
+                    "follow either one."
+                ),
+                "remediation": (
+                    "Run pm_update_rules(target='existing') from the newest pmlens on "
+                    "this machine so both files carry the same version."
+                ),
+            }
+        )
+
+    return warnings
+
+
+def _forbidden_root_kind(project_root: Path) -> str | None:
+    """Classify ``project_root`` as ``"the filesystem root"``, ``"the home
+    directory"`` or ``None`` (an ordinary directory).
+
+    Both are ancestors of every project on the machine, so a rule file there
+    is loaded into every Claude Code session. Home resolution failures
+    (``RuntimeError`` from ``Path.home()`` when ``$HOME`` is unset and the
+    passwd lookup fails) fall through to ``None`` — the guard cannot decide,
+    and blocking every project write in such an environment would be a worse
+    regression than the one it prevents.
+    """
+    try:
+        resolved = project_root.resolve()
+    except (OSError, RuntimeError):  # pragma: no cover — defensive FS guard
+        return None
+    if resolved == Path(resolved.anchor):
+        return "the filesystem root"
+    try:
+        if resolved == Path.home().resolve():
+            return "the home directory"
+    except (OSError, RuntimeError):  # pragma: no cover — no resolvable home
+        return None
+    return None
+
+
+def _is_home_root(project_root: Path) -> bool:
+    """Return True iff ``project_root`` resolves to the user's home directory."""
+    return _forbidden_root_kind(project_root) == "the home directory"
+
+
+def guard_not_home_root(project_root: Path) -> None:
+    """Refuse to manage PM rule files directly under ``$HOME`` or ``/`` (ADR-053).
+
+    Claude Code concatenates every ``CLAUDE.md`` between the filesystem root
+    and the working directory at launch, so a ``$HOME/CLAUDE.md`` is injected
+    into EVERY session on the machine — the opposite of pmlens's per-project
+    model, and a guaranteed duplicate (often at a stale template version) for
+    any project that already carries the section. ``pm_init`` reaches the
+    writers with ``Path.cwd()`` when an MCP host runs with ``cwd=$HOME``
+    (Claude Desktop does), which is exactly how the 2026-09-17 audit found a
+    v11 section sitting in the user's home directory. A host running with
+    ``cwd=/`` would do the same one level higher, so the filesystem root is
+    refused too.
+
+    Raises:
+        PmServerError: when ``project_root`` is the home directory or ``/``.
+    """
+    kind = _forbidden_root_kind(project_root)
+    if kind is not None:
+        raise PmServerError(
+            f"refusing to write PM Lens rules into {project_root / 'CLAUDE.md'}: "
+            f"{kind} is an ancestor of every project, so Claude Code "
+            "would load these rules into every session on this machine. Run "
+            "from a project directory or pass project_path explicitly (ADR-053)."
+        )
+
+
+def ancestor_rules_warning(project_root: Path) -> dict | None:
+    """Warn when an ANCESTOR directory's ``CLAUDE.md`` also carries the PM
+    section (ADR-053).
+
+    Claude Code loads ``CLAUDE.md`` from every directory above the working
+    directory, so the project's own section and the ancestor's both land in
+    context — usually at different template versions — and the official docs
+    state Claude picks arbitrarily between conflicting instructions. pmlens
+    never manages ancestor files, so this is reported, not fixed.
+
+    Claude Code walks the *logical* working directory (the path as typed,
+    symlinks intact), so both the logical ancestry and the resolved ancestry
+    are scanned and de-duplicated by real file; ``CLAUDE.local.md`` is
+    included because Claude Code loads it beside ``CLAUDE.md``.
+
+    Read-only (``Path.is_file`` + ``read_text`` per ancestor, no subprocess),
+    which keeps it legal on the ``pm_status`` read path (ADR-028).
+
+    Returns:
+        A ``warnings[]``-shaped dict (with an extra ``files`` list of the
+        offending paths, resolved), or ``None`` when no ancestor carries the
+        marker.
+    """
+    bases: list[Path] = [project_root if project_root.is_absolute() else Path.cwd() / project_root]
+    try:
+        resolved_root = project_root.resolve()
+    except (OSError, RuntimeError):  # pragma: no cover — defensive FS guard
+        resolved_root = None
+    if resolved_root is not None and resolved_root != bases[0]:
+        bases.append(resolved_root)
+
+    seen: set[Path] = set()
+    hits: list[tuple[Path, int]] = []
+    for base in bases:
+        for parent in base.parents:
+            for name in ("CLAUDE.md", "CLAUDE.local.md"):
+                candidate = parent / name
+                if not candidate.is_file():
+                    continue
+                try:
+                    real = candidate.resolve()
+                except (OSError, RuntimeError):  # pragma: no cover — defensive FS guard
+                    real = candidate
+                if real in seen:
+                    continue
+                seen.add(real)
+                try:
+                    content = real.read_text(encoding="utf-8")
+                except OSError:  # pragma: no cover — defensive FS guard
+                    continue
+                match = BEGIN_PATTERN.search(content)
+                if match:
+                    hits.append((real, int(match.group(1))))
+
+    if not hits:
+        return None
+    hits.sort(key=lambda item: str(item[0]))
+
+    listing = ", ".join(f"{path} (v{version})" for path, version in hits)
+    own_version = _scan_rule_file(project_root / "CLAUDE.md")["version"]
+    own = f"this project's own section (v{own_version})" if own_version else "this project's rules"
+    return {
+        "code": "pm_rules_in_ancestor_claudemd",
+        "message": (
+            "Claude Code loads every CLAUDE.md between the filesystem root and "
+            "the working directory, and an ancestor of this project already "
+            f"carries the PM Lens section: {listing}. Those rules are injected "
+            f"alongside {own}, so Claude sees the rules twice and, when the "
+            "versions differ, may follow either copy."
+        ),
+        "remediation": (
+            "Remove the PM Lens section from the ancestor file (pmlens does not "
+            "manage files outside the project root), or exclude it for this "
+            "machine with the Claude Code `claudeMdExcludes` setting. Never run "
+            "pm_init / pm_update_rules from $HOME."
+        ),
+        "files": [str(path) for path, _ in hits],
     }
 
 
@@ -541,6 +881,11 @@ class InjectResult:
             symmetrised the former v0.5.0 CLAUDE.md no-backup behaviour).
             ``None`` for newly created files and dry runs.
         is_dry_run: True if no on-disk side effects occurred.
+        refused_downgrade: True when the file's section is newer than this
+            build's template and was left alone (status ``"skipped"``;
+            ADR-055). Callers surface ``rules_newer_than_server``.
+        section_version: The version of the section that was refused, as
+            read at that moment (so callers need not re-read the file).
     """
 
     target_file: str
@@ -550,6 +895,8 @@ class InjectResult:
     backup_path: Path | None = None
     is_dry_run: bool = False
     hosts: tuple[str, ...] = ()
+    refused_downgrade: bool = False
+    section_version: int | None = None
 
 
 @dataclass(frozen=True)
@@ -562,7 +909,7 @@ class InjectSummary:
             explicit-target list if ``target != "auto"``). Surfaced for
             UX transparency (PMSERV-044 cross-check R7/E1).
         detection_source: ``"filesystem+marker+env"``, ``"explicit"``,
-            or ``"fallback"``.
+            ``"existing"`` (``target="existing"``), or ``"fallback"``.
         created: Subset of result target files that were newly created.
         updated: Subset of result target files whose existing pm-server
             section was overwritten or appended.
@@ -583,11 +930,15 @@ def _inject_into_file(
     host: str,
     *,
     dry_run: bool = False,
+    force: bool = False,
 ) -> InjectResult:
     """Inject the pm-server marker section into a single rule file.
 
-    Generalises the v0.4.x ``update_claudemd`` "always-replace"
-    semantics to any rule file. A timestamped ``.bak.<timestamp>`` is
+    Rewrites a section of the same or an older version. A section NEWER than
+    this build's template is left alone unless ``force`` is set: several
+    pmlens builds can share a machine (a pipx release and a dev checkout, a
+    pinned plugin), and an older one must not silently downgrade what a newer
+    one wrote (ADR-055). A timestamped ``.bak.<timestamp>`` is
     created before overwriting any *existing* rule file — both
     ``CLAUDE.md`` and ``AGENTS.md`` (PMSERV-058 / ADR-008 amendment A5,
     which retired the v0.5.0 CLAUDE.md no-backup asymmetry). Newly created
@@ -598,9 +949,15 @@ def _inject_into_file(
         * ``"appended"`` — file existed, no pm-server marker found
         * ``"updated"`` — pm-server marker found and rewritten
                            (also for corrupted begin-without-end markers)
+        * ``"skipped"`` — already current, or newer than this build
+                           (``refused_downgrade``)
         * ``"failed"`` — read/write/backup raised an OSError
     """
     target_file = path.name
+    # ADR-053: a rule file in $HOME is an ancestor of every project and would
+    # be loaded into every Claude Code session on the machine. _safe_inject
+    # turns the PmServerError into a "failed" result with this message.
+    guard_not_home_root(path.parent)
     template = _render_template()
 
     # Symlink-safe resolution (cross-check D3): operate on the underlying
@@ -643,13 +1000,35 @@ def _inject_into_file(
             is_dry_run=dry_run,
         )
 
-    begin_match = BEGIN_PATTERN.search(content)
-    end_idx = content.find(END_MARKER)
+    sections = _pm_sections(content)
+    if len(sections) > 1:
+        # Rewriting one of several sections leaves the others (possibly
+        # newer ones) in place; the only safe move is to stop and say so.
+        return InjectResult(
+            target_file=target_file,
+            host=host,
+            status="failed",
+            message=_multiple_sections_message(
+                target_file, [int(begin.group(1)) for begin, _ in sections]
+            ),
+            is_dry_run=dry_run,
+        )
+    begin_match, end_match = sections[0] if sections else (None, None)
+
+    if begin_match and int(begin_match.group(1)) > TEMPLATE_VERSION and not force:
+        return InjectResult(
+            target_file=target_file,
+            host=host,
+            status="skipped",
+            message=_downgrade_refusal_message(target_file, int(begin_match.group(1))),
+            is_dry_run=dry_run,
+            refused_downgrade=True,
+            section_version=int(begin_match.group(1)),
+        )
 
     # Compute new content + status + message
-    if begin_match and end_idx != -1:
-        before = content[: begin_match.start()]
-        after = content[end_idx + len(END_MARKER) :]
+    if begin_match and end_match:
+        before, after = _section_bounds(content, begin_match, end_match)
         new_content = before + template + after
         old_version = int(begin_match.group(1))
         if new_content == content:
@@ -668,9 +1047,9 @@ def _inject_into_file(
             message = (
                 f"updated PM Lens rules in {target_file} (v{old_version} → v{TEMPLATE_VERSION})"
             )
-    elif begin_match and end_idx == -1:
+    elif begin_match:
         # Corrupted: begin without end — treat as replace-from-corruption
-        before = content[: begin_match.start()]
+        before = content[: _marker_start(content, begin_match)]
         new_content = before.rstrip() + "\n\n" + template + "\n"
         status = "updated"
         message = f"replaced corrupted PM Lens section in {target_file}"
@@ -725,14 +1104,24 @@ def _inject_into_file(
     )
 
 
-def _safe_inject(path: Path, host: str, *, dry_run: bool) -> InjectResult:
+def _safe_inject(path: Path, host: str, *, dry_run: bool, force: bool = False) -> InjectResult:
     """Run ``_inject_into_file`` with a top-level exception guard.
 
     Per-host failures must not abort sibling hosts (ADR-008 design
     principle inherited from ADR-007 case C; cross-check D1).
     """
     try:
-        return _inject_into_file(path, host, dry_run=dry_run)
+        return _inject_into_file(path, host, dry_run=dry_run, force=force)
+    except PmServerError as e:
+        # Deliberate refusal (e.g. the ADR-053 $HOME guard): surface the
+        # reason verbatim instead of the generic "unexpected error" wording.
+        return InjectResult(
+            target_file=TARGET_FILES[host],
+            host=host,
+            status="failed",
+            message=str(e),
+            is_dry_run=dry_run,
+        )
     except Exception as e:  # noqa: BLE001 - intentional broad guard
         return InjectResult(
             target_file=TARGET_FILES[host],
@@ -777,16 +1166,20 @@ def inject_pm_rules(
     *,
     target: str = "auto",
     dry_run: bool = False,
+    force: bool = False,
 ) -> InjectSummary:
     """Inject PM Lens rules into per-host rule files.
 
     Args:
         project_root: Project root directory holding the rule files.
-        target: One of ``TARGET_CHOICES``:
+        target: One of :data:`RULE_TARGET_CHOICES`:
 
             * ``"auto"`` (default) — detect installed hosts via
               ``detect_hosts`` (filesystem + marker + CLAUDECODE).
             * ``"all"`` — process every known host unconditionally.
+            * ``"existing"`` — only the rule files that already carry the
+              pm-server marker. Never creates or appends to a file, which
+              makes it the safe choice for bulk migration (ADR-055).
             * a single host id from :data:`pmlens.hosts.HOSTS` —
               ``"claude-code"`` writes ``CLAUDE.md``; ``"codex"``,
               ``"cursor"`` and ``"grok"`` each write ``AGENTS.md``, which
@@ -795,6 +1188,8 @@ def inject_pm_rules(
         dry_run: When True, no files are written or backed up; results
             still describe what *would* happen and per-result
             ``is_dry_run`` is True.
+        force: Rewrite a section even when it is newer than this build's
+            template (a deliberate downgrade). Off by default (ADR-055).
 
     Returns:
         ``InjectSummary`` with one result per rule FILE, not per host —
@@ -806,12 +1201,10 @@ def inject_pm_rules(
         ``failed > skipped > updated > created``.
 
     Raises:
-        ValueError: If ``target`` is not in ``TARGET_CHOICES``.
+        ValueError: If ``target`` is not in :data:`RULE_TARGET_CHOICES`.
     """
-    from .utils import TARGET_CHOICES
-
-    if target not in TARGET_CHOICES:
-        raise ValueError(f"unknown target: {target!r}. Expected one of {TARGET_CHOICES}.")
+    if target not in RULE_TARGET_CHOICES:
+        raise ValueError(f"unknown target: {target!r}. Expected one of {RULE_TARGET_CHOICES}.")
 
     # Resolve target → list of hosts + detection source
     if target == "auto":
@@ -819,6 +1212,11 @@ def inject_pm_rules(
     elif target == "all":
         hosts = list(TARGET_FILES.keys())
         source = "explicit"
+    elif target == "existing":
+        hosts = [
+            h for h, rule_file in TARGET_FILES.items() if _has_pm_marker(project_root / rule_file)
+        ]
+        source = "existing"
     else:
         hosts = [target]
         source = "explicit"
@@ -837,7 +1235,7 @@ def inject_pm_rules(
     # Per-file injection (best-effort, isolated failures)
     results = [
         replace(
-            _safe_inject(project_root / rule_file, owners[0], dry_run=dry_run),
+            _safe_inject(project_root / rule_file, owners[0], dry_run=dry_run, force=force),
             hosts=tuple(owners),
         )
         for rule_file, owners in file_owners.items()

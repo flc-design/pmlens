@@ -30,7 +30,7 @@ below repeats that number and must move in the same commit.
    | `plugin/.mcp.json` | the `pm-server@X.Y.Z` uvx pin |
    | `plugin/README.md` | three pins: prerequisite, committed pin, floor form |
    | `packaging/pm-server-wrapper/pyproject.toml` | `project.version` **and** the `pmlens>=X.Y.Z` floor (plus the version in its header comments) |
-   | `uv.lock` | run `uv lock` — do **not** hand-edit |
+   | `uv.lock`, `requirements.lock` | run `make lock-sync` — do **not** hand-edit |
    | `docs/cheatsheet.md`, `docs/cheatsheet.ja.md` | the `> Version X.Y.Z \|` header |
    | `docs/architecture.html` | three stamps (header, tool-count caption, footer). **Leave the dates alone** — `Generated` is frozen; `counts refreshed` moves only when counts are actually re-derived |
    | `docs/README.md` | the `architecture.html は vX.Y.Z 時点` clause **only**. The `user-guide / workflow-guide は v0.12.0` clause on the same line is deliberately frozen |
@@ -57,6 +57,30 @@ below repeats that number and must move in the same commit.
    `ruff format --check src/ tests/`. `ci.yml` does not run on tags, so `main`
    being green is the only pre-tag signal you get from CI (the `verify` job
    re-runs both on the tagged commit — see below).
+
+   **Refresh and validate the dependency locks before this release check.**
+   Use Python 3.11+ and uv 0.11.25 (the same exporter as CI):
+
+   ```bash
+   make lock-refresh
+   make lock-check
+   # Review both lockfile changes, then in a fresh disposable environment:
+   pip install --require-hashes -r requirements.lock
+   pip install -e . --no-deps
+   pip check
+   pytest -q
+   ruff check src/ tests/ scripts/lockfiles.py
+   ruff format --check src/ tests/ scripts/lockfiles.py
+   ```
+
+   `uv.lock` owns the resolution and `requirements.lock` is its hashed export.
+   Refresh explicitly upgrades dependencies; if a full upgrade is unsuitable,
+   use `python scripts/lockfiles.py refresh --package NAME` and document the
+   scope in the release change. After any later version/metadata change, run
+   `make lock-sync` again. CI and the tag's `verify` job both run the offline
+   consistency check before publishing. This guard proves agreement with the
+   selected resolution; it does not prove that every upstream version is the
+   newest. See [the dependency workflow](../CONTRIBUTING.md#dependency-lockfiles).
 
 5. **Commit, then tag with an *annotated* tag.** The Release page's title and
    body come from the tag message:

@@ -6,16 +6,17 @@ description: >
   「進捗」「タスク」「ブロッカー」「次にやること」「ダッシュボード」
   「ADR」「意思決定」「PM」「プロジェクト状態」「作業開始」「作業完了」
   「リスク」「ベロシティ」のキーワードで必ずトリガーすること。
-  作業セッション開始時と終了時にも自動的に状態を確認・更新すること。
+  このプロジェクトの作業を始める時と、作業の区切りで状態を確認・更新する。
 ---
 
 # PM Lens Skill (plugin-homed)
 
 > This skill is the **plugin-homed** copy of PM Lens's behavioural rules.
 > The manually-registered MCP setup drives these rules via `CLAUDE.md`, but
-> plugins cannot ship a `CLAUDE.md`. The session-start ritual is additionally
-> injected deterministically by the plugin's `SessionStart` hook; this skill
-> re-states the full rule set so the model can act on it mid-session.
+> plugins cannot ship a `CLAUDE.md`. The plugin's `SessionStart` hook points the
+> model at the project's rule file for the start-of-work routine; this skill
+> re-states the rules (template v15, ADR-054) so the model can act on them
+> mid-session.
 
 ## 概要
 
@@ -35,7 +36,7 @@ PM Lens は Claude Code のプロジェクト管理を自動化する MCP Server
 - `pm_log` — 日次ログ記録
 - `pm_add_decision` — ADR（Architecture Decision Record）追加
 - `pm_remember` / `pm_recall` — セッションを跨ぐ記憶の保存・想起
-- `pm_session_summary` — セッション要約（/clear 前に実行）
+- `pm_session_summary` — セッション要約（作業の区切りで保存。/clear の直前にモデルの手番は来ない）
 
 ### 分析・可視化
 - `pm_velocity` / `pm_risks` / `pm_blockers` — ベロシティ・リスク・ブロッカー
@@ -46,11 +47,13 @@ PM Lens は Claude Code のプロジェクト管理を自動化する MCP Server
 
 ## 自動行動ルール
 
-### セッション開始時（最初の発話の前に）
+### プロジェクトの作業に取りかかる時
 1. `pm_status` でカレントプロジェクトの状態を確認
-2. `pm_next` で推薦タスクを3件提示
-3. `pm_recall` で前回セッションの文脈を取得
-4. ブロッカー・期限超過があれば警告
+2. `pm_recall` で前回セッションの文脈を取得
+3. `pm_next` で依頼に関係する次の候補（最大3件）を数行で示す
+4. ブロッカー・期限超過・warnings があれば短く伝える
+
+PM と無関係な単発の質問だけの時は不要。
 
 ### タスクに取り掛かる前
 1. 該当タスクを `pm_update_task` で `in_progress` に変更
@@ -62,7 +65,7 @@ PM Lens は Claude Code のプロジェクト管理を自動化する MCP Server
 1. `pm_update_task` で `done` に変更
 2. `pm_log` に完了内容を記録
 3. 次の推薦タスクを `pm_next` で提示
-4. アトミックコミットを作成
+4. コミットはユーザーの依頼か、ユーザーが始めたワークフローの手順に含まれる時だけ行い、自分が加えた差分だけを含める（作業前からの変更やステージ済みの変更が混ざる時は、先にユーザーに確認する）
 
 ### 設計上の意思決定が発生した時
 1. `pm_add_decision` で ADR を記録するか確認
