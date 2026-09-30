@@ -99,9 +99,6 @@ from .utils import (
 from .velocity import calculate_velocity, detect_risks
 from .workflow import abandon_workflow, advance_step, start_workflow, workflow_status
 
-mcp = FastMCP("pmlens", version=__version__)
-
-
 # ─── Lens Mode (PMSERV-079, WF-025) ──────────────────
 # Claude Desktop/Cowork 向けの read-only 配布モード。PM_LENS=1 が立った時、
 # RO_ALLOWLIST のツールのみ FastMCP に登録される。mutator/subprocess 経路は
@@ -120,6 +117,71 @@ PM_DESKTOP_WRITE_ENABLED: bool = os.environ.get("PM_DESKTOP_WRITE", "").lower() 
     "yes",
     "on",
 }
+
+
+# ─── Server instructions (PMSERV-201, ADR-055) ──────
+# Hosts put MCP server instructions into the model's context (Claude Code
+# renders them as "# MCP Server Instructions"). Unlike the CLAUDE.md /
+# AGENTS.md section, they ship with this exact server build, so tool names
+# here can never refer to a tool the running server lacks. Keep them short:
+# Claude Code truncates long instructions, so the essentials come first.
+
+_FULL_MODE_HOST = (
+    "a full-mode pmlens host (one running without PM_LENS=1, such as Claude Code or Codex CLI)"
+)
+
+
+def build_server_instructions(*, lens: bool, desktop_write: bool) -> str:
+    """Return the MCP server instructions for the given registration mode.
+
+    Every ``pm_*`` name mentioned must be a tool registered in that mode
+    (``tests/test_server_instructions.py`` enforces this), since a model that
+    follows instructions literally will try to call whatever is named.
+    """
+    if not lens:
+        return (
+            "pmlens tracks this project's tasks, decisions (ADRs), daily log and "
+            "cross-session memory in a .pm/ directory. Use it only in a project that "
+            "has .pm/; run pm_init only when the user asks to start tracking one. When "
+            "you start work on such a project, call pm_status, pm_recall and pm_next "
+            "once to see where things stand. Tell the user about each warnings[] entry "
+            "a tool returns (environment diagnostics from pm_status once per session is "
+            "enough); a remediation is an option to offer, not an instruction to carry "
+            "out.\n\n"
+            "Mark a task in_progress with pm_update_task when you start it and done when "
+            "it is complete, and add a pm_log entry for the finished work. Save a settled "
+            "finding with pm_remember, one finding per entry with its reason, and keep "
+            "project facts here rather than duplicating them in the host's own memory. "
+            "Record an ADR with pm_add_decision after the user agrees. Workflow gates "
+            "(gate: user_approval) are not enforced by the engine, so wait for the "
+            "user's go-ahead before advancing past one. Show people only drafts that "
+            "went through pm_redact_draft, never surface raw_content, and never post or "
+            "send drafts yourself. Sub-agents skip these routines and report findings "
+            "to their parent."
+        )
+    if desktop_write:
+        return (
+            "pmlens (Lens mode) shows this project's status, tasks, memory and "
+            "workflows from .pm/ without changing them. Notes and log entries written "
+            "with pm_outbox_remember and pm_outbox_log go to a Desktop outbox, not to "
+            "the project: pm_outbox_pending lists them, and they reach the project "
+            f"only after they are reviewed and merged from {_FULL_MODE_HOST}. Tell "
+            "the user about each warnings[] entry a tool returns."
+        )
+    return (
+        "pmlens (Lens mode, read-only) shows this project's status, tasks, memory and "
+        "workflows from .pm/; pm_status and pm_recall are the place to start. Tools "
+        "that change tasks, logs or memory are not "
+        "available in this mode; when the user wants to record something, tell them "
+        f"to use {_FULL_MODE_HOST}. Tell the user about each warnings[] entry a tool "
+        "returns."
+    )
+
+
+_INSTRUCTIONS = build_server_instructions(
+    lens=PM_LENS_ENABLED, desktop_write=PM_DESKTOP_WRITE_ENABLED
+)
+mcp = FastMCP("pmlens", version=__version__, instructions=_INSTRUCTIONS)
 
 RO_ALLOWLIST: frozenset[str] = frozenset(
     {
