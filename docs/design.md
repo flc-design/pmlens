@@ -1234,8 +1234,9 @@ v0.4.x 利用者は新形式を観測しないため後方互換が確保され�
   filelock の 5s タイムアウトと統一。`_apply_pragmas()` を `MemoryStore.__init__` /
   `sync_to_global` / `search_global` の 3 接続箇所で呼ぶ。WAL モードは `.db` ヘッダに
   persistent なので既存ファイルは初回接続時に自動マイグレート、データ移行不要
-- **テンプレート version の bump**: `TEMPLATE_VERSION = 7` を変更すると
-  既存ユーザーの CLAUDE.md / AGENTS.md が次回 `pm_status` で自動更新を促される。
+- **テンプレート version の bump**: `TEMPLATE_VERSION` を上げると、既存ユーザーの
+  CLAUDE.md / AGENTS.md について次回 `pm_status` が `rules_outdated` を警告し、
+  ユーザーの同意の上で `pm_update_rules(target='existing')` が更新する (ADR-055)。
   v0.5.0 では v7 据え置きのため、v0.4.x からアップグレードしてもユーザーの
   指示ファイルは破壊されない
 

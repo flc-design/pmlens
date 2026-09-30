@@ -72,11 +72,13 @@ pipx upgrade pmlens
 > （PEP 668、`error: externally-managed-environment`）。virtualenv の中であれば
 > `pip install pmlens` / `pip install -U pmlens` でも同じように動きます。
 
-アップグレード後、各プロジェクトの CLAUDE.md 自動行動ルールは自動的に更新されます:
+アップグレード後、各プロジェクトのルール節はユーザーの同意を得て更新されます:
 
-1. 次のセッション開始時に `pm_status` がテンプレートバージョンの不一致を検出
-2. Claude Code が `pm_update_rules` を実行してルールセクションを更新（CLAUDE.md / AGENTS.md 両対応）
-3. 新機能（子イシューワークフロー等）が即座に有効化
+1. 次のセッション開始時に `pm_status` が `rules_outdated`（または
+   `rule_file_version_mismatch`）の warning を返し、モデルがそれを伝える
+2. ユーザーが同意したら `pm_update_rules(target='existing')` が、既に節のある
+   ファイルだけを書き換える（`.bak.<timestamp>` を残す）
+3. ルールファイルはコミットされていることが多いので、差分を確認してからコミットする
 
 手動で更新することもできます:
 ```
@@ -600,7 +602,7 @@ YAML ファイルは人間が読め、手動編集しても壊れません。メ
 
 - プロジェクトの作業に取りかかる時に `pm_status`・`pm_recall`・`pm_next` で一度
   状況を把握する（無関係な単発の質問では行わない）。
-- 作業に合わせてタスク・日次ログ・記憶を更新し（書き込みは `.pm/` 内に閉じる）、
+- 作業に合わせてタスク・日次ログ・記憶を更新し（コードではなくプロジェクト管理の記録）、
   ツールの `warnings[]` はすべてユーザーに伝える。
 - ADR の記録は確認してから行い、ワークフローの承認ゲートではユーザーを待つ。
 - コミットはユーザーの依頼（またはユーザーが始めたワークフローの手順）がある時
@@ -654,7 +656,7 @@ PM Lens のメモリ層が、セッション間の情報断絶を防ぎます：
 
 ### 自動 Hook（ライフサイクル強制）
 
-PM Lens は初回セッション開始時（`pm_status`）に Claude Code の hook を自動インストールします。`git commit` 後に PostToolUse hook がリマインドを会話に注入し、`pm_log`、`pm_update_task`、`pm_next` の呼び出しを促します。
+PM Lens は初回セッション開始時（`pm_status`）に Claude Code の hook を自動インストールします。進行中のタスクがある PM Lens プロジェクトで `git ... commit` を実行すると、PostToolUse hook が `hookSpecificOutput.additionalContext` としてリマインドを会話に加えます。そのコミットでタスクが完了したなら `pm_update_task` で done にして `pm_log` に記録し、中間コミットなら何も変えないよう促します。
 
 - Hook は `~/.claude/settings.json` にグローバルにインストール
 - 既存のユーザー hook は保全（PM Lens の hook は追記、上書きしない）
@@ -690,7 +692,7 @@ pmlens migrate             # pm-agent からの移行（MCP 登録の切り替�
 pmlens update-rules        # PM Lens ルールを CLAUDE.md / AGENTS.md に注入（ADR-008）。
                            # --target {auto,all,claude-code,codex} (default: auto)
                            # --dry-run / --all (登録された全プロジェクトに適用)
-pmlens update-claudemd     # レガシー alias of `update-rules --target=claude-code`。v0.6.0 以降 deprecated
+pmlens update-claudemd     # レガシー: このプロジェクトの CLAUDE.md のみ（--all は廃止。update-rules --all を使う）。v0.6.0 以降 deprecated
 pmlens install-hooks       # Claude Code の hook を手動インストール（通常は pm_status で自動）
 pmlens uninstall-hooks     # PM Lens の hook を削除
 ```

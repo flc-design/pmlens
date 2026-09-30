@@ -1722,12 +1722,36 @@ def pm_session_summary(
                 project=project.name,
                 branch=branch,
             )
+            # One summary per server connection, and a connection can outlive a
+            # conversation (/clear, a new chat in the same window). Say so when
+            # this save drops pending items the previous save still listed —
+            # otherwise they vanish silently.
+            previous = store.get_summary(_current_session_id)
             summary_id = store.save_session_summary(sess)
+            warnings: list[dict] = []
+            if previous is not None:
+                dropped = [item for item in previous.pending if item not in pending_list]
+                if dropped:
+                    warnings.append(
+                        {
+                            "code": "session_summary_pending_dropped",
+                            "message": (
+                                "This save replaced the summary already stored for this "
+                                "pmlens connection, and these pending items from it are "
+                                f"not in the new one: {', '.join(dropped)}."
+                            ),
+                            "remediation": (
+                                "If any of them is still open, save the summary again "
+                                "with it included in pending."
+                            ),
+                        }
+                    )
             return {
                 "status": "saved",
                 "summary_id": summary_id,
                 "session_id": _current_session_id,
                 "branch": sess.branch,
+                "warnings": warnings,
             }
 
         case "get":
@@ -3516,7 +3540,12 @@ def pm_update_claudemd(project_path: str | None = None) -> dict:
         shape (status, message, template_version, before, after) is
         byte-stable with v0.4.x.
     """
-    from .rules import TEMPLATE_VERSION, get_claudemd_status, inject_pm_rules
+    from .rules import (
+        TEMPLATE_VERSION,
+        get_claudemd_status,
+        inject_pm_rules,
+        rules_newer_than_server_warning,
+    )
 
     root = resolve_project_path(project_path)
     before = get_claudemd_status(root)
@@ -3524,7 +3553,15 @@ def pm_update_claudemd(project_path: str | None = None) -> dict:
     after = get_claudemd_status(root)
 
     # Single-host invocation always yields exactly one result.
-    legacy_message = summary.results[0].message if summary.results else ""
+    result = summary.results[0] if summary.results else None
+    legacy_message = result.message if result else ""
+
+    # A refused downgrade leaves the file unchanged. The legacy "updated"
+    # status below cannot say so, so the refusal travels as a warning (an
+    # added key, which v0.4.x callers ignore) — ADR-055.
+    warnings: list[dict] = []
+    if result is not None and result.refused_downgrade:
+        warnings.append(rules_newer_than_server_warning({"CLAUDE.md": result.section_version}))
 
     # Status field hard-coded to "updated" preserves v0.4.x parity:
     # callers rely on this exact literal regardless of whether the
@@ -3535,6 +3572,7 @@ def pm_update_claudemd(project_path: str | None = None) -> dict:
         "template_version": TEMPLATE_VERSION,
         "before": before,
         "after": after,
+        "warnings": warnings,
     }
 
 
@@ -3576,7 +3614,6 @@ def pm_update_rules(
     from .rules import (
         duplicate_rule_file_warning,
         inject_pm_rules,
-        pm_section_versions,
         rules_newer_than_server_warning,
     )
 
@@ -3598,10 +3635,9 @@ def pm_update_rules(
             }
         )
 
-    refused = [r.target_file for r in summary.results if r.refused_downgrade]
+    refused = {r.target_file: r.section_version for r in summary.results if r.refused_downgrade}
     if refused:
-        versions = pm_section_versions(root)
-        warnings.append(rules_newer_than_server_warning({f: versions[f] for f in refused}))
+        warnings.append(rules_newer_than_server_warning(refused))
 
     duplicate = duplicate_rule_file_warning(root)
     if duplicate is not None:

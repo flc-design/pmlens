@@ -65,7 +65,7 @@ def _print_inject_summary(summary) -> None:
         )
 
     for r in summary.results:
-        prefix = "✗" if r.status == "failed" else "✓"
+        prefix = "✗" if r.status == "failed" else "⚠" if r.refused_downgrade else "✓"
         dry_tag = "[dry-run] " if r.is_dry_run else ""
         click.echo(f"{prefix} {dry_tag}{r.target_file}: {r.message}")
         if r.backup_path:
@@ -395,37 +395,34 @@ def uninstall_hooks_cmd():
 
 
 @cli.command("update-claudemd")
-@click.option("--all", "all_projects", is_flag=True, help="Update all registered projects.")
+@click.option(
+    "--all",
+    "all_projects",
+    is_flag=True,
+    help="Retired; use `pmlens update-rules --all` (plan) and `--apply`.",
+)
 def update_claudemd_cmd(all_projects: bool):
     """Update PM Lens rules in CLAUDE.md.
 
-    Without --all: updates current project only.
-    With --all: updates all registered projects.
+    Updates the current project only. ``--all`` is retired: use
+    ``pmlens update-rules --all``, which shows a plan before writing.
 
     .. deprecated:: 0.6.0
         Backward-compat alias. Prefer ``pm-server update-rules`` which
         supports AGENTS.md (Codex CLI) in addition to CLAUDE.md.
         Output format is byte-stable with v0.4.x for this command.
     """
-    from pathlib import Path
-
     from .claudemd import update_claudemd
 
     if all_projects:
-        from .storage import load_registry
-
-        registry = load_registry()
-        if not registry.projects:
-            click.echo("No registered projects found.")
-            return
-
-        for entry in registry.projects:
-            root = Path(entry.path)
-            if root.exists():
-                result = update_claudemd(root)
-                click.echo(f"  {entry.name}: {result}")
-            else:
-                click.echo(f"  {entry.name}: path not found (skipped)")
+        # Retired (ADR-055): it rewrote — or created — CLAUDE.md in every
+        # registered repository at once, with no plan to review first.
+        click.echo(
+            "update-claudemd --all is retired: it wrote every registered repository "
+            "without a plan. Run `pmlens update-rules --all` to see the plan, then "
+            "`pmlens update-rules --all --apply` to write it."
+        )
+        raise click.exceptions.Exit(1)
     else:
         from .utils import resolve_project_path
 
@@ -501,6 +498,14 @@ def update_rules_cmd(
 
     from . import rules
     from .utils import resolve_project_path
+
+    if apply_changes and not all_projects:
+        raise click.UsageError(
+            "--apply only applies to --all; without --all, update-rules writes "
+            "directly (use --dry-run to preview)."
+        )
+    if apply_changes and dry_run:
+        raise click.UsageError("--dry-run and --apply contradict each other; pass one.")
 
     any_failed = False
 

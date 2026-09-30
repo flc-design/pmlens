@@ -56,10 +56,10 @@ line-length = 100
 select = ["E", "F", "I", "N", "W", "UP"]
 
 [tool.ruff.lint.per-file-ignores]
-# The injected PM rule section (CLAUDEMD_TEMPLATE) keeps one sentence per line.
-# Its size is judged in lines (Claude Code's CLAUDE.md guidance), so hard
-# wrapping would inflate the count without changing the content. The template
-# must stay in rules.py for the CI marker-slug gate.
+# The injected PM rule section (CLAUDEMD_TEMPLATE) keeps one paragraph or list
+# item per line. Claude Code's CLAUDE.md guidance is stated in lines, and hard
+# wrapping Japanese at 100 columns would double the count without changing the
+# content. The template must stay in rules.py for the CI marker-slug gate.
 "src/pmlens/rules.py" = ["E501"]
 
 [tool.pytest.ini_options]

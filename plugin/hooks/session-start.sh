@@ -115,6 +115,25 @@ done
 # CR; without this the track= the model passes would never match the saved row.
 branch="${branch%$'\r'}"
 
+# --- 3b. only direct the routine inside a PM Lens project ----------------------
+# The directive states "this project tracks ... in PM Lens" and the MCP server
+# instructions say to use pmlens only where .pm/ exists, so outside such a
+# project the hook must stay quiet (it still reports a duplicate registration,
+# which is an environment problem unrelated to the repository). Same walk-up as
+# the pm_* tools: PM_PROJECT_PATH first, then cwd and its parents for
+# .pm/project.yaml (the global ~/.pm has no project.yaml).
+pm_found=0
+if [ -n "${PM_PROJECT_PATH:-}" ] && [ -f "$PM_PROJECT_PATH/.pm/project.yaml" ]; then
+  pm_found=1
+fi
+dir="$cwd"
+while [ "$pm_found" -eq 0 ]; do
+  if [ -f "$dir/.pm/project.yaml" ]; then pm_found=1; break; fi
+  parent="$(dirname "$dir")"
+  [ "$parent" = "$dir" ] && break
+  dir="$parent"
+done
+
 branch_note=""
 if [ -n "$branch" ]; then
   branch_note=" The current git branch is \`$branch\`; pass track=\"$branch\" to pm_recall to restore this work line's context, and after any git checkout re-read .git/HEAD and pass the new branch."
@@ -133,7 +152,10 @@ fi
 # rule file keeps every combination consistent (ADR-054).
 directive="pm-server plugin active. This project tracks tasks, decisions and prior-session context in PM Lens.${branch_note} Follow the PM Lens section of this project's rule file (CLAUDE.md) for when to call pm_status, pm_recall and pm_next; if there is no such section, call them once before starting work on this project. Tell the user briefly about blockers, overdue tasks and each warnings[] entry the tools return, with its remediation when given."
 
-if [ -n "$dup_warning" ]; then
+if [ "$pm_found" -eq 0 ]; then
+  [ -n "$dup_warning" ] || exit 0
+  payload="$dup_warning"
+elif [ -n "$dup_warning" ]; then
   payload="$(printf '%s\n\n%s' "$dup_warning" "$directive")"
 else
   payload="$directive"

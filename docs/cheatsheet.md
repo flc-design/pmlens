@@ -414,7 +414,7 @@ pmlens update-rules         # Update CLAUDE.md / AGENTS.md rules (multi-host)
 pmlens update-rules -t auto --dry-run  # Preview detected hosts
 pmlens update-rules --all   # Plan for every registered project (files with a PM section only)
 pmlens update-rules --all --apply  # Write that plan
-pmlens update-claudemd      # Legacy: equivalent to update-rules -t claude-code
+pmlens update-claudemd      # Legacy: this project's CLAUDE.md only (--all retired)
 pm-server hook post-tool-use   # PostToolUse hook handler
 ```
 

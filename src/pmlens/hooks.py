@@ -356,18 +356,70 @@ def handle_post_tool_use() -> None:
     command = tool_input.get("command", "")
     cwd = data.get("cwd", "")
 
-    # Only act on git commit commands
-    if "git commit" not in command:
+    if not is_git_commit(command):
         return
 
-    # Only act on projects with PM Lens
-    pm_path = Path(cwd) / ".pm"
-    if not pm_path.exists():
+    # Only act on projects with PM Lens (the same walk-up pm tools use).
+    pm_path = _find_project_pm_dir(Path(cwd or "."))
+    if pm_path is None:
         return
 
     reminder = _build_commit_reminder(pm_path)
     if reminder:
         json.dump(post_tool_use_context(reminder), sys.stdout)
+
+
+_SHELL_SEPARATORS = re.compile(r"&&|\|\||[;|\n]")
+_ENV_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+# git global options that take their value as the NEXT token.
+_GIT_OPTIONS_WITH_VALUE = frozenset({"-C", "-c", "--git-dir", "--work-tree", "--namespace"})
+
+
+def is_git_commit(command: str) -> bool:
+    """Return True when ``command`` runs ``git commit`` as a command.
+
+    Once the reminder actually reached the model (PMSERV-196), a substring
+    test turned every ``grep "git commit"``, ``echo ... git commit`` or
+    ``git commit --dry-run`` into a false "commit recorded" claim. Each shell
+    segment is checked for ``git`` in command position (after any
+    ``VAR=value`` prefixes), skipping git's global options, followed by the
+    ``commit`` subcommand. Unbalanced quotes (a heredoc commit message split
+    across lines) fall back to whitespace tokens.
+    """
+    for segment in _SHELL_SEPARATORS.split(command):
+        try:
+            tokens = shlex.split(segment, comments=True)
+        except ValueError:
+            tokens = segment.split()
+        i = 0
+        while i < len(tokens) and _ENV_ASSIGNMENT.match(tokens[i]):
+            i += 1
+        if i >= len(tokens) or Path(tokens[i]).name != "git":
+            continue
+        i += 1
+        while i < len(tokens) and tokens[i].startswith("-"):
+            i += 2 if tokens[i] in _GIT_OPTIONS_WITH_VALUE else 1
+        if i < len(tokens) and tokens[i] == "commit" and "--dry-run" not in tokens[i + 1 :]:
+            return True
+    return False
+
+
+def _find_project_pm_dir(start: Path) -> Path | None:
+    """Return the ``.pm/`` of the project containing ``start``, if any.
+
+    Mirrors ``utils.resolve_project_path``'s walk-up: the nearest ancestor
+    whose ``.pm/`` holds ``project.yaml`` (the global ``~/.pm`` does not).
+    """
+    from .utils import _is_project_pm_dir
+
+    try:
+        start = start.resolve()
+    except OSError:  # pragma: no cover — defensive FS guard
+        return None
+    for directory in (start, *start.parents):
+        if _is_project_pm_dir(directory / ".pm"):
+            return directory / ".pm"
+    return None
 
 
 def post_tool_use_context(text: str) -> dict:

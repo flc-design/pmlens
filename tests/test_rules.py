@@ -1038,3 +1038,17 @@ class TestTemplateWrittenForCurrentModels:
         assert "raw_content" in text
         assert "投稿・送信しない" in text
         assert "user_approval" in text
+
+
+def test_publishing_stays_off_limits_even_on_request():
+    """Adversarial review (PMSERV-195): v15 briefly let the model post a draft
+    when the user asked. ADR-054 keeps "never post or send" a safety rule that
+    survives user instructions, like the MCP instructions and README say."""
+    from pmlens.rules import _render_template
+
+    lines = _render_template().splitlines()
+    publishing = next(line for line in lines if "投稿・送信しない" in line and "3." in line)
+    assert "求められても" in publishing
+    assert "限り" not in publishing
+    exceptions = next(line for line in lines if line.startswith("- ユーザーの明示的な指示"))
+    assert "投稿・送信しない" in exceptions

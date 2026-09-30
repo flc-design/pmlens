@@ -416,7 +416,7 @@ pmlens update-rules         # CLAUDE.md / AGENTS.md ルール更新（multi-host
 pmlens update-rules -t auto --dry-run  # 検知された host をプレビュー
 pmlens update-rules --all   # 登録済み全プロジェクトの計画を表示（PM 節のあるファイルのみ）
 pmlens update-rules --all --apply  # その計画を書き込む
-pmlens update-claudemd      # レガシー: update-rules -t claude-code と等価
+pmlens update-claudemd      # レガシー: このプロジェクトの CLAUDE.md のみ（--all は廃止）
 pm-server hook post-tool-use   # PostToolUse フックハンドラ
 ```
 

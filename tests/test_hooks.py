@@ -13,6 +13,7 @@ from pmlens.hooks import (
     get_hooks_status,
     handle_post_tool_use,
     install_hooks,
+    is_git_commit,
     uninstall_hooks,
 )
 from pmlens.models import Phase, PhaseStatus, Priority, Project, ProjectStatus, Task, TaskStatus
@@ -313,3 +314,60 @@ class TestHandlePostToolUse:
 
         with patch("sys.stdin", io.StringIO("not json")):
             handle_post_tool_use()  # should not raise
+
+
+class TestIsGitCommit:
+    """PMSERV-196 follow-up: once the reminder reached the model, a substring
+    match turned any mention of "git commit" into a false claim."""
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            'git commit -m "fix"',
+            "cd sub && git commit -m x",
+            "git -C . commit -m x",
+            "git -c user.name=x commit -m x",
+            "GIT_EDITOR=true git commit --amend",
+            "/usr/bin/git commit -m x",
+            "git add -A; git commit -m x",
+            "git commit -m \"$(cat <<'EOF'\nmulti; line\nEOF\n)\"",
+        ],
+    )
+    def test_real_commits(self, command):
+        assert is_git_commit(command)
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            'rg -n "git commit" docs',
+            'echo "remember to git commit later"',
+            "git commit --dry-run -m x",
+            "git commit-tree HEAD^{tree} -m x",
+            "git status",
+            "grep -r 'git commit' .",
+            "",
+        ],
+    )
+    def test_text_that_is_not_a_commit(self, command):
+        assert not is_git_commit(command)
+
+
+class TestHandlePostToolUseProjectLookup:
+    def _run(self, command: str, cwd: Path) -> str:
+        import io
+
+        stdin_data = json.dumps({"tool_input": {"command": command}, "cwd": str(cwd)})
+        with patch("sys.stdin", io.StringIO(stdin_data)):
+            with patch("sys.stdout", new_callable=io.StringIO) as mock_out:
+                handle_post_tool_use()
+                return mock_out.getvalue()
+
+    def test_commit_in_a_subdirectory_of_the_project(self, pm_project: Path, monkeypatch):
+        monkeypatch.delenv("PM_LENS", raising=False)
+        sub = pm_project / "src" / "deep"
+        sub.mkdir(parents=True)
+        output = self._run("git commit -m x", sub)
+        assert "HK-001" in json.loads(output)["hookSpecificOutput"]["additionalContext"]
+
+    def test_silent_outside_a_project(self, tmp_path: Path):
+        assert self._run("git commit -m x", tmp_path) == ""

@@ -317,3 +317,141 @@ class TestCliUpdateRulesAll:
 
         assert result.exit_code == 0, result.output
         assert (a / "CLAUDE.md").exists()
+
+
+# ─── Marker robustness (adversarial review, PMSERV-195) ───────────────────────
+
+
+class TestMarkerRobustness:
+    def test_several_sections_are_reported_and_not_rewritten(self, tmp_path: Path):
+        original = _section(OLDER) + "\nuser notes\n\n" + _section(NEWER)
+        (tmp_path / "CLAUDE.md").write_text(original, encoding="utf-8")
+
+        (result,) = inject_pm_rules(tmp_path, target="existing").results
+
+        assert result.status == "failed"
+        assert f"v{OLDER}, v{NEWER}" in result.message
+        assert (tmp_path / "CLAUDE.md").read_text(encoding="utf-8") == original
+        assert "multiple_pm_sections" in _codes(rules_version_warnings(tmp_path))
+
+    def test_the_newest_of_several_sections_decides_the_version(self, tmp_path: Path):
+        (tmp_path / "CLAUDE.md").write_text(
+            _section(OLDER) + "\n" + _section(NEWER), encoding="utf-8"
+        )
+        assert rules.pm_section_versions(tmp_path) == {"CLAUDE.md": NEWER}
+
+    def test_end_marker_line_before_the_section_is_not_paired(self, tmp_path: Path):
+        text = (
+            "# Notes\n\n"
+            f"{rules.END_MARKER}\n\n"
+            "keep this paragraph\n\n"
+            f"{BEGIN_MARKER.format(version=OLDER)}\nold rules\n{END_MARKER}\n"
+        )
+        (tmp_path / "CLAUDE.md").write_text(text, encoding="utf-8")
+
+        inject_pm_rules(tmp_path, target="existing")
+        once = (tmp_path / "CLAUDE.md").read_text(encoding="utf-8")
+        second = inject_pm_rules(tmp_path, target="existing").results[0]
+
+        assert once.count("keep this paragraph") == 1
+        assert once.count("pm-server:begin") == 1
+        assert "old rules" not in once
+        assert second.status == "skipped"  # idempotent
+
+    def test_a_marker_quoted_in_prose_is_not_a_section(self, tmp_path: Path):
+        prose = "The section starts at `<!-- pm-server:begin v=99 -->` in this file.\n"
+        (tmp_path / "CLAUDE.md").write_text(prose, encoding="utf-8")
+
+        assert rules.pm_section_versions(tmp_path) == {}
+        assert rules_version_warnings(tmp_path) == []
+
+    def test_non_utf8_rule_file_does_not_abort_existing(self, tmp_path: Path):
+        (tmp_path / "AGENTS.md").write_bytes(b"\xff\xfe not utf-8 \x80")
+        (tmp_path / "CLAUDE.md").write_text(_section(OLDER), encoding="utf-8")
+
+        summary = inject_pm_rules(tmp_path, target="existing")
+
+        assert [r.target_file for r in summary.results] == ["CLAUDE.md"]
+        # Reading the unreadable file neither raises nor invents a section;
+        # CLAUDE.md was just brought up to date, so nothing is left to report.
+        assert rules_version_warnings(tmp_path) == []
+
+
+# ─── Legacy writers honour ADR-055 ────────────────────────────────────────────
+
+
+class TestLegacyWriters:
+    def test_refusal_names_tools_that_exist(self, tmp_path: Path):
+        (tmp_path / "CLAUDE.md").write_text(_section(NEWER), encoding="utf-8")
+        (result,) = inject_pm_rules(tmp_path, target="claude-code").results
+        assert "pm_update_rules(force=True)" in result.message
+        assert "--force" in result.message
+
+    def test_pm_init_backs_up_before_replacing(self, tmp_path: Path, isolated_home):
+        from pmlens.rules import ensure_claudemd
+
+        (tmp_path / "CLAUDE.md").write_text(_section(OLDER), encoding="utf-8")
+        ensure_claudemd(tmp_path)
+        assert len(list(tmp_path.glob("CLAUDE.md.bak.*"))) == 1
+
+    def test_update_claudemd_backs_up_before_replacing(self, tmp_path: Path):
+        (tmp_path / "CLAUDE.md").write_text(_section(OLDER), encoding="utf-8")
+        update_claudemd(tmp_path)
+        assert len(list(tmp_path.glob("CLAUDE.md.bak.*"))) == 1
+
+    def test_pm_update_claudemd_reports_a_refused_downgrade(self, tmp_path: Path, isolated_home):
+        from pmlens.server import pm_init, pm_update_claudemd
+
+        pm_init(project_path=str(tmp_path), project_name="legacy")
+        (tmp_path / "CLAUDE.md").write_text(_section(NEWER), encoding="utf-8")
+
+        result = pm_update_claudemd(project_path=str(tmp_path))
+
+        assert "rules_newer_than_server" in _codes(result["warnings"])
+        assert result["after"]["version"] == NEWER
+
+
+class TestCliGuards:
+    def _invoke(self, *args: str):
+        from click.testing import CliRunner
+
+        from pmlens.__main__ import cli
+
+        return CliRunner().invoke(cli, list(args))
+
+    def test_update_claudemd_all_is_retired(self):
+        result = self._invoke("update-claudemd", "--all")
+        assert result.exit_code == 1
+        assert "update-rules --all" in result.output
+
+    def test_apply_without_all_is_an_error(self):
+        result = self._invoke("update-rules", "--apply")
+        assert result.exit_code != 0
+        assert "--apply only applies to --all" in result.output
+
+    def test_dry_run_and_apply_contradict(self):
+        result = self._invoke("update-rules", "--all", "--dry-run", "--apply")
+        assert result.exit_code != 0
+        assert "contradict" in result.output
+
+
+# ─── Session summary overwrite (adversarial review, PMSERV-195) ───────────────
+
+
+class TestSessionSummaryOverwrite:
+    def test_dropping_pending_items_is_reported(self, tmp_path: Path, isolated_home):
+        from pmlens.server import pm_init, pm_session_summary
+
+        pm_init(project_path=str(tmp_path), project_name="summary")
+        first = pm_session_summary(
+            action="save", summary="first", pending="write docs, ship", project_path=str(tmp_path)
+        )
+        assert first["warnings"] == []
+
+        second = pm_session_summary(
+            action="save", summary="second", pending="ship", project_path=str(tmp_path)
+        )
+
+        (warning,) = second["warnings"]
+        assert warning["code"] == "session_summary_pending_dropped"
+        assert "write docs" in warning["message"]

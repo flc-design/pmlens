@@ -73,11 +73,13 @@ pipx upgrade pmlens
 > `error: externally-managed-environment`). Inside a virtualenv, `pip install pmlens`
 > and `pip install -U pmlens` work the same way.
 
-After upgrading, the CLAUDE.md auto-action rules in each project are automatically updated:
+After upgrading, each project's rule section is updated with the user's agreement:
 
-1. On the next session start, `pm_status` detects the template version mismatch
-2. Claude Code runs `pm_update_rules` to update the rules section (covers both CLAUDE.md and AGENTS.md when applicable)
-3. New features (e.g., child issue workflow) become active immediately
+1. On the next session start, `pm_status` returns a `rules_outdated` (or
+   `rule_file_version_mismatch`) warning, which the model passes on
+2. When the user agrees, `pm_update_rules(target='existing')` rewrites only the
+   files that already carry the section, keeping a `.bak.<timestamp>` copy
+3. Rule files are often committed, so review the diff before committing it
 
 You can also update manually:
 ```
@@ -607,7 +609,7 @@ What the section asks of the model (template v15, ADR-054):
 - When starting work on the project, check `pm_status`, `pm_recall` and `pm_next`
   once — not for unrelated one-off questions.
 - Keep tasks, the daily log and memory current as work progresses (these writes
-  stay inside `.pm/`), and relay every tool `warnings[]` entry to the user.
+  are project-management records, not code), and relay every tool `warnings[]` entry to the user.
 - Ask before recording an ADR; wait for the user at workflow approval gates.
 - Commit only when the user asks (or a workflow they started includes it), and
   stage only the files it changed.
@@ -659,7 +661,7 @@ Session 1                          Session 2
 
 ### Automatic Hooks (Lifecycle Enforcement)
 
-PM Lens automatically installs Claude Code hooks at first session start (`pm_status`). After a `git commit`, a PostToolUse hook injects a reminder into the conversation, prompting Claude to call `pm_log`, `pm_update_task`, and `pm_next`.
+PM Lens automatically installs Claude Code hooks at first session start (`pm_status`). After a `git ... commit` command in a PM Lens project with a task in progress, a PostToolUse hook adds a reminder (as `hookSpecificOutput.additionalContext`): if the commit completed a task, mark it done with `pm_update_task` and record it with `pm_log`; an intermediate commit changes nothing.
 
 - Hooks are installed globally in `~/.claude/settings.json`
 - Existing user hooks are preserved (PM Lens hooks are appended, not replaced)
@@ -703,7 +705,7 @@ pmlens migrate             # Migrate from pm-agent (rename transition)
 pmlens update-rules        # Inject PM Lens rules into CLAUDE.md and/or AGENTS.md (ADR-008).
                            # --target {auto,all,claude-code,codex,cursor,grok} (default: auto)
                            # --dry-run / --all (apply to every registered project)
-pmlens update-claudemd     # Legacy alias of `update-rules --target=claude-code`. Deprecated since v0.6.0.
+pmlens update-claudemd     # Legacy: CLAUDE.md of this project only (--all is retired; use update-rules --all). Deprecated since v0.6.0.
 pmlens install-hooks       # Manually install Claude Code hooks (auto-installed via pm_status)
 pmlens uninstall-hooks     # Remove PM Lens hooks from Claude Code settings
 ```

@@ -514,13 +514,15 @@ class TestPmUpdateClaudemd:
         """
         result = pm_update_claudemd(project_path=str(initialized_project))
 
-        # Top-level keys (5 fields, exact set)
+        # Top-level keys (the 5 v0.4.x fields, plus the additive ``warnings``
+        # that carries a refused downgrade — ADR-055)
         assert set(result.keys()) == {
             "status",
             "message",
             "template_version",
             "before",
             "after",
+            "warnings",
         }
         assert result["status"] == "updated"
         assert isinstance(result["message"], str)

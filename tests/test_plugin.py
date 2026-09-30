@@ -33,7 +33,10 @@ SESSION_HOOK = PLUGIN_DIR / "hooks" / "session-start.sh"
 PLUGIN_MCP = PLUGIN_DIR / ".mcp.json"
 PLUGIN_README = PLUGIN_DIR / "README.md"
 
-_COMMIT_INPUT = '{"tool_input":{"command":"git commit -m \\"msg\\""},"cwd":"/tmp"}'
+
+def _post_input(command: str, cwd: Path, **extra) -> str:
+    """A PostToolUse payload shaped like Claude Code's (tool_input first)."""
+    return json.dumps({"cwd": str(cwd), "tool_input": {"command": command}, **extra})
 
 
 def _load(path: Path) -> dict:
@@ -97,7 +100,7 @@ def _run_post_hook(
         # `command -v jq` probe fails and the printf fallback is exercised.
         bindir = config_dir / "_bin"
         bindir.mkdir(exist_ok=True)
-        for tool in ("bash", "env", "cat", "grep"):
+        for tool in ("bash", "env", "cat", "grep", "head", "cut", "dirname"):
             real = shutil.which(tool)
             if real is None:
                 pytest.skip(f"cannot build jq-less PATH: {tool} not found")
@@ -113,6 +116,15 @@ def _run_post_hook(
         env=env,
         timeout=20,
     )
+
+
+@pytest.fixture
+def pm_project(tmp_path: Path) -> Path:
+    """A PM Lens project: the hooks only speak inside one."""
+    root = tmp_path / "proj"
+    (root / ".pm").mkdir(parents=True)
+    (root / ".pm" / "project.yaml").write_text("name: proj\n", encoding="utf-8")
+    return root
 
 
 @pytest.fixture
@@ -154,8 +166,8 @@ def _post_tool_use_context(stdout: str) -> str:
     return hook_out["additionalContext"]
 
 
-def test_directive_emitted_on_git_commit(empty_config: Path):
-    r = _run_post_hook(_COMMIT_INPUT, config_dir=empty_config)
+def test_directive_emitted_on_git_commit(empty_config: Path, pm_project: Path):
+    r = _run_post_hook(_post_input('git commit -m "msg"', pm_project), config_dir=empty_config)
     assert r.returncode == 0
     context = _post_tool_use_context(r.stdout)
     assert "pm_update_task" in context
@@ -172,16 +184,16 @@ def test_silent_on_non_commit(empty_config: Path):
     assert r.stdout.strip() == ""
 
 
-def test_defers_when_manual_hook_present(manual_config: Path):
+def test_defers_when_manual_hook_present(manual_config: Path, pm_project: Path):
     """Double-fire guard: a manual settings.json hook -> emit nothing."""
-    r = _run_post_hook(_COMMIT_INPUT, config_dir=manual_config)
+    r = _run_post_hook(_post_input('git commit -m "msg"', pm_project), config_dir=manual_config)
     assert r.returncode == 0
     assert r.stdout.strip() == ""
 
 
-def test_directive_emitted_without_jq(empty_config: Path):
+def test_directive_emitted_without_jq(empty_config: Path, pm_project: Path):
     r = _run_post_hook(
-        '{"tool_input":{"command":"git commit"}}', config_dir=empty_config, no_jq=True
+        _post_input("git commit -m wip", pm_project), config_dir=empty_config, no_jq=True
     )
     assert r.returncode == 0
     # The printf fallback must emit the same envelope as the jq path; a bare
@@ -207,7 +219,7 @@ def test_directive_emitted_without_jq(empty_config: Path):
 # ─── SessionStart shell behaviour ─────────────────────────────────────────────
 
 
-def _run_session_hook(tmp_path: Path, *, branch: str) -> str:
+def _run_session_hook(tmp_path: Path, *, branch: str, pm: bool = True) -> str:
     """Run session-start.sh in a repo on ``branch`` and return additionalContext.
 
     PATH is limited to the tools the script needs so the `claude mcp get`
@@ -216,6 +228,9 @@ def _run_session_hook(tmp_path: Path, *, branch: str) -> str:
     repo = tmp_path / "repo"
     (repo / ".git").mkdir(parents=True)
     (repo / ".git" / "HEAD").write_text(f"ref: refs/heads/{branch}\n", encoding="utf-8")
+    if pm:
+        (repo / ".pm").mkdir()
+        (repo / ".pm" / "project.yaml").write_text("name: repo\n", encoding="utf-8")
     bindir = tmp_path / "_bin"
     bindir.mkdir()
     for tool in ("bash", "cat", "grep", "head", "cut", "mkdir", "find", "dirname", "jq"):
@@ -234,6 +249,8 @@ def _run_session_hook(tmp_path: Path, *, branch: str) -> str:
         timeout=20,
     )
     assert r.returncode == 0, r.stderr
+    if not r.stdout.strip():
+        return ""
     hook_out = json.loads(r.stdout)["hookSpecificOutput"]
     assert hook_out["hookEventName"] == "SessionStart"
     return hook_out["additionalContext"]
@@ -248,3 +265,72 @@ def test_session_directive_defers_timing_to_the_rule_file(tmp_path: Path):
     assert "verbatim" not in context
     assert 'track="feat/x"' in context
     assert "re-read .git/HEAD" in context
+
+
+def test_session_hook_is_silent_outside_a_pm_lens_project(tmp_path: Path):
+    # It would otherwise claim "this project tracks tasks in PM Lens" in any
+    # repository, contradicting the MCP instructions ("only where .pm/ exists").
+    assert _run_session_hook(tmp_path, branch="main", pm=False) == ""
+
+
+@pytest.mark.parametrize("no_jq", [False, True])
+@pytest.mark.parametrize(
+    "command",
+    [
+        'rg -n "git commit" docs',
+        'echo "remember to git commit later"',
+        "git commit --dry-run -m x",
+        "git commit-tree HEAD^{tree} -m x",
+    ],
+)
+def test_post_hook_ignores_text_that_is_not_a_commit(
+    empty_config: Path, pm_project: Path, command: str, no_jq: bool
+):
+    r = _run_post_hook(_post_input(command, pm_project), config_dir=empty_config, no_jq=no_jq)
+    assert r.returncode == 0
+    assert r.stdout.strip() == ""
+
+
+@pytest.mark.parametrize("no_jq", [False, True])
+def test_post_hook_does_not_read_tool_output(empty_config: Path, pm_project: Path, no_jq: bool):
+    # `git status` prints '(use "git add" and/or "git commit -a")'; only the
+    # command itself may decide whether a commit happened.
+    payload = _post_input(
+        "git status",
+        pm_project,
+        tool_response={
+            "stdout": 'no changes added to commit (use "git add" and/or "git commit -a")'
+        },
+    )
+    r = _run_post_hook(payload, config_dir=empty_config, no_jq=no_jq)
+    assert r.stdout.strip() == ""
+
+
+@pytest.mark.parametrize("no_jq", [False, True])
+@pytest.mark.parametrize(
+    "command",
+    ["cd sub && git commit -m x", "git -C . commit -m x", "GIT_EDITOR=true git commit --amend"],
+)
+def test_post_hook_recognises_real_commits(
+    empty_config: Path, pm_project: Path, command: str, no_jq: bool
+):
+    r = _run_post_hook(_post_input(command, pm_project), config_dir=empty_config, no_jq=no_jq)
+    assert "pm_update_task" in _post_tool_use_context(r.stdout)
+
+
+def test_post_hook_is_silent_outside_a_pm_lens_project(empty_config: Path, tmp_path: Path):
+    r = _run_post_hook(_post_input("git commit -m x", tmp_path), config_dir=empty_config)
+    assert r.stdout.strip() == ""
+
+
+@pytest.mark.parametrize(
+    "path",
+    [PLUGIN_DIR / "skills" / "pm" / "SKILL.md", REPO_ROOT / "skill" / "SKILL.md"],
+)
+def test_skills_do_not_contradict_the_rule_template(path: Path):
+    # ADR-054: the plugin cannot ship CLAUDE.md, so its skill is where the
+    # plugin user reads the rules. It must not bring back what v15 removed.
+    text = path.read_text(encoding="utf-8")
+    assert "アトミックコミットを作成" not in text
+    assert "最初の発話の前" not in text
+    assert "/clear 前に" not in text
