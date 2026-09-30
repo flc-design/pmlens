@@ -50,13 +50,14 @@ if [ -f "$settings" ] && grep -Eq 'pm-server hook|pmlens hook' "$settings" 2>/de
 fi
 
 # --- 3. directive -------------------------------------------------------------
-directive="pm-server plugin: a git commit just completed. Run the post-commit ritual through the pm-server MCP tools: pm_update_task (mark any finished task done), pm_log (record what was accomplished), then pm_next (surface the recommended next tasks). Surface any tool warnings[] to the user verbatim."
+directive="pm-server plugin: a git commit just completed. If it finished a task that is not yet marked done, update it with pm_update_task and record it with pm_log; for an intermediate commit, change nothing. Tell the user about any warnings[] the tools return."
 
 if command -v jq >/dev/null 2>&1; then
   jq -n --arg c "$directive" \
     '{hookSpecificOutput: {hookEventName: "PostToolUse", additionalContext: $c}}'
 else
-  # Fallback: PostToolUse stdout is injected as context even without the
-  # structured envelope (mirrors the manual hook's flat additionalContext).
-  printf '%s\n' "$directive"
+  # Claude Code ignores plain PostToolUse stdout, so the fallback must emit the
+  # same envelope. The directive is a fixed string with no double quotes or
+  # backslashes, so it can be embedded without escaping.
+  printf '{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"%s"}}\n' "$directive"
 fi

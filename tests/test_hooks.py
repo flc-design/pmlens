@@ -201,9 +201,11 @@ class TestBuildCommitReminder:
         assert "HK-001" in reminder
         assert "pm_update_task" in reminder
         assert "pm_log" in reminder
-        assert "pm_next" in reminder
+        # A commit is not necessarily a completion (ADR-054).
+        assert "intermediate commit" in reminder
+        assert "pm_next" not in reminder
 
-    def test_no_active_tasks(self, tmp_path: Path, monkeypatch):
+    def test_no_active_tasks_is_silent(self, tmp_path: Path, monkeypatch):
         monkeypatch.delenv("PM_LENS", raising=False)
         pm_path = tmp_path / ".pm"
         pm_path.mkdir()
@@ -216,9 +218,8 @@ class TestBuildCommitReminder:
         _save_project(pm_path, project)
         _save_tasks(pm_path, [])
 
-        reminder = _build_commit_reminder(pm_path)
-        assert "pm_update_task" in reminder
-        assert "pm_log" in reminder
+        # Nothing in progress means nothing this commit could have completed.
+        assert _build_commit_reminder(pm_path) == ""
 
 
 class TestBuildCommitReminderLensMode:
@@ -268,10 +269,14 @@ class TestHandlePostToolUse:
                 handle_post_tool_use()
                 output = mock_out.getvalue()
 
-        if output:
-            result = json.loads(output)
-            assert "additionalContext" in result
-            assert "HK-001" in result["additionalContext"]
+        # Claude Code drops a top-level additionalContext as an unrecognized
+        # key; only the hookSpecificOutput envelope reaches the model
+        # (PMSERV-196).
+        result = json.loads(output)
+        assert "additionalContext" not in result
+        hook_out = result["hookSpecificOutput"]
+        assert hook_out["hookEventName"] == "PostToolUse"
+        assert "HK-001" in hook_out["additionalContext"]
 
     def test_non_commit_skipped(self):
         stdin_data = json.dumps(

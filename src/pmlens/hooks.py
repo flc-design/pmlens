@@ -367,11 +367,27 @@ def handle_post_tool_use() -> None:
 
     reminder = _build_commit_reminder(pm_path)
     if reminder:
-        json.dump({"additionalContext": reminder}, sys.stdout)
+        json.dump(post_tool_use_context(reminder), sys.stdout)
+
+
+def post_tool_use_context(text: str) -> dict:
+    """Wrap ``text`` in the envelope Claude Code reads from a PostToolUse hook.
+
+    Claude Code only injects ``hookSpecificOutput.additionalContext`` (with a
+    matching ``hookEventName``); a top-level ``additionalContext`` key is
+    dropped as unrecognized, which silently kept every commit reminder out of
+    the model's context until PMSERV-196.
+    """
+    return {"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": text}}
 
 
 def _build_commit_reminder(pm_path: Path) -> str:
     """Build a contextual PM reminder after git commit.
+
+    Returns an empty string (no reminder) when no task is in progress: there
+    is nothing a commit could have completed, and an unconditional "please
+    execute" list is exactly the kind of instruction current models follow
+    too literally (ADR-054).
 
     PMSERV-086 / WF-026 FINDING-E: under PM_LENS=1 the host process exposes
     only the RO_ALLOWLIST tools, so suggesting ``pm_update_task`` / ``pm_log``
@@ -385,28 +401,25 @@ def _build_commit_reminder(pm_path: Path) -> str:
 
     tasks = load_tasks(pm_path)
     active = [t for t in tasks if t.status == TaskStatus.IN_PROGRESS]
+    task_ids = ", ".join(t.id for t in active)
 
     if lens_mode:
-        lines = ["[PM Lens] Git commit completed. (Read-only mode)"]
+        lines = ["[PM Lens] git commit recorded. (Read-only mode)"]
         if active:
-            task_ids = ", ".join(t.id for t in active)
-            lines.append(f"1. pm_next — check recommended next tasks (active: {task_ids})")
-        else:
-            lines.append("1. pm_next — check recommended next tasks")
-        lines.append("2. pm_status — view current progress")
-        lines.append("3. pm_tasks — list tasks (e.g. status=in_progress)")
-        lines.append("Tip: to update tasks or log progress, use the full pm-server (Claude Code).")
+            lines.append(f"In progress: {task_ids}.")
+        lines.append("pm_next, pm_status and pm_tasks show the current progress.")
+        lines.append(
+            "Recording task updates needs a full-mode pmlens host "
+            "(for example Claude Code or Codex CLI, without PM_LENS=1)."
+        )
         return "\n".join(lines)
 
-    lines = ["[PM Lens] Git commit completed. Please execute:"]
+    if not active:
+        return ""
 
-    if active:
-        task_ids = ", ".join(t.id for t in active)
-        lines.append(f"1. pm_update_task — mark completed tasks as done (active: {task_ids})")
-    else:
-        lines.append("1. pm_update_task — update task status if needed")
-
-    lines.append("2. pm_log — record what was accomplished")
-    lines.append("3. pm_next — check recommended next tasks")
-
-    return "\n".join(lines)
+    return (
+        f"[PM Lens] git commit recorded. In progress: {task_ids}. "
+        "If this commit completed one of them and it is not yet marked done, "
+        "mark it done with pm_update_task and add a pm_log entry. "
+        "For an intermediate commit, leave task statuses unchanged."
+    )

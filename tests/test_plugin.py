@@ -94,7 +94,7 @@ def _run_post_hook(
     env["CLAUDE_CONFIG_DIR"] = str(config_dir)
     if no_jq:
         # Restrict PATH to the coreutils the hook needs, excluding jq, so the
-        # `command -v jq` probe fails and the flat-stdout fallback is exercised.
+        # `command -v jq` probe fails and the printf fallback is exercised.
         bindir = config_dir / "_bin"
         bindir.mkdir(exist_ok=True)
         for tool in ("bash", "env", "cat", "grep"):
@@ -142,19 +142,28 @@ def manual_config(tmp_path: Path) -> Path:
     return d
 
 
+def _post_tool_use_context(stdout: str) -> str:
+    """Parse the envelope Claude Code reads and return its additionalContext.
+
+    Claude Code ignores plain PostToolUse stdout and a top-level
+    ``additionalContext`` key, so both the jq path and the jq-less fallback
+    must produce exactly this shape (PMSERV-196).
+    """
+    hook_out = json.loads(stdout)["hookSpecificOutput"]
+    assert hook_out["hookEventName"] == "PostToolUse"
+    return hook_out["additionalContext"]
+
+
 def test_directive_emitted_on_git_commit(empty_config: Path):
     r = _run_post_hook(_COMMIT_INPUT, config_dir=empty_config)
     assert r.returncode == 0
-    assert "pm_update_task" in r.stdout
-    assert "pm_log" in r.stdout
-    assert "pm_next" in r.stdout
-    # When jq is available the hook MUST emit the structured envelope Claude Code
-    # consumes — pin the exact contract so a wrong key or invalid JSON regresses
-    # loudly. (The substring checks above pass even on flat or typo'd output.)
-    if shutil.which("jq"):
-        hook_out = json.loads(r.stdout)["hookSpecificOutput"]
-        assert hook_out["hookEventName"] == "PostToolUse"
-        assert "pm_update_task" in hook_out["additionalContext"]
+    context = _post_tool_use_context(r.stdout)
+    assert "pm_update_task" in context
+    assert "pm_log" in context
+    # An intermediate commit must not be read as "mark tasks done".
+    assert "intermediate commit" in context
+    # The next-task listing is not a post-commit duty (ADR-054).
+    assert "pm_next" not in context
 
 
 def test_silent_on_non_commit(empty_config: Path):
@@ -175,10 +184,9 @@ def test_directive_emitted_without_jq(empty_config: Path):
         '{"tool_input":{"command":"git commit"}}', config_dir=empty_config, no_jq=True
     )
     assert r.returncode == 0
-    assert "pm_update_task" in r.stdout
-    # Positively prove the FLAT fallback ran (not the jq envelope): the directive
-    # is emitted as a bare line with no structured wrapper.
-    assert "hookSpecificOutput" not in r.stdout
+    # The printf fallback must emit the same envelope as the jq path; a bare
+    # line would be dropped by Claude Code.
+    assert "pm_update_task" in _post_tool_use_context(r.stdout)
 
 
 # ─── Plugin version drift guard — MOVED (PMSERV-133 → PMSERV-172) ─────────────
