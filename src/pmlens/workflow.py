@@ -26,11 +26,10 @@ from .models import (
 from .storage import (
     _save_workflows,
     _yaml_transaction,
-    add_workflow,
+    add_workflow_with_next_id,
     load_knowledge,
     load_workflow_template,
     load_workflows,
-    next_workflow_number,
 )
 
 # ─── Helpers ────────────────────────────────────────
@@ -104,25 +103,26 @@ def start_workflow(
 
     template = load_workflow_template(template_name, pm_path)
 
-    number = next_workflow_number(pm_path)
-    workflow_id = _generate_workflow_id(number)
-
     # Deep copy steps from template so the template isn't modified
     steps = [step.model_copy(deep=True) for step in template.steps]
     if steps:
         steps[0].status = WorkflowStepStatus.ACTIVE
 
-    workflow = Workflow(
-        id=workflow_id,
-        name=template.name,
-        feature=feature,
-        template=template_name,
-        steps=steps,
-        current_step_index=0,
-        status=WorkflowStatus.ACTIVE,
-        chain_to=template.chain_to,
-    )
-    add_workflow(pm_path, workflow)
+    # PMSERV-219: number inside the workflows.yaml lock, not before it.
+    def build(number: int) -> Workflow:
+        return Workflow(
+            id=_generate_workflow_id(number),
+            name=template.name,
+            feature=feature,
+            template=template_name,
+            steps=steps,
+            current_step_index=0,
+            status=WorkflowStatus.ACTIVE,
+            chain_to=template.chain_to,
+        )
+
+    workflow = add_workflow_with_next_id(pm_path, build)
+    workflow_id = workflow.id
 
     result: dict = {
         "status": "started",

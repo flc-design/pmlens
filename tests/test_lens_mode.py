@@ -22,10 +22,43 @@ import pytest
 
 import pmlens.server
 
-# ─── 既知の mutator 集合 (Lens 排除対象) ──────────────────
-# memory:134 + B-1 (pm_knowledge を multi-action mutator として扱う) より。
+# ─── Lens に出してはならないツールの集合 ──────────────────
+# PMSERV-217: 以前は手書きの一覧（memory:134 + B-1）で、新しい書き込み系ツール
+# （pm_draft_* / pm_prompt_pack / pm_outbox_merge など）を足し忘れていた。
+# server.py の @_tool() 関数をソースから列挙し、Lens 用の allowlist に載って
+# いないものをすべて対象にする。PM_LENS の値に依存しないよう、REGISTERED_TOOLS
+# ではなくソースから読む。
 
-MUTATOR_TOOLS: frozenset[str] = frozenset(
+
+def _decorated_tools() -> frozenset[str]:
+    """server.py で ``@_tool()`` を付けた関数名をソースから列挙する."""
+    import ast
+    from pathlib import Path
+
+    source = Path(pmlens.server.__file__).read_text(encoding="utf-8")
+    names: set[str] = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for deco in node.decorator_list:
+                if (
+                    isinstance(deco, ast.Call)
+                    and isinstance(deco.func, ast.Name)
+                    and deco.func.id == "_tool"
+                ):
+                    names.add(node.name)
+    return frozenset(names)
+
+
+ALL_TOOLS: frozenset[str] = _decorated_tools()
+
+MUTATOR_TOOLS: frozenset[str] = ALL_TOOLS - (
+    pmlens.server.RO_ALLOWLIST
+    | pmlens.server.OUTBOX_READ_ALLOWLIST
+    | pmlens.server.OUTBOX_WRITE_ALLOWLIST
+)
+
+# 導出が黙って縮まないための下限（かつての手書きの一覧）。
+_KNOWN_MUTATORS: frozenset[str] = frozenset(
     {
         "pm_init",
         "pm_add_task",
@@ -48,6 +81,15 @@ MUTATOR_TOOLS: frozenset[str] = frozenset(
         "pm_workflow_abandon",
     }
 )
+
+
+def test_mutator_set_is_derived_and_complete():
+    """PMSERV-217: 導出した集合が既知の mutator を含み、手書きの一覧で漏れて
+    いた書き込み系ツールも捕まえていること."""
+    assert _KNOWN_MUTATORS <= MUTATOR_TOOLS, sorted(_KNOWN_MUTATORS - MUTATOR_TOOLS)
+    for name in ("pm_draft_content", "pm_redact_draft", "pm_prompt_pack", "pm_outbox_merge"):
+        assert name in MUTATOR_TOOLS, name
+    assert not (MUTATOR_TOOLS & pmlens.server.RO_ALLOWLIST)
 
 
 # ─── Fixtures ─────────────────────────────────────────

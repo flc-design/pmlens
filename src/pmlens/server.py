@@ -67,12 +67,13 @@ from .storage import (
     _save_tasks,
     _yaml_transaction,
     add_daily_log,
-    add_decision,
-    add_knowledge,
-    add_task,
+    add_decision_with_next_id,
+    add_knowledge_with_next_id,
+    add_task_with_next_id,
     get_builtin_templates_dir_status,
     init_pm_directory,
     list_workflow_templates,
+    load_decisions,
     load_knowledge,
     load_project,
     load_registry,
@@ -80,10 +81,8 @@ from .storage import (
     load_tasks,
     load_tracks,
     load_workflows,
-    next_decision_number,
-    next_knowledge_number,
-    next_task_number,
     register_project,
+    unknown_decision_statuses,
     update_knowledge,
     update_task,
 )
@@ -833,6 +832,8 @@ def pm_status(project_path: str | None = None) -> dict:
     if hook_warning is not None:
         status_warnings.append(hook_warning)
 
+    status_warnings.extend(_decision_ledger_warnings(pm_path))
+
     return {
         "project": {
             "name": project.name,
@@ -907,21 +908,23 @@ def pm_add_task(
     """
     pm_path = _get_pm_path(project_path)
     project = load_project(pm_path)
-    number = next_task_number(pm_path)
-    task_id = generate_task_id(project.name, number)
+    priority_enum = Priority(priority)
 
-    task = Task(
-        id=task_id,
-        title=title,
-        phase=phase,
-        priority=Priority(priority),
-        description=description,
-        depends_on=depends_on or [],
-        tags=tags or [],
-        estimate_hours=estimate_hours,
-        acceptance_criteria=acceptance_criteria or [],
-    )
-    add_task(pm_path, task)
+    # PMSERV-219: number inside the tasks.yaml lock, not before it.
+    def build(number: int) -> Task:
+        return Task(
+            id=generate_task_id(project.name, number),
+            title=title,
+            phase=phase,
+            priority=priority_enum,
+            description=description,
+            depends_on=depends_on or [],
+            tags=tags or [],
+            estimate_hours=estimate_hours,
+            acceptance_criteria=acceptance_criteria or [],
+        )
+
+    task = add_task_with_next_id(pm_path, build)
 
     return {"status": "created", "task": _task_summary(task)}
 
@@ -1021,6 +1024,44 @@ def pm_blockers(project_path: str | None = None) -> list:
             "days_blocked": (_dt.date.today() - t.updated).days,
         }
         for t in blocked
+    ]
+
+
+def _decision_ledger_warnings(pm_path: Path) -> list[dict]:
+    """Report ADR statuses outside the known set, or an unreadable decisions.yaml.
+
+    Such a status is now kept instead of failing the whole file (PMSERV-218),
+    but already-shipped readers (an older pmlens, the Desktop extension) still
+    reject the entire decisions.yaml over it, so the user needs to hear about
+    it. Read-only: this never repairs the file.
+    """
+    try:
+        unknown = unknown_decision_statuses(load_decisions(pm_path))
+    except Exception as exc:  # noqa: BLE001 - any parse/validation failure is reported, not raised
+        return [
+            _build_warning(
+                level="warning",
+                code="decisions_yaml_unreadable",
+                message=f"decisions.yaml could not be read: {type(exc).__name__}: {exc}",
+                remediation=(
+                    "Fix the file by hand; ADR tools cannot read or add decisions until then."
+                ),
+            )
+        ]
+    if not unknown:
+        return []
+    listed = ", ".join(f"{u['id']}={u['status']!r}" for u in unknown)
+    return [
+        _build_warning(
+            level="warning",
+            code="decision_status_unknown",
+            message=(
+                f"ADR status value(s) outside proposed/accepted/deprecated/superseded: {listed}. "
+                "This pmlens keeps them, but older pmlens versions and the Desktop extension "
+                "cannot read decisions.yaml while they are present."
+            ),
+            remediation="Change each listed status to one of the four values by hand.",
+        )
     ]
 
 
@@ -3233,21 +3274,22 @@ def pm_add_decision(
 ) -> dict:
     """Record an Architecture Decision Record (ADR). ID is auto-generated."""
     pm_path = _get_pm_path(project_path)
-    number = next_decision_number(pm_path)
-    decision_id = generate_decision_id(number)
 
-    adr = Decision(
-        id=decision_id,
-        title=title,
-        context=context,
-        decision=decision,
-        consequences=Consequences(
-            positive=consequences_positive or [],
-            negative=consequences_negative or [],
-        ),
-    )
-    add_decision(pm_path, adr)
-    return {"status": "recorded", "decision_id": decision_id, "title": title}
+    # PMSERV-219: number inside the decisions.yaml lock, not before it.
+    def build(number: int) -> Decision:
+        return Decision(
+            id=generate_decision_id(number),
+            title=title,
+            context=context,
+            decision=decision,
+            consequences=Consequences(
+                positive=consequences_positive or [],
+                negative=consequences_negative or [],
+            ),
+        )
+
+    adr = add_decision_with_next_id(pm_path, build)
+    return {"status": "recorded", "decision_id": adr.id, "title": title}
 
 
 # ─── Analysis ────────────────────────────────────────
@@ -3698,8 +3740,8 @@ def pm_record(
     tags: comma-separated string (e.g. "auth,api,security")
     """
     pm_path = _get_pm_path(project_path)
-    number = next_knowledge_number(pm_path)
-    record_id = f"KR-{number:03d}"
+    category_enum = KnowledgeCategory(category)
+    confidence_enum = ConfidenceLevel(confidence)
 
     # Auto-infer task_id from active in-progress task
     auto_linked = False
@@ -3721,23 +3763,27 @@ def pm_record(
 
     tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
 
-    record = KnowledgeRecord(
-        id=record_id,
-        category=KnowledgeCategory(category),
-        title=title,
-        confidence=ConfidenceLevel(confidence),
-        findings=findings,
-        conclusion=conclusion,
-        sources=sources or [],
-        tags=tag_list,
-        task_id=task_id,
-        workflow_id=workflow_id,
-    )
-    add_knowledge(pm_path, record)
+    # PMSERV-219: number inside the knowledge.yaml lock. The task/workflow
+    # auto-inference above reads other ledgers and stays outside the lock.
+    def build(number: int) -> KnowledgeRecord:
+        return KnowledgeRecord(
+            id=f"KR-{number:03d}",
+            category=category_enum,
+            title=title,
+            confidence=confidence_enum,
+            findings=findings,
+            conclusion=conclusion,
+            sources=sources or [],
+            tags=tag_list,
+            task_id=task_id,
+            workflow_id=workflow_id,
+        )
+
+    record = add_knowledge_with_next_id(pm_path, build)
 
     result: dict = {
         "status": "recorded",
-        "record_id": record_id,
+        "record_id": record.id,
         "category": category,
         "title": title,
     }

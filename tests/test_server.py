@@ -825,31 +825,18 @@ class TestPmAddIssue:
             f"compound op must be one atomic write (ADR-012), got {call_count['n']}"
         )
 
-    def test_add_issue_next_number_from_in_lock_list(self, initialized_project, monkeypatch):
-        """PMSERV-065: pm_add_issue must compute the next task number from the
-        in-lock fresh task list, not via a separate ``next_task_number(pm_path)``
-        call that re-loads outside the lock (race window R3 in the spec).
+    def test_tools_never_number_outside_the_lock(self):
+        """PMSERV-065 / PMSERV-219: every id-allocating tool numbers from the
+        in-lock fresh list. The unlocked preview helpers (``next_*_number``)
+        re-load outside the lock, so the tool modules must not even import
+        them — that is what let two concurrent calls take the same id.
         """
         from pmlens import server as _server_mod
+        from pmlens import workflow as _workflow_mod
 
-        call_count = {"n": 0}
-        real = _server_mod.next_task_number
-
-        def counting(pm_path):
-            call_count["n"] += 1
-            return real(pm_path)
-
-        monkeypatch.setattr(_server_mod, "next_task_number", counting)
-
-        pm_add_issue(
-            parent_id="TEST-002",
-            title="Number from in-lock list",
-            project_path=str(initialized_project),
-        )
-        assert call_count["n"] == 0, (
-            f"next_task_number(pm_path) re-load was expected to be zero "
-            f"(ADR-012 — compute from in-lock list), got {call_count['n']}"
-        )
+        for name in ("next_task_number", "next_decision_number", "next_knowledge_number"):
+            assert not hasattr(_server_mod, name), f"server imports unlocked {name}"
+        assert not hasattr(_workflow_mod, "next_workflow_number")
 
 
 class TestPmTasksParentFilter:

@@ -26,18 +26,20 @@ from __future__ import annotations
 
 import datetime as _dt
 import os
-from collections.abc import Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
 import yaml
 from filelock import FileLock
 from filelock import Timeout as FileLockTimeout
+from pydantic import BaseModel
 
 from .models import (
     DailyLog,
     DailyLogEntry,
     Decision,
+    DecisionStatus,
     KnowledgeNotFoundError,
     KnowledgeRecord,
     Milestone,
@@ -171,9 +173,78 @@ def _yaml_transaction(
         ) from e
 
 
-def _model_dump(model) -> dict:
-    """Dump a Pydantic model to a JSON-serializable dict."""
-    return model.model_dump(mode="json")
+def _model_dump(model: BaseModel) -> dict:
+    """Dump a Pydantic model to a dict for ``yaml.safe_dump``.
+
+    Declared fields go through ``mode="json"`` (enums and dates become plain
+    scalars). Keys kept by ``extra="allow"`` (PMSERV-218) are written back as
+    the very objects ``safe_load`` produced, NOT re-serialised: a JSON-mode dump
+    copies every shared reference, so a YAML alias "billion laughs" in an
+    unknown key expanded to ~117 MB and held the ledger lock for ~25 s, while
+    ``!!binary`` or a recursive anchor made every later write raise. Handed over
+    unchanged, ``safe_dump`` re-emits the anchors/aliases and keeps the value's
+    YAML type (bytes, dates, NaN, non-string keys) intact.
+    """
+    data = model.model_dump(mode="json", exclude=_extra_exclusions(model) or None)
+    _merge_raw_extras(model, data)
+    return data
+
+
+def _extra_exclusions(model: BaseModel) -> dict:
+    """``exclude`` spec covering a model's extras, nested models included."""
+    spec: dict = dict.fromkeys(model.__pydantic_extra__ or {}, True)
+    for name in type(model).model_fields:
+        value = getattr(model, name, None)
+        if isinstance(value, BaseModel):
+            nested = _extra_exclusions(value)
+            if nested:
+                spec[name] = nested
+    return spec
+
+
+def _merge_raw_extras(model: BaseModel, data: dict) -> None:
+    """Put each model's extras back into ``data`` as the loaded objects."""
+    data.update(model.__pydantic_extra__ or {})
+    for name in type(model).model_fields:
+        value = getattr(model, name, None)
+        if isinstance(value, BaseModel) and isinstance(data.get(name), dict):
+            _merge_raw_extras(value, data[name])
+
+
+def _with_sibling_keys(path: Path, list_key: str, items: list[dict]) -> dict:
+    """Build a ledger document that keeps the file's other top-level keys.
+
+    Whole-file rewrites used to emit only ``{list_key: [...]}``, so any
+    top-level key a newer pmlens (or a person) added was dropped on the next
+    write (PMSERV-218). Key order is preserved; ``list_key`` stays in place.
+    """
+    existing = _load_yaml(path)
+    if not isinstance(existing, dict):
+        return {list_key: items}
+    doc = {k: (items if k == list_key else v) for k, v in existing.items()}
+    doc.setdefault(list_key, items)
+    return doc
+
+
+def _next_number_from_ids(ids: Iterable[str]) -> int:
+    """Return max(numeric id suffix) + 1, or 1 when there is none."""
+    numbers = []
+    for item_id in ids:
+        parts = item_id.rsplit("-", 1)
+        if len(parts) == 2 and parts[1].isdigit():
+            numbers.append(int(parts[1]))
+    return max(numbers, default=0) + 1
+
+
+def _reject_duplicate_id(existing_ids: Iterable[str], new_id: str, ledger: str) -> None:
+    """Refuse to append a record whose id is already in the ledger.
+
+    Last line of defence for the numbering race (PMSERV-219): two records with
+    the same id would otherwise both be saved, and every lookup by id would
+    silently act on the first one only.
+    """
+    if new_id in set(existing_ids):
+        raise PmServerError(f"{new_id} already exists in {ledger}; refusing a duplicate id")
 
 
 # ─── Project ─────────────────────────────────────────
@@ -256,6 +327,28 @@ def add_task(pm_path: Path, task: Task) -> Task:
     """Append a new task and save."""
     with _yaml_transaction(pm_path, "tasks.yaml"):
         tasks = load_tasks(pm_path)
+        _reject_duplicate_id((t.id for t in tasks), task.id, "tasks.yaml")
+        tasks.append(task)
+        _save_tasks(pm_path, tasks)
+    return task
+
+
+def add_task_with_next_id(pm_path: Path, build: Callable[[int], Task]) -> Task:
+    """Number and append a task inside ONE tasks.yaml transaction (PMSERV-219).
+
+    ``build`` receives the next task number and returns the Task to append.
+    Computing the number outside the lock (``next_task_number`` + ``add_task``)
+    let two concurrent callers take the same number and save duplicate ids.
+
+    Contract for every ``add_*_with_next_id``: ``build`` runs while the ledger
+    lock is held, so it must only construct the record. Calling a mutator or
+    taking any ledger lock from inside it self-deadlocks (same lock) or risks
+    an AB-BA deadlock (another ledger); do that work before or after the call.
+    """
+    with _yaml_transaction(pm_path, "tasks.yaml"):
+        tasks = load_tasks(pm_path)
+        task = build(_next_task_number_from_list(tasks))
+        _reject_duplicate_id((t.id for t in tasks), task.id, "tasks.yaml")
         tasks.append(task)
         _save_tasks(pm_path, tasks)
     return task
@@ -284,18 +377,15 @@ def _next_task_number_from_list(tasks: list[Task]) -> int:
     see ADR-012 / PMSERV-065). Avoids the nested-load race that would
     occur if ``next_task_number`` were re-entered inside an open lock.
     """
-    if not tasks:
-        return 1
-    numbers = []
-    for t in tasks:
-        parts = t.id.rsplit("-", 1)
-        if len(parts) == 2 and parts[1].isdigit():
-            numbers.append(int(parts[1]))
-    return max(numbers, default=0) + 1
+    return _next_number_from_ids(t.id for t in tasks)
 
 
 def next_task_number(pm_path: Path) -> int:
-    """Return the next available task number."""
+    """Return the next available task number.
+
+    Read-only preview: it takes no lock, so do not use it to number a record
+    you are about to append — use :func:`add_task_with_next_id` (PMSERV-219).
+    """
     return _next_task_number_from_list(load_tasks(pm_path))
 
 
@@ -311,34 +401,69 @@ def load_decisions(pm_path: Path) -> list[Decision]:
 
 
 def _save_decisions(pm_path: Path, decisions: list[Decision]) -> None:
-    """Save all decisions to decisions.yaml."""
+    """Save all decisions to decisions.yaml (other top-level keys are kept)."""
+    path = pm_path / "decisions.yaml"
     _save_yaml(
-        pm_path / "decisions.yaml",
-        {"decisions": [_model_dump(d) for d in decisions]},
+        path,
+        _with_sibling_keys(path, "decisions", [_model_dump(d) for d in decisions]),
         "decisions.yaml",
     )
 
 
+def unknown_decision_statuses(decisions: list[Decision]) -> list[dict]:
+    """Return ``{"id", "status"}`` for ADRs whose status is not a DecisionStatus.
+
+    Loading keeps such a value as a raw string rather than failing the whole
+    file (PMSERV-218); pm_status reports them as ``decision_status_unknown``.
+    """
+    return [
+        {"id": d.id, "status": d.status}
+        for d in decisions
+        if not isinstance(d.status, DecisionStatus)
+    ]
+
+
+def _require_known_status(decision: Decision) -> None:
+    """A NEW ADR must carry a DecisionStatus value (PMSERV-218 / ADR-056 D1).
+
+    Loading tolerates an unknown status so one odd record does not take the
+    whole file down, but writing one would make decisions.yaml unreadable for
+    every already-shipped reader, so new records are held to the enum.
+    """
+    if not isinstance(decision.status, DecisionStatus):
+        allowed = ", ".join(s.value for s in DecisionStatus)
+        raise PmServerError(f"{decision.id}: status {decision.status!r} is not one of {allowed}")
+
+
 def add_decision(pm_path: Path, decision: Decision) -> Decision:
     """Append a new ADR and save."""
+    _require_known_status(decision)
     with _yaml_transaction(pm_path, "decisions.yaml"):
         decisions = load_decisions(pm_path)
+        _reject_duplicate_id((d.id for d in decisions), decision.id, "decisions.yaml")
+        decisions.append(decision)
+        _save_decisions(pm_path, decisions)
+    return decision
+
+
+def add_decision_with_next_id(pm_path: Path, build: Callable[[int], Decision]) -> Decision:
+    """Number and append an ADR inside ONE decisions.yaml transaction (PMSERV-219).
+
+    ``build`` runs under the lock — see :func:`add_task_with_next_id`.
+    """
+    with _yaml_transaction(pm_path, "decisions.yaml"):
+        decisions = load_decisions(pm_path)
+        decision = build(_next_number_from_ids(d.id for d in decisions))
+        _require_known_status(decision)
+        _reject_duplicate_id((d.id for d in decisions), decision.id, "decisions.yaml")
         decisions.append(decision)
         _save_decisions(pm_path, decisions)
     return decision
 
 
 def next_decision_number(pm_path: Path) -> int:
-    """Return the next available ADR number."""
-    decisions = load_decisions(pm_path)
-    if not decisions:
-        return 1
-    numbers = []
-    for d in decisions:
-        parts = d.id.rsplit("-", 1)
-        if len(parts) == 2 and parts[1].isdigit():
-            numbers.append(int(parts[1]))
-    return max(numbers, default=0) + 1
+    """Return the next available ADR number (read-only preview, no lock)."""
+    return _next_number_from_ids(d.id for d in load_decisions(pm_path))
 
 
 # ─── Milestones ──────────────────────────────────────
@@ -424,10 +549,11 @@ def load_knowledge(pm_path: Path) -> list[KnowledgeRecord]:
 
 
 def _save_knowledge(pm_path: Path, records: list[KnowledgeRecord]) -> None:
-    """Save all knowledge records to knowledge.yaml."""
+    """Save all knowledge records to knowledge.yaml (other top-level keys are kept)."""
+    path = pm_path / "knowledge.yaml"
     _save_yaml(
-        pm_path / "knowledge.yaml",
-        {"knowledge": [_model_dump(r) for r in records]},
+        path,
+        _with_sibling_keys(path, "knowledge", [_model_dump(r) for r in records]),
         "knowledge.yaml",
     )
 
@@ -436,6 +562,23 @@ def add_knowledge(pm_path: Path, record: KnowledgeRecord) -> KnowledgeRecord:
     """Append a new knowledge record and save."""
     with _yaml_transaction(pm_path, "knowledge.yaml"):
         records = load_knowledge(pm_path)
+        _reject_duplicate_id((r.id for r in records), record.id, "knowledge.yaml")
+        records.append(record)
+        _save_knowledge(pm_path, records)
+    return record
+
+
+def add_knowledge_with_next_id(
+    pm_path: Path, build: Callable[[int], KnowledgeRecord]
+) -> KnowledgeRecord:
+    """Number and append a knowledge record inside ONE transaction (PMSERV-219).
+
+    ``build`` runs under the lock — see :func:`add_task_with_next_id`.
+    """
+    with _yaml_transaction(pm_path, "knowledge.yaml"):
+        records = load_knowledge(pm_path)
+        record = build(_next_number_from_ids(r.id for r in records))
+        _reject_duplicate_id((r.id for r in records), record.id, "knowledge.yaml")
         records.append(record)
         _save_knowledge(pm_path, records)
     return record
@@ -457,16 +600,8 @@ def update_knowledge(pm_path: Path, record_id: str, **updates) -> KnowledgeRecor
 
 
 def next_knowledge_number(pm_path: Path) -> int:
-    """Return the next available knowledge record number."""
-    records = load_knowledge(pm_path)
-    if not records:
-        return 1
-    numbers = []
-    for r in records:
-        parts = r.id.rsplit("-", 1)
-        if len(parts) == 2 and parts[1].isdigit():
-            numbers.append(int(parts[1]))
-    return max(numbers, default=0) + 1
+    """Return the next available knowledge record number (read-only preview, no lock)."""
+    return _next_number_from_ids(r.id for r in load_knowledge(pm_path))
 
 
 # ─── Daily Log ───────────────────────────────────────
@@ -608,6 +743,21 @@ def add_workflow(pm_path: Path, workflow: Workflow) -> Workflow:
     """Append a new workflow and save."""
     with _yaml_transaction(pm_path, "workflows.yaml"):
         workflows = load_workflows(pm_path)
+        _reject_duplicate_id((w.id for w in workflows), workflow.id, "workflows.yaml")
+        workflows.append(workflow)
+        _save_workflows(pm_path, workflows)
+    return workflow
+
+
+def add_workflow_with_next_id(pm_path: Path, build: Callable[[int], Workflow]) -> Workflow:
+    """Number and append a workflow inside ONE workflows.yaml transaction (PMSERV-219).
+
+    ``build`` runs under the lock — see :func:`add_task_with_next_id`.
+    """
+    with _yaml_transaction(pm_path, "workflows.yaml"):
+        workflows = load_workflows(pm_path)
+        workflow = build(_next_number_from_ids(w.id for w in workflows))
+        _reject_duplicate_id((w.id for w in workflows), workflow.id, "workflows.yaml")
         workflows.append(workflow)
         _save_workflows(pm_path, workflows)
     return workflow
@@ -629,16 +779,8 @@ def update_workflow(pm_path: Path, workflow_id: str, **updates) -> Workflow:
 
 
 def next_workflow_number(pm_path: Path) -> int:
-    """Return the next available workflow number."""
-    workflows = load_workflows(pm_path)
-    if not workflows:
-        return 1
-    numbers = []
-    for w in workflows:
-        parts = w.id.rsplit("-", 1)
-        if len(parts) == 2 and parts[1].isdigit():
-            numbers.append(int(parts[1]))
-    return max(numbers, default=0) + 1
+    """Return the next available workflow number (read-only preview, no lock)."""
+    return _next_number_from_ids(w.id for w in load_workflows(pm_path))
 
 
 def load_workflow_template(name: str, pm_path: Path | None = None) -> WorkflowTemplate:

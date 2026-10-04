@@ -3,7 +3,15 @@
 import datetime as _dt
 from enum import StrEnum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
+
+# Ledger models that a whole-file rewrite round-trips (decisions.yaml,
+# knowledge.yaml) keep keys they do not know (PMSERV-218 / ADR-056). Under the
+# pydantic default (extra="ignore") an older pmlens that rewrites the file
+# silently drops every field a newer pmlens added — the same version-skew
+# failure ADR-055 fixed for the rule sections. This only protects files
+# rewritten by THIS version onward; already-shipped readers still drop them.
+_KEEP_UNKNOWN = ConfigDict(extra="allow")
 
 # Alias to avoid field-name collisions (e.g. Decision.date vs date type)
 _Date = _dt.date
@@ -244,6 +252,8 @@ class Task(BaseModel):
 class Consequences(BaseModel):
     """ADR consequences structure."""
 
+    model_config = _KEEP_UNKNOWN
+
     positive: list[str] = Field(default_factory=list)
     negative: list[str] = Field(default_factory=list)
     mitigations: list[str] = Field(default_factory=list)
@@ -252,10 +262,18 @@ class Consequences(BaseModel):
 class Decision(BaseModel):
     """Architecture Decision Record (ADR)."""
 
+    model_config = _KEEP_UNKNOWN
+
     id: str
     title: str
     date: _Date = Field(default_factory=_dt.date.today)
-    status: DecisionStatus = DecisionStatus.ACCEPTED
+    # A status outside DecisionStatus (a hand edit, or another tool) is kept as
+    # the raw string instead of failing the whole decisions.yaml load, and is
+    # written back unchanged (PMSERV-218). left_to_right makes known values
+    # still parse as the enum. Writers must validate against DecisionStatus.
+    status: DecisionStatus | str = Field(
+        default=DecisionStatus.ACCEPTED, union_mode="left_to_right"
+    )
     context: str = ""
     decision: str = ""
     consequences: Consequences = Field(default_factory=Consequences)
@@ -344,6 +362,8 @@ class KnowledgeRecord(BaseModel):
     Used for research findings, requirements, trade-off analyses, specs, etc.
     Stored in .pm/knowledge.yaml.
     """
+
+    model_config = _KEEP_UNKNOWN
 
     id: str
     category: KnowledgeCategory
