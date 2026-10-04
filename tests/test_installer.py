@@ -851,6 +851,26 @@ class TestResolvePmServerPath:
         path = _resolve_pm_server_path()
         assert path == fake_pm_server.resolve()
 
+    def test_stays_inside_a_venv_whose_python_is_a_symlink(self, tmp_path, monkeypatch):
+        """PMSERV-254: a venv's bin/python is a symlink to the base interpreter.
+
+        Following it registered the ``pm-server`` sitting next to the BASE
+        Python — for a pipx release on a pyenv base, the editable dev install —
+        instead of the venv's own ``pmlens``.
+        """
+        base_bin = tmp_path / "base" / "bin"
+        base_bin.mkdir(parents=True)
+        (base_bin / "python3.13").write_text("")
+        (base_bin / "pm-server").write_text("")  # the dev install next to the base python
+        venv_bin = tmp_path / "venv" / "bin"
+        venv_bin.mkdir(parents=True)
+        (venv_bin / "python").symlink_to(base_bin / "python3.13")
+        (venv_bin / "pmlens").write_text("")
+        monkeypatch.setattr("pmlens.installer.sys.executable", str(venv_bin / "python"))
+        from pmlens.installer import _resolve_pm_server_path
+
+        assert _resolve_pm_server_path() == venv_bin / "pmlens"
+
     def test_falls_back_to_shutil_which(self, tmp_path, monkeypatch):
         fake_python = tmp_path / "python"
         monkeypatch.setattr("pmlens.installer.sys.executable", str(fake_python))

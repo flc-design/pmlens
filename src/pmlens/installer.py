@@ -415,14 +415,21 @@ def _resolve_pm_server_path() -> Path:
     installations). Falls back to ``shutil.which`` only if the canonical
     location is missing.
 
+    The interpreter path is made absolute but its symlinks are NOT followed
+    (PMSERV-254): a venv's ``bin/python`` is a symlink to the base
+    interpreter, so resolving it left the venv and registered whatever
+    ``pm-server`` sat next to the base Python — for a pipx release run from a
+    pyenv base, that was the editable development install.
+
     Raises:
         FileNotFoundError: if neither pmlens nor pm-server can be located.
     """
     # PMSERV-137 A4: prefer the ``pmlens`` binary (the canonical body identity
     # the user installs via pipx at cutover); keep ``pm-server`` as the
     # mid-flight fallback so registration still resolves before the switch-over.
+    bin_dir = Path(os.path.abspath(sys.executable)).parent
     for _name in ("pmlens", "pm-server"):
-        candidate = Path(sys.executable).resolve().parent / _name
+        candidate = bin_dir / _name
         if candidate.exists():
             return candidate
     fallback = shutil.which("pmlens") or shutil.which("pm-server")
