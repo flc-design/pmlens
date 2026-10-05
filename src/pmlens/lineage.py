@@ -61,6 +61,19 @@ LINEAGE_SCHEMA = 1
 # refuses, and parsing one file under the decisions lock stays well below the
 # default lock timeout (a dense 200 KB YAML took ~0.36 s to safe_load).
 MAX_LINEAGE_BYTES = 256 * 1024
+# Notes and evaluations are appended without a count limit, so they stop this
+# far below MAX_LINEAGE_BYTES: the rest is kept for lifecycle, link and
+# declared changes, which must still fit when the notes have filled the file
+# (a lifecycle event with a 4,000-character reason in a 3-byte script is
+# about 12.5 KB). Readers still accept anything up to MAX_LINEAGE_BYTES.
+LINEAGE_RESERVE_BYTES = 16 * 1024
+MAX_APPEND_BYTES = MAX_LINEAGE_BYTES - LINEAGE_RESERVE_BYTES
+# How deeply lists and mappings may nest in a lineage file. PyYAML's composer,
+# representer and serializer recurse per level: a file nested ~350 deep loads
+# but cannot be dumped again (RecursionError). Readers and writers share this
+# limit, checked without recursion (:func:`_nested_deeper_than`), so neither
+# accepts a file the other cannot handle. S1 files nest 3 deep.
+MAX_LINEAGE_DEPTH = 64
 LINKED_FROM_SCAN_LIMIT = 500
 MAX_LINKS_PER_TYPE = 50
 MAX_TEXT_CHARS = 4_000
@@ -420,6 +433,33 @@ def title_sha256(title: str) -> str:
     return hashlib.sha256(str(title).encode("utf-8")).hexdigest()
 
 
+def stored_title(title: str) -> str:
+    """The title as decisions.yaml gives it back once saved (safe_dump, then safe_load).
+
+    A YAML round trip is not the identity for every string: U+0085 (NEL) is
+    written raw and read back as a line break, which folds to a space. The
+    creator of an ADR stores this form, so the anchor it hashes is the title
+    every later reader loads (design §2.2). The title is dumped where a
+    decisions.yaml record holds it (a block mapping inside a block sequence),
+    so the emitter picks the same style and the same line width.
+
+    Args:
+        title: The title as given.
+
+    Returns:
+        The title after the round trip (unchanged for almost every string).
+    """
+    text = yaml.safe_dump(
+        {"decisions": [{"title": title}]},
+        default_flow_style=False,
+        allow_unicode=True,
+        sort_keys=False,
+    )
+    loaded = yaml.safe_load(text)
+    value = loaded["decisions"][0]["title"]
+    return value if isinstance(value, str) else title
+
+
 def anchor_for(decision: Decision, *, date_on_file: bool | None = None) -> dict[str, str | None]:
     """The fingerprint tying a lineage to the ADR it was written for.
 
@@ -522,6 +562,41 @@ def _read_bounded(path: Path) -> bytes:
     return payload
 
 
+def _nested_deeper_than(data: object, limit: int) -> bool:
+    """True when lists and mappings in ``data`` nest more than ``limit`` levels deep.
+
+    Iterative, so a deep value cannot exhaust the stack here. Containers are
+    visited in document order and each one once (by identity), the way
+    safe_dump expands a value at its first appearance and writes an alias
+    after that: the depth found is the nesting a dump would recurse through,
+    and an alias bomb or a recursive alias costs one visit per container.
+
+    Args:
+        data: A ``safe_load`` result.
+        limit: The deepest nesting allowed; the top-level container is level 1.
+
+    Returns:
+        Whether the nesting exceeds ``limit``.
+    """
+    seen: set[int] = set()
+    stack: list[tuple[object, int]] = [(data, 1)]
+    while stack:
+        node, depth = stack.pop()
+        if not isinstance(node, (dict, list, tuple, set, frozenset)) or id(node) in seen:
+            continue
+        seen.add(id(node))
+        if depth > limit:
+            return True
+        if isinstance(node, dict):
+            children: Iterable[object] = node.values()
+        elif isinstance(node, (list, tuple)):
+            children = node
+        else:
+            continue  # a set's members are hashable scalars
+        stack.extend((child, depth + 1) for child in reversed(list(children)))
+    return False
+
+
 @dataclass(frozen=True)
 class RawLineage:
     """What :func:`read_lineage_raw` found for one ADR.
@@ -548,7 +623,10 @@ def read_lineage_raw(pm_path: Path, decision_id: str) -> RawLineage:
     The id is checked against DECISION_ID_RE before a path is built from it
     (the path-traversal guard). A symlinked lineage directory or file, anything
     but a regular file, a file over MAX_LINEAGE_BYTES, an OS error, invalid
-    UTF-8 and invalid YAML all come back as ``decision_lineage_unreadable``.
+    UTF-8, invalid YAML and lists or mappings nested more than
+    MAX_LINEAGE_DEPTH levels deep all come back as
+    ``decision_lineage_unreadable``. Writers read through here too, so they
+    never take on a file they could not dump again.
 
     Args:
         pm_path: The project's ``.pm`` directory.
@@ -579,6 +657,13 @@ def read_lineage_raw(pm_path: Path, decision_id: str) -> RawLineage:
     except Exception as exc:  # noqa: BLE001 - a read never raises; the type is reported
         return RawLineage(
             decision_id, exists=True, error=LINEAGE_UNREADABLE, detail=error_summary(exc)
+        )
+    if _nested_deeper_than(data, MAX_LINEAGE_DEPTH):
+        return RawLineage(
+            decision_id,
+            exists=True,
+            error=LINEAGE_UNREADABLE,
+            detail=f"nested more than {MAX_LINEAGE_DEPTH} levels deep",
         )
     return RawLineage(decision_id, exists=True, data=data)
 
@@ -1129,7 +1214,8 @@ def new_lineage_doc(
     """The lineage document for a newly recorded ADR (kind=created).
 
     Args:
-        decision: The ADR just appended to decisions.yaml (known status).
+        decision: The ADR just appended to decisions.yaml (known status), with
+            its title as stored (:func:`stored_title`), which the anchor hashes.
         declared: Declared provenance; missing values are ``unknown``.
         now: The timestamp from :func:`_utc_now`.
         via: The tool name recorded on the event.
@@ -1194,7 +1280,11 @@ def started_doc(decision: Decision, now: str, *, via: str = "pm_update_decision"
 
 
 def dump_lineage(doc: Mapping, decision_id: str) -> str:
-    """The exact text ``storage._save_yaml`` writes for ``doc`` (header included)."""
+    """The exact text ``storage._save_yaml`` writes for ``doc`` (header included).
+
+    Unbounded: a string repeated through aliases is written out every time.
+    Writers use ``storage``'s capped dump, which produces the same text.
+    """
     body = yaml.safe_dump(
         doc,
         default_flow_style=False,
@@ -1253,8 +1343,12 @@ def write_refusal(doc: object, decision: Decision) -> tuple[str, str] | None:
     if anchor_state(doc, decision) == "mismatch":
         return (
             LINEAGE_ANCHOR_MISMATCH,
-            f"{adr}: the lineage file was written for another ADR with this id (its anchor "
-            "does not match the ADR's date and title)",
+            f"{adr}: the lineage file's anchor does not match the ADR's date and title: it "
+            "was written for another ADR with this id, or the ADR's title or date changed "
+            "after it was written. Nothing was written. If the lineage belongs to this ADR, "
+            f"delete anchor from .pm/{LINEAGE_DIR}/{adr}.yaml by hand and call again; the "
+            "next change ties it to the ADR's current date and title. Otherwise move the "
+            f"file out of .pm/{LINEAGE_DIR} by hand.",
         )
     return None
 
@@ -1317,6 +1411,12 @@ def _given(text: str | None) -> bool:
 
 
 def _link_argument_error(argument: str, value: object) -> dict | None:
+    """Check one of add_links / remove_links by its shape and size alone.
+
+    The length of each list is checked before anything looks at its items, so
+    an oversized argument is refused in constant time, before any lock is
+    taken (no type may hold more than MAX_LINKS_PER_TYPE ids anyway).
+    """
     if value is None:
         return None
     if not isinstance(value, Mapping):
@@ -1332,6 +1432,11 @@ def _link_argument_error(argument: str, value: object) -> dict | None:
             )
         if isinstance(targets, (str, bytes)) or not isinstance(targets, Sequence):
             return _error("invalid_link_target", f"{argument}.{link_type} must be a list of ids")
+        if len(targets) > MAX_LINKS_PER_TYPE:
+            return _error(
+                "too_many_links",
+                f"{argument}.{link_type} may list at most {MAX_LINKS_PER_TYPE} ids",
+            )
         for target in targets:
             if not is_decision_id(target):
                 return _error(
@@ -1398,11 +1503,95 @@ def validate_change(change: LineageChange) -> dict | None:
 
 
 def _dedupe(items: Iterable[str]) -> list[str]:
-    seen: list[str] = []
-    for item in items:
-        if item not in seen:
-            seen.append(item)
-    return seen
+    """``items`` without repeats, first appearance first (linear time)."""
+    return list(dict.fromkeys(items))
+
+
+def appends_text(change: LineageChange) -> bool:
+    """Whether ``change`` appends a note or an evaluation.
+
+    Those are the events a caller can add without limit, so they stop at
+    MAX_APPEND_BYTES (:func:`size_refusal`).
+    """
+    return _given(change.note) or _given(change.evaluation)
+
+
+def size_refusal(decision_id: str, size: int | None, change: LineageChange) -> dict | None:
+    """The ``decision_lineage_too_large`` error for a rewritten lineage, or ``None``.
+
+    Every change must leave the file within MAX_LINEAGE_BYTES (what readers
+    accept). A change that appends a note or an evaluation must also leave it
+    within MAX_APPEND_BYTES, so the last LINEAGE_RESERVE_BYTES stay free for
+    lifecycle, link and declared changes: a lineage filled with notes can
+    still be adopted, rejected or superseded (design §2.6). That room is not
+    guaranteed, since repeated link and lifecycle changes use it too, and the
+    remediation does not promise it.
+
+    Args:
+        decision_id: The ADR id.
+        size: The new text's size in UTF-8 bytes; ``None`` when the capped
+            dump gave up because it exceeds MAX_LINEAGE_BYTES.
+        change: The change that produced it.
+
+    Returns:
+        The error dict (with a remediation), or ``None`` when the size is fine.
+    """
+    path = f".pm/{LINEAGE_DIR}/{decision_id}.yaml"
+    trim = (
+        f"move older note and evaluation events out of {path} by hand (for example into a "
+        f"file outside .pm/{LINEAGE_DIR}), keeping its lifecycle, link and declared events"
+    )
+    if size is None or size > MAX_LINEAGE_BYTES:
+        return _error(
+            LINEAGE_TOO_LARGE,
+            f"{decision_id}: the lineage would exceed {MAX_LINEAGE_BYTES} bytes; nothing was "
+            "written",
+            remediation=(
+                f"Shorten the reason or split the change into smaller calls. If the file is "
+                f"full, {trim}. A value the file repeats through YAML aliases (&name, *name) "
+                "is written out in full at every repeat; replace such repeats by hand."
+            ),
+        )
+    if appends_text(change) and size > MAX_APPEND_BYTES:
+        return _error(
+            LINEAGE_TOO_LARGE,
+            f"{decision_id}: notes and evaluations are not added once the lineage would pass "
+            f"{MAX_APPEND_BYTES} bytes, so that room is kept for lifecycle and link changes; "
+            "nothing was written",
+            remediation=(
+                "Lifecycle, link and declared changes usually still fit: make them in a call "
+                "without note and evaluation. Repeated link and lifecycle changes use up that "
+                "room too, so one of them can be refused as well; then shorten its reason. To "
+                f"add more notes or evaluations, or when even a short reason does not fit, {trim}."
+            ),
+        )
+    return None
+
+
+def _keep_one_reason(events: list[dict]) -> None:
+    """Keep a call's reason on the last of its lifecycle, link and declared events.
+
+    A call has one reason. Copying it to every event let one call with 50
+    links and a 4,000-character reason fill most of the size cap, so it is
+    stored once (design §2.4). It goes on the last such event because readers
+    show the file's last RECENT_EVENTS events: a call's events are contiguous
+    and its lifecycle, link and declared events come before its evaluation,
+    note and status_reprojected ones (the order of ``_EVENT_FIELDS``), so a
+    window that shows any of them also shows the one with the reason.
+
+    That event keeps ``reason`` even when the call gave none (an empty
+    string; only add_links can be called without one). Same-second calls share
+    ``at`` and ``via``, so this is what tells them apart: a lifecycle, link or
+    declared event without ``reason`` belongs to the call of the next event
+    that has one.
+
+    Args:
+        events: The call's new events in file order; each lifecycle, link and
+            declared event carries the reason (possibly empty) on entry.
+    """
+    carriers = [event for event in events if "reason" in event]
+    for event in carriers[:-1]:
+        del event["reason"]
 
 
 def _with_anchor(doc: dict, decision: Decision) -> dict:
@@ -1429,7 +1618,9 @@ def apply_change(
     """Apply one lineage change to a loaded document; pure, no I/O (design §4.3).
 
     Order: declared backfill, links, lifecycle, evaluation, note. Events are
-    appended with one ``at`` in the order of design §2.4. The status is decided
+    appended with one ``at`` in the order of design §2.4, and the call's reason
+    is stored once, on the last lifecycle, link or declared event
+    (:func:`_keep_one_reason`). The status is decided
     by design §3.3 rule 4: when the lineage already disagreed with
     decisions.yaml before the call, the status is rewritten only if the call
     names a lifecycle (the same value is enough); otherwise it is left alone
@@ -1486,13 +1677,14 @@ def apply_change(
     notices: list[dict] = []
     via = change.via
 
-    # 1. declared backfill
+    # 1. declared backfill. A value that is not a string counts as unknown, as
+    # readers show it (design §2.7), so what is shown as unknown can be filled.
     declared = dict(doc.get("declared") or {})
     for name, value in (("origin", change.origin), ("recorded_timing", change.recorded_timing)):
         if value is None:
             continue
-        current = declared.get(name, UNKNOWN)
-        if current != UNKNOWN:
+        current = declared.get(name)
+        if isinstance(current, str) and current != UNKNOWN:
             return ChangeOutcome(
                 error=_error(
                     "declared_already_set",
@@ -1545,12 +1737,20 @@ def apply_change(
                 continue
             links[link_type].append(target)
             added.setdefault(link_type, []).append(target)
-            event = {"at": now, "kind": "link", "op": "add", "type": link_type, "target": target}
-            if reason_text:
-                event["reason"] = reason_text
-                reason_used = True
-            event["via"] = via
-            buckets["link"].append(event)
+            # An empty reason is kept too: it marks where a call without a
+            # reason ends (_keep_one_reason).
+            buckets["link"].append(
+                {
+                    "at": now,
+                    "kind": "link",
+                    "op": "add",
+                    "type": link_type,
+                    "target": target,
+                    "reason": reason_text,
+                    "via": via,
+                }
+            )
+            reason_used = reason_used or bool(reason_text)
         if len(links[link_type]) > MAX_LINKS_PER_TYPE:
             return ChangeOutcome(
                 error=_error(
@@ -1679,6 +1879,7 @@ def apply_change(
         buckets["note"].append({"at": now, "kind": "note", "text": text, "via": via})
 
     new_events = [event for kind in EVENT_KINDS for event in buckets[kind]]
+    _keep_one_reason(new_events)
     changed = bool(new_events)
     outcome = ChangeOutcome(
         changed=changed,

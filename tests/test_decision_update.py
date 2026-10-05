@@ -1119,6 +1119,11 @@ _ERROR_CASES: list[tuple[Callable[[Path], None], dict, str]] = [
         {"add_links": {"amends": [f"ADR-{n:03d}" for n in range(2, 53)]}},
         "too_many_links",
     ),
+    (
+        _many,
+        {"remove_links": {"amends": [f"ADR-{n:03d}" for n in range(2, 53)]}, "reason": "r"},
+        "too_many_links",
+    ),
     (_good, {"lifecycle": "superseded", "reason": "r"}, "superseded_by_required"),
     (_good, {"add_links": {"superseded_by": ["ADR-002"]}}, "superseded_by_not_allowed"),
     (_good, {"lifecycle": "adopted"}, "reason_required"),
@@ -1212,6 +1217,18 @@ def test_every_error_code_returns_an_error_dict_and_writes_nothing(
             {"decision_id": "ADR-001", "origin": "human", "reason": "r"},
             "declared_backfill_value_not_allowed",
         ),
+        (
+            {"decision_id": "ADR-001", "add_links": {"amends": ["ADR-002"] * 51}},
+            "too_many_links",
+        ),
+        (
+            {
+                "decision_id": "ADR-001",
+                "remove_links": {"supersedes": ["ADR-002"] * 51},
+                "reason": "r",
+            },
+            "too_many_links",
+        ),
     ],
 )
 def test_argument_errors_come_before_the_project_is_looked_up(
@@ -1234,3 +1251,54 @@ def test_consequences_survive_a_lifecycle_change(tmp_project: Path):
     [after] = storage.load_decisions(_pm(tmp_project))
     assert after.consequences == adr.consequences
     assert (after.title, after.context, after.decision) == (adr.title, adr.context, adr.decision)
+
+
+# ─── A full lineage, odd titles ──────────────────────
+
+
+def test_notes_cannot_take_the_room_a_lifecycle_change_needs(tmp_project: Path):
+    """Filling a proposed ADR's lineage with notes must not block adopting it.
+
+    Events are append-only and notes have no count limit, so notes used to
+    fill the file up to the cap, after which even lifecycle=adopted was
+    refused with decision_lineage_too_large and only a hand edit helped.
+    """
+    adr = _adr("ADR-001", DecisionStatus.PROPOSED)
+    _seed(tmp_project, adr)
+    doc = _doc(adr, "proposed")
+    doc["pad"] = "p"
+    doc["pad"] = "p" * (lineage.MAX_APPEND_BYTES - 3_000 - len(dump_lineage(doc, adr.id)))
+    _put_lineage(tmp_project, "ADR-001", doc)
+
+    for size in (4_000, 1_000, 200, 50, 10, 1):  # fill every gap the notes can reach
+        for _ in range(100):
+            result = _update(tmp_project, note="n" * size)
+            if result["status"] == "error":
+                break
+        assert result["code"] == "decision_lineage_too_large", result
+        assert "without note and evaluation" in result["remediation"]
+    with_note = _update(tmp_project, lifecycle="adopted", reason="approved", note="n")
+    assert with_note["code"] == "decision_lineage_too_large"
+
+    adopted = _update(tmp_project, lifecycle="adopted", reason="the user approved the design")
+
+    assert adopted["status"] == "updated", adopted
+    assert _status(tmp_project) == DecisionStatus.ACCEPTED
+    assert _lineage_path(tmp_project).stat().st_size <= MAX_LINEAGE_BYTES
+
+
+def test_a_title_that_yaml_reads_back_differently_stays_tied_to_its_lineage(
+    tmp_project: Path,
+):
+    # U+0085 (NEL; Windows-1252 "…" read as Latin-1) comes back as a space.
+    added = _add(tmp_project, "Use A\x85B", origin="ai_auto")
+    assert added["title"] == "Use A B"
+
+    got = pm_decision_query(action="get", decision_id="ADR-001", project_path=str(tmp_project))
+
+    assert got["decision"]["title"] == "Use A B"
+    assert got["lineage"]["derived"] is False
+    assert got["lineage"]["declared"]["origin"] == "ai_auto"
+    assert got["warnings"] == []
+    adopted = _update(tmp_project, lifecycle="adopted", reason="the user approved")
+    assert adopted["status"] == "updated", adopted

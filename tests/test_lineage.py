@@ -785,6 +785,14 @@ class TestBoundedRead:
 # ─── Create (design §5.1) ────────────────────────────────────────────────
 
 
+def _padded(adr: Decision, size: int, **overrides: object) -> dict:
+    """``_doc(adr)`` with an unknown ``pad`` key that makes its file ``size`` bytes."""
+    doc = _doc(adr, pad="p", **overrides)
+    doc["pad"] = "p" * (size - len(dump_lineage(doc, adr.id).encode()) + 1)
+    assert len(dump_lineage(doc, adr.id).encode()) == size
+    return doc
+
+
 def _read_doc(pm_path: Path, adr_id: str = "ADR-001") -> dict:
     return yaml.safe_load(_path(pm_path, adr_id).read_text(encoding="utf-8"))
 
@@ -1446,6 +1454,145 @@ class TestChange:
         diff = [(b, a) for b, a in zip(before, after, strict=True) if b != a]
         assert diff == [("  status: proposed", "  status: deprecated")]
 
+    @pytest.mark.parametrize(
+        ("change", "carrier"),
+        [
+            (
+                LineageChange(
+                    lifecycle="superseded",
+                    add_links={
+                        "superseded_by": ["ADR-002"],
+                        "amends": [f"ADR-{n:03d}" for n in range(3, 52)],
+                    },
+                    origin="ai_auto",
+                    recorded_timing="post_hoc",
+                    reason="r" * 4_000,
+                ),
+                ("declared", "recorded_timing"),
+            ),
+            (
+                LineageChange(
+                    lifecycle="rejected",
+                    remove_links={"amends": ["ADR-002", "ADR-003"]},
+                    reason="r" * 4_000,
+                ),
+                ("link", "ADR-003"),
+            ),
+            (
+                LineageChange(
+                    remove_links={"amends": ["ADR-002", "ADR-003"]},
+                    origin="ai_auto",
+                    reason="r" * 4_000,
+                ),
+                ("declared", "origin"),
+            ),
+            (LineageChange(lifecycle="adopted", reason="r", note="n"), ("lifecycle", "adopted")),
+            (LineageChange(add_links={"amends": ["ADR-004", "ADR-005"]}), ("link", "ADR-005")),
+        ],
+    )
+    def test_a_call_stores_its_reason_once_on_its_last_reason_event(
+        self, tmp_pm_path: Path, change, carrier
+    ):
+        adr = _adr(status=DecisionStatus.PROPOSED)
+        _seed(tmp_pm_path, adr, *(_adr(f"ADR-{n:03d}") for n in range(2, 52)))
+        unknown = dict.fromkeys(("origin", "recorded_timing", "decision_kind"), "unknown")
+        doc = _doc(adr, declared=unknown)
+        doc["links"]["amends"] = ["ADR-002", "ADR-003"]
+        _put(tmp_pm_path, adr.id, doc)
+
+        result = change_decision_lineage(tmp_pm_path, adr.id, change)
+
+        assert result.status == "updated", result.error
+        added = _read_doc(tmp_pm_path)["events"][1:]
+        assert len(added) == len(result.events_added)
+        assert {e["at"] for e in added} == {NOW}
+        [holder] = [e for e in added if "reason" in e]
+        # The last lifecycle / link / declared event: readers show the file's
+        # last events, so a window showing any of the call's shows this one.
+        assert holder == [e for e in added if e["kind"] in ("lifecycle", "link", "declared")][-1]
+        name = {"declared": "field", "link": "target", "lifecycle": "to"}[holder["kind"]]
+        assert (holder["kind"], holder[name]) == carrier
+        # A call without a reason keeps an empty one, which marks where it ends.
+        assert holder["reason"] == (change.reason or "")
+        assert list(holder)[-2:] == ["reason", "via"]
+        # 50 links and two declared values with a 4,000-character reason used
+        # to copy it 52 times (about 210 KB).
+        assert _path(tmp_pm_path).stat().st_size < 20_000
+
+    def test_two_declared_values_share_one_reason(self, tmp_pm_path: Path):
+        adr = _adr()
+        _seed(tmp_pm_path, adr)
+        _put(tmp_pm_path, adr.id, _doc(adr, declared={"origin": "unknown"}))
+        result = change_decision_lineage(
+            tmp_pm_path,
+            adr.id,
+            LineageChange(origin="ai_auto", recorded_timing="post_hoc", reason="from the log"),
+        )
+        assert result.events_added == ["declared", "declared"]
+        first, second = _read_doc(tmp_pm_path)["events"][1:]
+        assert first["field"] == "origin" and "reason" not in first
+        assert (second["field"], second["reason"]) == ("recorded_timing", "from the log")
+
+    @pytest.mark.parametrize("argument", ["add_links", "remove_links"])
+    def test_an_oversized_link_list_is_refused_before_any_lock(
+        self, tmp_pm_path: Path, monkeypatch: pytest.MonkeyPatch, argument: str
+    ):
+        _seed(tmp_pm_path, *(_adr(f"ADR-{n:03d}") for n in range(1, 60)))
+        before = _snapshot(tmp_pm_path)
+        taken: list[str] = []
+        real = storage._yaml_transaction
+
+        def spy(base_dir, filename, **kwargs):
+            taken.append(filename)
+            return real(base_dir, filename, **kwargs)
+
+        monkeypatch.setattr(storage, "_yaml_transaction", spy)
+        ids = [f"ADR-{n:03d}" for n in range(2, 3 + lineage.MAX_LINKS_PER_TYPE)]
+        change = LineageChange(reason="r", **{argument: {"amends": ids}})
+
+        result = change_decision_lineage(tmp_pm_path, "ADR-001", change)
+
+        assert result.error["code"] == "too_many_links"
+        assert taken == []
+        assert _snapshot(tmp_pm_path) == before
+        huge = LineageChange(reason="r", **{argument: {"amends": ["x"] * 1_000_000}})
+        started = time.monotonic()
+        assert lineage.validate_change(huge)["code"] == "too_many_links"
+        assert time.monotonic() - started < 0.1
+        fits = LineageChange(reason="r", **{argument: {"amends": ids[:-1]}})
+        assert lineage.validate_change(fits) is None
+
+    def test_dedupe_keeps_first_appearances_in_linear_time(self):
+        assert lineage._dedupe(["b", "a", "b", "c", "a"]) == ["b", "a", "c"]
+        many = [f"ADR-{n}" for n in range(20_000)]
+        started = time.monotonic()
+        assert lineage._dedupe(many + many) == many
+        assert time.monotonic() - started < 0.5
+
+    def test_a_declared_value_that_is_not_a_string_can_be_filled_in(self, tmp_pm_path: Path):
+        # Readers show a non-string declared value as unknown (design §2.7);
+        # the backfill must treat it the same way.
+        adr = _adr()
+        _seed(tmp_pm_path, adr)
+        declared = {"origin": None, "recorded_timing": "", "decision_kind": "unknown"}
+        _put(tmp_pm_path, adr.id, _doc(adr, declared=declared))
+        view = lineage_view(adr, read_lineage_raw(tmp_pm_path, adr.id))
+        assert view.declared["origin"] == "unknown" and "origin" in view.not_recorded
+
+        filled = change_decision_lineage(
+            tmp_pm_path, adr.id, LineageChange(origin="ai_auto", reason="from the log")
+        )
+
+        assert filled.status == "updated", filled.error
+        assert filled.changes == {"declared": {"origin": {"from": "unknown", "to": "ai_auto"}}}
+        assert _read_doc(tmp_pm_path)["declared"]["origin"] == "ai_auto"
+        # An empty string is a string: shown as it is, not as unknown, and kept.
+        assert "recorded_timing" not in view.not_recorded
+        kept = change_decision_lineage(
+            tmp_pm_path, adr.id, LineageChange(recorded_timing="post_hoc", reason="r")
+        )
+        assert kept.error["code"] == "declared_already_set"
+
 
 # ─── Write refusals (design §2.6) and the size cap ───────────────────────
 
@@ -1516,21 +1663,171 @@ class TestWriteRefusal:
         assert outside.read_bytes() == before and path.is_symlink()
 
     def test_a_change_that_would_exceed_the_cap_is_refused(self, tmp_pm_path: Path):
-        adr = _adr()
+        adr = _adr(status=DecisionStatus.PROPOSED)
         _seed(tmp_pm_path, adr)
-        doc = _doc(adr, pad="")
-        room = MAX_LINEAGE_BYTES - len(dump_lineage(doc, adr.id).encode()) - 1_000
-        doc["pad"] = "p" * room
-        path = _put(tmp_pm_path, adr.id, doc)
+        path = _put(tmp_pm_path, adr.id, _padded(adr, MAX_LINEAGE_BYTES - 1_000))
         assert path.stat().st_size < MAX_LINEAGE_BYTES
         before = path.read_bytes()
 
-        result = change_decision_lineage(tmp_pm_path, adr.id, LineageChange(note="n" * 4_000))
+        result = change_decision_lineage(
+            tmp_pm_path, adr.id, LineageChange(lifecycle="adopted", reason="r" * 4_000)
+        )
 
         assert result.error["code"] == "decision_lineage_too_large"
+        assert str(MAX_LINEAGE_BYTES) in result.error["message"]
+        assert "Shorten the reason" in result.error["remediation"]
         assert path.read_bytes() == before
-        small = change_decision_lineage(tmp_pm_path, adr.id, LineageChange(note="fits"))
+        small = change_decision_lineage(
+            tmp_pm_path, adr.id, LineageChange(lifecycle="adopted", reason="the user approved")
+        )
         assert small.status == "updated"
+
+    def test_notes_stop_short_of_the_cap_so_lifecycle_and_links_still_fit(self, tmp_pm_path: Path):
+        adr = _adr(status=DecisionStatus.PROPOSED)
+        _seed(tmp_pm_path, adr, _adr("ADR-002"))
+        unknown = dict.fromkeys(("origin", "recorded_timing", "decision_kind"), "unknown")
+        path = _put(
+            tmp_pm_path, adr.id, _padded(adr, lineage.MAX_APPEND_BYTES - 200, declared=unknown)
+        )
+        before = path.read_bytes()
+
+        # Past MAX_APPEND_BYTES (though within the cap) a note or an evaluation
+        # is refused, even together with a lifecycle change.
+        for change in (
+            LineageChange(note="n" * 4_000),
+            LineageChange(evaluation="e" * 4_000),
+            LineageChange(lifecycle="adopted", reason="ok", note="n" * 4_000),
+        ):
+            refused = change_decision_lineage(tmp_pm_path, adr.id, change)
+            assert refused.error["code"] == "decision_lineage_too_large", change
+            assert str(lineage.MAX_APPEND_BYTES) in refused.error["message"]
+            assert "without note and evaluation" in refused.error["remediation"]
+            assert "move older note and evaluation events" in refused.error["remediation"]
+            assert path.read_bytes() == before
+
+        assert change_decision_lineage(tmp_pm_path, adr.id, LineageChange(note="fits")).status == (
+            "updated"
+        )
+        # Lifecycle, link and declared changes may use the reserve.
+        for change in (
+            LineageChange(lifecycle="adopted", reason="x" * 4_000),
+            LineageChange(add_links={"amends": ["ADR-002"]}, reason="y" * 4_000),
+            LineageChange(origin="ai_auto", reason="z" * 4_000),
+        ):
+            assert change_decision_lineage(tmp_pm_path, adr.id, change).status == "updated"
+        assert path.stat().st_size > lineage.MAX_APPEND_BYTES
+        last = change_decision_lineage(tmp_pm_path, adr.id, LineageChange(note="n"))
+        assert last.error["code"] == "decision_lineage_too_large"
+
+    def test_the_refusal_does_not_promise_room_that_link_changes_can_use_up(
+        self, tmp_pm_path: Path
+    ):
+        # The reserve is kept against notes only: adding and removing a link
+        # with a long reason uses it up, so the note refusal must not say that
+        # lifecycle and link changes "still fit".
+        adr = _adr(status=DecisionStatus.PROPOSED)
+        _seed(tmp_pm_path, adr, _adr("ADR-002"))
+        path = _put(tmp_pm_path, adr.id, _padded(adr, lineage.MAX_APPEND_BYTES - 100))
+        reason = "理由" * 2_000  # 4,000 characters, 12 KB
+        churn = (
+            LineageChange(add_links={"amends": ["ADR-002"]}),
+            LineageChange(remove_links={"amends": ["ADR-002"]}, reason=reason),
+        )
+        results = [change_decision_lineage(tmp_pm_path, adr.id, c) for c in churn * 2]
+
+        assert [r.status for r in results] == ["updated", "updated", "updated", "error"]
+        refused = results[-1].error
+        assert refused["code"] == "decision_lineage_too_large"
+        assert "Shorten the reason" in refused["remediation"]
+        note = change_decision_lineage(tmp_pm_path, adr.id, LineageChange(note="n")).error
+        assert note["code"] == "decision_lineage_too_large"
+        assert "usually still fit" in note["remediation"]
+        assert "shorten its reason" in note["remediation"]
+        assert path.stat().st_size <= MAX_LINEAGE_BYTES
+        # A short reason still fits.
+        adopted = LineageChange(lifecycle="adopted", reason="the user approved")
+        assert change_decision_lineage(tmp_pm_path, adr.id, adopted).status == "updated"
+
+    def test_size_refusal_reserves_room_only_against_notes_and_evaluations(self):
+        note = LineageChange(note="n")
+        evaluation = LineageChange(evaluation="e")
+        lifecycle = LineageChange(lifecycle="adopted", reason="r")
+        assert lineage.LINEAGE_RESERVE_BYTES > 12_500  # a 4,000-character 3-byte reason
+        assert lineage.MAX_APPEND_BYTES == MAX_LINEAGE_BYTES - lineage.LINEAGE_RESERVE_BYTES
+        for change in (note, evaluation, lifecycle):
+            assert lineage.size_refusal("ADR-001", lineage.MAX_APPEND_BYTES, change) is None
+            for size in (None, MAX_LINEAGE_BYTES + 1):
+                error = lineage.size_refusal("ADR-001", size, change)
+                assert error["code"] == "decision_lineage_too_large"
+                assert error["remediation"]
+        for size in (lineage.MAX_APPEND_BYTES + 1, MAX_LINEAGE_BYTES):
+            assert lineage.size_refusal("ADR-001", size, note)["code"] == (
+                "decision_lineage_too_large"
+            )
+            assert lineage.size_refusal("ADR-001", size, evaluation) is not None
+            assert lineage.size_refusal("ADR-001", size, lifecycle) is None
+        blank = LineageChange(note="   ", lifecycle="adopted", reason="r")
+        assert lineage.size_refusal("ADR-001", MAX_LINEAGE_BYTES, blank) is None
+
+    def test_a_string_repeated_through_aliases_is_refused_without_expanding_it(
+        self, tmp_pm_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # 45 KB on disk; safe_dump writes a str once per alias (100 MB here),
+        # which took 20 s and 300 MB under both locks.
+        adr = _adr()
+        _seed(tmp_pm_path, adr)
+        long = "s" * 20_000
+        aliases = "".join("- *s\n" for _ in range(5_000))
+        path = _put(
+            tmp_pm_path,
+            adr.id,
+            dump_lineage(_doc(adr), adr.id) + f"extra:\n- &s {long}\n{aliases}",
+        )
+        assert path.stat().st_size < 50_000
+        before = path.read_bytes()
+        assert read_lineage_raw(tmp_pm_path, adr.id).error is None
+        written: list[int] = []
+        real_write = storage._CappedText.write
+
+        def counting_write(self, text: str) -> None:
+            written.append(len(text))
+            real_write(self, text)
+
+        monkeypatch.setattr(storage._CappedText, "write", counting_write)
+        started = time.monotonic()
+
+        result = change_decision_lineage(tmp_pm_path, adr.id, LineageChange(note="n"))
+
+        assert time.monotonic() - started < 5
+        assert result.error["code"] == "decision_lineage_too_large"
+        assert sum(written) <= MAX_LINEAGE_BYTES + len(long)
+        assert path.read_bytes() == before
+
+    def test_the_capped_dump_writes_what_dump_lineage_writes(self):
+        adr = _adr()
+        doc = _doc(adr, extra={"jp": "日本語" * 50, "bin": b"\xff", "when": ADR_DATE})
+        text = dump_lineage(doc, adr.id)
+        assert storage._dump_lineage_capped(doc, adr.id, len(text.encode())) == text
+        assert storage._dump_lineage_capped(doc, adr.id, len(text.encode()) - 1) is None
+
+    def test_a_value_that_cannot_be_dumped_is_refused_not_raised(
+        self, tmp_pm_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        adr = _adr()
+        _seed(tmp_pm_path, adr)
+        path = _put(tmp_pm_path, adr.id, _doc(adr))
+        before = path.read_bytes()
+        for problem in (RecursionError("deep"), yaml.representer.RepresenterError("x")):
+
+            def failing_dump(*_args, _problem=problem, **_kwargs):
+                raise _problem
+
+            monkeypatch.setattr(storage.yaml, "safe_dump", failing_dump)
+            result = change_decision_lineage(tmp_pm_path, adr.id, LineageChange(note="n"))
+            assert result.error["code"] == "decision_lineage_unreadable"
+            assert type(problem).__name__ in result.error["message"]
+            assert "deep" not in result.error["message"]  # the type, never the text
+            assert path.read_bytes() == before
 
 
 # ─── Unknown keys survive a rewrite (design §2.6) ────────────────────────
@@ -1579,6 +1876,87 @@ class TestUnknownKeysSurvive:
         assert _path(tmp_pm_path).stat().st_size < 20_000
 
 
+# ─── Nesting depth: one limit for readers and writers ────────────────────
+
+
+def _nested_extra(levels: int) -> str:
+    """An ``extra`` key whose value is ``levels`` lists, one inside the other."""
+    return "extra: " + "[" * levels + "]" * levels + "\n"
+
+
+class TestNestingDepth:
+    def test_the_limit_is_shared_by_the_reader_and_the_writer(self, tmp_pm_path: Path):
+        adr = _adr()
+        _seed(tmp_pm_path, adr)
+        base = dump_lineage(_doc(adr), adr.id)
+        # The top-level mapping is level 1, so MAX - 1 lists reach the limit.
+        _put(tmp_pm_path, adr.id, base + _nested_extra(lineage.MAX_LINEAGE_DEPTH - 1))
+        assert read_lineage_raw(tmp_pm_path, adr.id).error is None
+        ok = change_decision_lineage(tmp_pm_path, adr.id, LineageChange(note="n"))
+        assert ok.status == "updated"
+
+        path = _put(tmp_pm_path, adr.id, base + _nested_extra(lineage.MAX_LINEAGE_DEPTH))
+        raw = read_lineage_raw(tmp_pm_path, adr.id)
+        assert raw.error == "decision_lineage_unreadable"
+        assert raw.detail == f"nested more than {lineage.MAX_LINEAGE_DEPTH} levels deep"
+        view = lineage_view(adr, raw)
+        assert view.derived and _codes(view) == {"decision_lineage_unreadable"}
+        before = path.read_bytes()
+        refused = change_decision_lineage(tmp_pm_path, adr.id, LineageChange(note="n"))
+        assert refused.error["code"] == "decision_lineage_unreadable"
+        assert "nested more than" in refused.error["message"]
+        assert path.read_bytes() == before
+
+    def test_a_file_that_loads_but_cannot_be_dumped_is_refused_not_raised(self, tmp_pm_path: Path):
+        # safe_load accepts ~450 levels; safe_dump runs out of stack from ~320
+        # (it raised RecursionError out of the tool).
+        adr = _adr()
+        _seed(tmp_pm_path, adr)
+        path = _put(tmp_pm_path, adr.id, dump_lineage(_doc(adr), adr.id) + _nested_extra(400))
+        before = path.read_bytes()
+
+        result = change_decision_lineage(tmp_pm_path, adr.id, LineageChange(note="n"))
+
+        assert result.status == "error"
+        assert result.error["code"] == "decision_lineage_unreadable"
+        assert path.read_bytes() == before
+
+    def test_the_depth_check_is_iterative_and_visits_each_container_once(self):
+        deep: list = []
+        node = deep
+        for _ in range(10_000):  # far past the recursion limit
+            child: list = []
+            node.append(child)
+            node = child
+        assert lineage._nested_deeper_than(deep, 64)
+
+        loop: list = []
+        loop.append(loop)  # a recursive alias
+        assert not lineage._nested_deeper_than({"a": loop}, 64)
+
+        layer: list = ["x"] * 9
+        for _ in range(40):  # an alias bomb: 9**40 paths, 41 containers
+            layer = [layer] * 9
+        started = time.monotonic()
+        assert not lineage._nested_deeper_than({"bomb": layer}, 64)
+        assert lineage._nested_deeper_than({"bomb": layer}, 40)
+        assert time.monotonic() - started < 1
+
+    def test_a_shared_value_counts_where_it_first_appears(self):
+        # safe_dump expands a shared value at its first appearance in document
+        # order and writes an alias after that, so that is the depth that counts.
+        tail: list = []
+        node = tail
+        for _ in range(60):
+            child: list = []
+            node.append(child)
+            node = child
+        first_deep = {"deep": [[[tail]]], "shallow": tail}
+        first_shallow = {"shallow": tail, "deep": [[[tail]]]}
+        assert lineage._nested_deeper_than(first_deep, 64)
+        assert not lineage._nested_deeper_than(first_shallow, 64)
+
+
 # ─── Anchor (design §2.2) ────────────────────────────────────────────────
 
 
@@ -1604,6 +1982,8 @@ class TestAnchor:
         _seed(tmp_pm_path, *decisions)
         refused = change_decision_lineage(tmp_pm_path, "ADR-001", LineageChange(note="n"))
         assert refused.error["code"] == "decision_lineage_anchor_mismatch"
+        # The refusal itself says how to recover, not only pm_decision_query.
+        assert "delete anchor from .pm/decision_lineage/ADR-001.yaml" in refused.error["message"]
         view = lineage_view(decisions[0], read_lineage_raw(tmp_pm_path, "ADR-001"))
         assert view.derived and _codes(view) == {"decision_lineage_anchor_mismatch"}
 
@@ -1615,6 +1995,45 @@ class TestAnchor:
         assert _read_doc(tmp_pm_path)["anchor"]["title_sha256"] == lineage.title_sha256(
             "renamed by hand"
         )
+
+    def test_a_title_the_yaml_round_trip_changes_is_anchored_as_read_back(self, tmp_pm_path: Path):
+        # U+0085 is written raw and read back as a space: hashing the title as
+        # given detached a fresh ADR from its own lineage.
+        def build(number: int) -> Decision:
+            return Decision(
+                id=f"ADR-{number:03d}",
+                title="Use A\x85B",
+                date=ADR_DATE,
+                status=DecisionStatus.PROPOSED,
+            )
+
+        written = add_decision_with_lineage(tmp_pm_path, build)
+
+        assert written.decision.title == "Use A B"
+        [stored] = load_decisions(tmp_pm_path)
+        assert stored.title == "Use A B"
+        view = lineage_view(stored, read_lineage_raw(tmp_pm_path, "ADR-001"))
+        assert view.derived is False and view.notes == []
+        adopted = change_decision_lineage(
+            tmp_pm_path, "ADR-001", LineageChange(lifecycle="adopted", reason="approved")
+        )
+        assert adopted.status == "updated"
+
+    def test_stored_title_is_what_decisions_yaml_gives_back(self, tmp_pm_path: Path):
+        pieces = ["a", " ", "  ", "\n", "\r\n", "\x85", "\u2028", "\t", "'", '"', ": ", "# "]
+        pieces += ["-", "\ufeff", "\x00", "\x1b", "é", "日本", "x" * 90, "true", "1.5"]
+        samples = [
+            "".join(pieces[(i * 7 + j * 3) % len(pieces)] for j in range(i % 9 + 1))
+            for i in range(120)
+        ]
+        samples += [f"a{chr(code)}b" for code in range(0x00, 0x100)]
+        for title in samples:
+            stored = lineage.stored_title(title)
+            assert lineage.stored_title(stored) == stored, repr(title)
+            _seed(tmp_pm_path, Decision(id="ADR-001", title=stored, date=ADR_DATE))
+            assert load_decisions(tmp_pm_path)[0].title == stored, repr(title)
+            if "\x85" not in title:
+                assert stored == title, repr(title)
 
     def test_a_null_anchor_date_is_not_compared(self):
         undated = Decision.model_validate({"id": "ADR-001", "title": "t"})

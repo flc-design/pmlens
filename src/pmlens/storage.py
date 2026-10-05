@@ -596,6 +596,75 @@ class DecisionWrite:
     lifecycle: str | None = None
 
 
+class _SizeCapExceededError(Exception):
+    """The text a :class:`_CappedText` holds would exceed its cap."""
+
+
+class _CappedText:
+    """A text stream for ``safe_dump`` that refuses to hold more than ``limit`` UTF-8 bytes.
+
+    safe_dump writes a string out once per place it appears (PyYAML never
+    gives a str an anchor), so a small lineage whose unknown keys repeat one
+    long string through aliases expands on every rewrite: a 45 KB file took
+    20 s and 300 MB to dump, under both locks. Counting while the emitter
+    writes stops after about ``limit`` bytes instead.
+    """
+
+    def __init__(self, limit: int) -> None:
+        self._limit = limit
+        self._size = 0
+        self._parts: list[str] = []
+
+    def write(self, text: str) -> None:
+        """Take one chunk from the emitter.
+
+        Raises:
+            _SizeCapExceededError: The text would exceed the cap.
+        """
+        self._size += len(text) if text.isascii() else len(text.encode("utf-8"))
+        if self._size > self._limit:
+            raise _SizeCapExceededError
+        self._parts.append(text)
+
+    def flush(self) -> None:
+        """Nothing to flush (the emitter calls it at the end of the stream)."""
+
+    def getvalue(self) -> str:
+        """Everything written so far."""
+        return "".join(self._parts)
+
+
+def _dump_lineage_capped(doc: Mapping, decision_id: str, max_bytes: int) -> str | None:
+    """``lineage.dump_lineage``, giving up once the text would exceed ``max_bytes``.
+
+    Produces the same text (header included) as ``lineage.dump_lineage`` and
+    ``_save_yaml``; lineage.py cannot hold this because it never writes, not
+    even to a stream. The time and memory a rewrite takes under the locks stay
+    proportional to the cap, whatever the loaded document repeats.
+
+    Returns:
+        The text, or ``None`` when it would be larger than ``max_bytes``.
+
+    Raises:
+        RecursionError: The document nests too deeply to dump (readers refuse
+            such files first: ``lineage.MAX_LINEAGE_DEPTH``).
+        yaml.YAMLError: A value safe_dump cannot represent.
+    """
+    out = _CappedText(max_bytes)
+    try:
+        out.write(_yaml_header(_lineage.lineage_header_name(decision_id)))
+        yaml.safe_dump(
+            doc,
+            out,
+            default_flow_style=False,
+            allow_unicode=True,
+            sort_keys=False,
+        )
+    except _SizeCapExceededError:
+        return None
+    return out.getvalue()
+
+
 def _lineage_write_target(pm_path: Path, decision_id: str) -> Path:
     """Path of an ADR's lineage file, refusing a symlinked lineage directory.
 
@@ -640,6 +709,9 @@ def add_decision_with_lineage(
 
     ``build`` runs under the decisions lock and must only construct the record
     (see :func:`add_task_with_next_id`); the lineage is written outside it.
+    The title is stored as a reload of decisions.yaml gives it back
+    (:func:`lineage.stored_title`), so the new lineage's anchor matches the
+    ADR from the first read on.
 
     Args:
         pm_path: The project's ``.pm`` directory.
@@ -686,6 +758,12 @@ def add_decision_with_lineage(
         _reject_duplicate_id((d.id for d in decisions), decision.id, "decisions.yaml")
         if not _lineage.is_decision_id(decision.id):
             raise PmServerError(f"{decision.id!r} is not an ADR-NNN id; refusing to record it")
+        # Store the title in the form a reload gives back, so the anchor hashes
+        # the title every reader sees: a YAML round trip turns U+0085 into a
+        # space, which left a fresh ADR detached from its own lineage.
+        title = _lineage.stored_title(decision.title)
+        if title != decision.title:
+            decision = decision.model_copy(update={"title": title})
         now = _lineage._utc_now()
         doc = _lineage.new_lineage_doc(decision, declared, now, via=via)
         with _yaml_transaction(pm_path, f"{_LINEAGE_LOCK_PREFIX}{decision.id}"):
@@ -824,8 +902,10 @@ def change_decision_lineage(
 
     Under the decisions lock and then the ADR's lineage lock: the lineage is
     loaded (or started from the status), the change is validated against the
-    current state and applied (:func:`lineage.apply_change`), the result's
-    size is checked, the lineage is saved, and decisions.yaml is rewritten only
+    current state and applied (:func:`lineage.apply_change`), the result is
+    serialised under a size cap and checked (:func:`lineage.size_refusal`:
+    notes and evaluations stop short of the cap so lifecycle and link changes
+    still fit), the lineage is saved, and decisions.yaml is rewritten only
     when the projected status changed — and only that ADR's status. The ADR
     text is never touched. A failure to save decisions.yaml after the lineage
     was saved leaves the lineage (the source of truth) ahead; it is reported as
@@ -926,17 +1006,26 @@ def change_decision_lineage(
             )
             if not outcome.changed or outcome.doc is None:
                 return result
-            text = _lineage.dump_lineage(outcome.doc, decision_id)
-            if len(text.encode("utf-8")) > _lineage.MAX_LINEAGE_BYTES:
+            try:
+                text = _dump_lineage_capped(outcome.doc, decision_id, _lineage.MAX_LINEAGE_BYTES)
+            except (RecursionError, yaml.YAMLError) as exc:
+                # The readers' depth check keeps deep files out, so this is the
+                # last line; the type alone is reported (design §2.7).
                 return LineageChangeResult(
                     status="error",
                     decision_id=decision_id,
                     error=_lineage._error(
-                        _lineage.LINEAGE_TOO_LARGE,
-                        f"{decision_id}: the lineage would exceed "
-                        f"{_lineage.MAX_LINEAGE_BYTES} bytes; nothing was written",
+                        _lineage.LINEAGE_UNREADABLE,
+                        f"{decision_id}: the lineage cannot be written back "
+                        f"({_lineage.error_summary(exc)}); nothing was written. Fix the file "
+                        f"or move it out of .pm/{_lineage.LINEAGE_DIR} by hand.",
                     ),
                 )
+            too_large = _lineage.size_refusal(
+                decision_id, None if text is None else len(text.encode("utf-8")), change
+            )
+            if too_large is not None:
+                return LineageChangeResult(status="error", decision_id=decision_id, error=too_large)
             status_changes = outcome.new_status != adr.status
             new_status: DecisionStatus | str = outcome.new_status
             if status_changes:

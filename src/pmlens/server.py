@@ -3698,7 +3698,8 @@ def pm_add_decision(
     result: dict = {
         "status": "recorded",
         "decision_id": adr.id,
-        "title": title,
+        # The title as stored: storage keeps it in the form a reload gives back.
+        "title": adr.title,
         "decision_status": adr_status.value,
         # What reads show for the ADR now: a preexisting lineage file may carry
         # a lifecycle other than the one this call would have started with.
@@ -3823,6 +3824,10 @@ def pm_update_decision(
 _DECISION_QUERY_ACTIONS: tuple[str, ...] = ("list", "get")
 _DECISION_QUERY_ID_LIMIT = 50
 _LINKED_FROM_TRUNCATED = "decision_lineage_linked_from_truncated"
+# An ADR without a date key: the model fills in today, which moves every day,
+# so the date is shown as null (as the anchor treats it) and reported as info.
+_DATE_NOT_RECORDED = "decision_date_not_recorded"
+_DECISION_QUERY_INFO_CODES: frozenset[str] = frozenset({_DATE_NOT_RECORDED})
 
 _DECISION_QUERY_NOTICE = (
     "Lifecycle changes, declared values and events are what callers recorded through "
@@ -3837,6 +3842,11 @@ _DECISION_QUERY_WARNINGS: dict[str, tuple[str, str]] = {
         "ADR status outside proposed/accepted/deprecated/superseded",
         "Change each listed status to one of the four values by hand; older pmlens versions "
         "and the Desktop extension cannot read decisions.yaml until then.",
+    ),
+    _DATE_NOT_RECORDED: (
+        "the ADR has no date in decisions.yaml, so its date is shown as null (not recorded)",
+        "Add the date the decision was made to decisions.yaml by hand if it is known; "
+        "otherwise say it was not recorded rather than guess it.",
     ),
     "decision_status_mismatch": (
         "decisions.yaml status disagrees with the lineage lifecycle, which is what is shown",
@@ -3867,10 +3877,11 @@ _DECISION_QUERY_WARNINGS: dict[str, tuple[str, str]] = {
         "Fix the lifecycle in the lineage file by hand.",
     ),
     _lineage.LINEAGE_ANCHOR_MISMATCH: (
-        "the lineage file was written for another ADR with this id (its date or title "
-        "differs), so it is not shown",
-        "If the ADR's title or date was edited by hand, delete anchor from its lineage file "
-        f"so the next change ties it to the ADR again; otherwise move the file out of "
+        "the lineage file's anchor does not match the ADR's date and title (it was written "
+        "for another ADR with this id, or the title or date changed later), so it is not shown",
+        "If the lineage belongs to the ADR (its title or date was changed after the lineage "
+        "was written, for example by hand), delete anchor from its lineage file so the next "
+        f"change ties it to the ADR again; otherwise move the file out of "
         f".pm/{_lineage.LINEAGE_DIR} by hand.",
     ),
     "decision_lineage_link_asymmetric": (
@@ -3940,7 +3951,18 @@ def _decision_query_warning(code: str, items: list[str]) -> dict:
     listed = ", ".join(shown)
     if len(unique) > len(shown):
         listed += f" and {len(unique) - len(shown)} more"
-    return _build_warning("warning", code, f"{summary}: {listed}.", remediation)
+    level = "info" if code in _DECISION_QUERY_INFO_CODES else "warning"
+    return _build_warning(level, code, f"{summary}: {listed}.", remediation)
+
+
+def _decision_date(adr: Decision) -> str | None:
+    """The ADR's date as recorded, or ``None`` when decisions.yaml has none.
+
+    Without a ``date`` key the model fills in today, which is not when the
+    decision was made and moves every day (``lineage.anchor_for`` ignores it
+    for the same reason).
+    """
+    return adr.date.isoformat() if "date" in adr.model_fields_set else None
 
 
 def _decision_view(pm_path: Path, adr: Decision, id_counts: Counter[str]) -> _lineage.LineageView:
@@ -3958,6 +3980,8 @@ def _decision_problem_codes(adr: Decision, view: _lineage.LineageView) -> list[s
     found = set(view.note_codes) & set(_DECISION_VIEW_WARNING_CODES)
     if not isinstance(adr.status, DecisionStatus):
         found.add("decision_status_unknown")
+    if _decision_date(adr) is None:
+        found.add(_DATE_NOT_RECORDED)
     if view.status_mismatch:
         found.add("decision_status_mismatch")
     return [code for code in _DECISION_QUERY_WARNINGS if code in found]
@@ -4006,7 +4030,7 @@ def _decision_query_list(
             {
                 "id": id_label,
                 "title": adr.title,
-                "date": adr.date.isoformat(),
+                "date": _decision_date(adr),
                 "status": status_label,
                 "lifecycle": view.lifecycle,
                 "derived": view.derived,
@@ -4046,7 +4070,7 @@ def _decision_body(adr: Decision, id_label: str, status_label: str) -> tuple[dic
     body = {
         "id": id_label,
         "title": adr.title,
-        "date": adr.date.isoformat(),
+        "date": _decision_date(adr),
         "status": status_label,
         "context": adr.context,
         "decision": adr.decision,

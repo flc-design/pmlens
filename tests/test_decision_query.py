@@ -374,6 +374,72 @@ class TestGet:
         assert lineage_view["declared_later"] == ["origin"]
         assert lineage_view["not_recorded"] == ["recorded_timing", "decision_kind"]
 
+    def test_a_call_longer_than_the_window_shows_its_reason(self, tmp_project: Path):
+        # A call stores its reason once; on its first event the reason fell
+        # outside the last RECENT_EVENTS events that get shows.
+        ids = [f"ADR-{n:03d}" for n in range(2, 27)]
+        _seed(tmp_project, _adr("ADR-001"), *(_adr(adr_id) for adr_id in ids))
+        _change(tmp_project, "ADR-001", add_links={"amends": ids})
+        _change(tmp_project, "ADR-001", remove_links={"amends": ids}, reason="merged by the user")
+
+        shown = _get(tmp_project, "ADR-001")["lineage"]
+
+        assert shown["events_total"] == 1 + 2 * len(ids)
+        assert len(shown["events"]) == lineage.RECENT_EVENTS
+        reasons = [event.get("reason") for event in shown["events"]]
+        assert reasons == [None] * (lineage.RECENT_EVENTS - 1) + ["merged by the user"]
+
+    def test_a_call_cut_by_the_window_shows_its_reason(self, tmp_project: Path):
+        ids = ["ADR-002", "ADR-003", "ADR-004"]
+        _seed(tmp_project, _adr("ADR-001", DecisionStatus.PROPOSED), *map(_adr, ids))
+        _change(tmp_project, "ADR-001", add_links={"amends": ids})
+        _change(
+            tmp_project,
+            "ADR-001",
+            lifecycle="rejected",
+            remove_links={"amends": ids},
+            reason="the user turned it down",
+        )
+        for n in range(lineage.RECENT_EVENTS - 2):
+            _change(tmp_project, "ADR-001", note=f"note {n}")
+
+        events = _get(tmp_project, "ADR-001")["lineage"]["events"]
+
+        # The lifecycle event and the first removal are out of the window.
+        assert [(event["kind"], event.get("target")) for event in events[:3]] == [
+            ("link", "ADR-003"),
+            ("link", "ADR-004"),
+            ("note", None),
+        ]
+        assert "reason" not in events[0]
+        assert events[1]["reason"] == "the user turned it down"
+
+    def test_calls_in_the_same_second_keep_their_reasons_apart(self, tmp_project: Path):
+        # The clock is fixed, so these calls share at and via. Each call ends
+        # on an event with reason (empty when it had none), and an event
+        # without one shares the reason of the next event that has one.
+        ids = ["ADR-002", "ADR-003", "ADR-004"]
+        _seed(tmp_project, _adr("ADR-001"), *map(_adr, ids))
+        _change(tmp_project, "ADR-001", add_links={"amends": ["ADR-002"]})
+        _change(tmp_project, "ADR-001", add_links={"amends": ["ADR-003", "ADR-004"]})
+        _change(tmp_project, "ADR-001", remove_links={"amends": ["ADR-002"]}, reason="dup")
+
+        events = _get(tmp_project, "ADR-001")["lineage"]["events"][1:]
+
+        assert {(event["at"], event["via"]) for event in events} == {(NOW, "pm_update_decision")}
+        calls: list[list[str]] = [[]]
+        for event in events:
+            calls[-1].append(f"{event['op']} {event['target']}")
+            if "reason" in event:
+                calls[-1].append(f"reason={event['reason']!r}")
+                calls.append([])
+        assert calls == [
+            ["add ADR-002", "reason=''"],
+            ["add ADR-003", "add ADR-004", "reason=''"],
+            ["remove ADR-002", "reason='dup'"],
+            [],
+        ]
+
     def test_status_mismatch_is_warned_with_both_values(self, tmp_project: Path):
         adr = _adr("ADR-001", DecisionStatus.PROPOSED)
         _seed(tmp_project, adr)
@@ -1095,3 +1161,33 @@ def test_a_long_aliased_status_is_listed_quickly(tmp_project: Path):
     started = time.perf_counter()
     pm_status(project_path=str(tmp_project))
     assert time.perf_counter() - started < 1.5
+
+
+# ─── An ADR without a date ───────────────────────────
+
+
+def test_an_adr_without_a_date_shows_null_rather_than_today(tmp_project: Path):
+    # Without a date key the model fills in today, which moves every day; the
+    # anchor ignores it for that reason, and the reader must not show it.
+    (_pm(tmp_project) / "decisions.yaml").write_text(
+        "decisions:\n"
+        "- id: ADR-001\n  title: undated\n  status: accepted\n"
+        "- id: ADR-002\n  title: dated\n  date: 2026-10-01\n  status: accepted\n",
+        encoding="utf-8",
+    )
+    before = _snapshot(_pm(tmp_project))
+
+    listed = _query(tmp_project)
+    undated = _get(tmp_project, "ADR-001")
+    dated = _get(tmp_project, "ADR-002")
+
+    assert [row["date"] for row in listed["decisions"]] == [None, "2026-10-01"]
+    notice = _warning(listed, "decision_date_not_recorded")
+    assert notice["level"] == "info"
+    assert "ADR-001" in notice["message"] and "ADR-002" not in notice["message"]
+    assert "guess" in notice["remediation"]
+    assert undated["decision"]["date"] is None
+    assert _codes(undated) == ["decision_date_not_recorded"]
+    assert dated["decision"]["date"] == "2026-10-01"
+    assert _codes(dated) == []
+    assert _snapshot(_pm(tmp_project)) == before
