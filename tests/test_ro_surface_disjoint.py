@@ -486,9 +486,12 @@ class TestWidenedSurfaces:
         assert {
             "pm_add_task",
             "pm_add_decision",
+            "pm_update_decision",
             "pm_decision_query",
             "pm_update_rules",
         } <= _ALL_TOOLS
+        # The ADR writer is a full-mode tool only (design §8.2, D9).
+        assert "pm_update_decision" not in _RO_SEED
 
     def test_ro_surface_never_writes_a_ledger(self):
         leaked = _RO_CLOSURE & _GRAPH.ledger_writers

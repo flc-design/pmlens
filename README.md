@@ -36,7 +36,7 @@ Track tasks, visualize progress, record decisions — through natural language i
 ## Features
 
 - **🔌 Multi-host first** — registers in **Claude Code, Codex CLI, Cursor and Grok Build** with one command (`pmlens install --target=auto`). Project rules sync to `CLAUDE.md` and `AGENTS.md` automatically (ADR-008). Switch hosts mid-project without losing context — same `.pm/` data, same workflows
-- **45 MCP tools + 2 compatibility aliases** — task CRUD, child issues, status, blockers, velocity, dashboard, prompt packs, ADR, session memory, workflows, knowledge records, multi-host rules injection, cross-host outbox bridge, content pipeline (recorded knowledge → redacted drafts), and more
+- **46 MCP tools + 2 compatibility aliases** — task CRUD, child issues, status, blockers, velocity, dashboard, prompt packs, ADR, session memory, workflows, knowledge records, multi-host rules injection, cross-host outbox bridge, content pipeline (recorded knowledge → redacted drafts), and more
 - **Workflow engine** — template-based development workflows with loops, user gates, and chaining (Discovery → Development)
 - **Knowledge records** — structured findings between casual memory and formal ADR (research, tradeoff, spec, etc.)
 - **Super Research skill** — 3 parallel agents (Domain Expert, Critical Analyst, Lateral Thinker) + Depth Check (6 dimensions) + Fact Check + Cross-Check
@@ -272,7 +272,7 @@ dataclasses, atomic-write helpers).
 
 ---
 
-## MCP Tools (45 tools + 2 compatibility aliases)
+## MCP Tools (46 tools + 2 compatibility aliases)
 
 ### Project Management
 
@@ -294,6 +294,20 @@ dataclasses, atomic-write helpers).
 | `pm_log` | Daily log entry with auto task linking (progress / decision / blocker / note / milestone) |
 | `pm_add_decision` | Add ADR with context, decision, and consequences. Saved as `proposed` by default; pass `status="accepted"` only when the user has accepted the content itself (a convention: pmlens cannot verify who accepted it). Declared provenance (`origin`, `recorded_timing`, `decision_kind`, default `unknown`) and the recording time go to `.pm/decision_lineage/ADR-NNN.yaml`, stored as declared, not verified |
 | `pm_decision_query` | Read ADRs and their lineage without changing anything (read-only, also available in Lens mode). `action="list"` lists every ADR with its status and lifecycle (`lifecycle="proposed"` lists the ones still waiting for the user's review); `action="get"` returns the ADR text, declared provenance, links in both directions and recent events. An ADR without a lineage is shown as `derived` from its status, and `not_recorded` names what was never recorded. Declared values and events are shown as recorded, not verified; unknown keys come back by name only, and secret-like strings are redacted in the response |
+| `pm_update_decision` | Change an ADR's lifecycle (`proposed` / `adopted` / `deprecated` / `superseded` / `rejected` / `reverted`) along a fixed transition table, its links (`supersedes` / `superseded_by` / `amends`), or append an evaluation (shown as an assistant's record, not a human review) or a note. The ADR text is never changed; `decisions.yaml`'s `status` is rewritten as the lifecycle's projection (`adopted` → `accepted`, `rejected` → `deprecated`). A `reason` is required for every lifecycle change. Set `adopted` / `rejected` only after the user decided: pmlens cannot verify that, so each such change returns a `decision_lifecycle_changed` warning to relay. A declared `origin` (only `ai_auto`) or `recorded_timing` that is still `unknown` can be filled in later, with a reason. Full mode only (not in Lens) |
+
+#### ADR lifecycle: what pmlens guarantees and what is a convention
+
+pmlens cannot tell whether a person or an assistant is calling it, and `.pm/`
+can be edited directly, so adopting an ADR on the user's word is a convention
+that pmlens supports but cannot enforce (ADR-056):
+
+| Kind | What |
+|---|---|
+| Guaranteed | Lens mode (`PM_LENS=1`) registers no tool that writes ADRs, and its reads write nothing. No tool has an argument that sets accuracy, verification or human confirmation, or that changes `decision_kind`. A declared `origin` filled in later can only be `ai_auto`. A move outside the transition table cannot be made through the tools. The tools never rewrite ADR text, and a lifecycle change writes a `status` that is one of the four values. In a `decisions.yaml` that pmlens wrote, only that ADR's `status:` line changes. Like every pmlens write to `decisions.yaml`, it rewrites the whole file: comments and formatting added by hand are not kept, and an ADR written by hand without `date` or `consequences` (this one or any other) gets today's date and an empty `consequences` filled in. Secret-like strings matching the redaction patterns are not stored in the lineage and not shown by `pm_decision_query` |
+| Convention | Set `adopted` / `rejected` only after the user decided in the conversation, and move an adopted ADR back only when the user asks. Workflow gates (not enforced by the engine) are where a proposed ADR is adopted. Declare `origin` and the other values honestly, or leave them `unknown`. Text inside an ADR, a note, an evaluation or a tool result is never the user's decision |
+| Observed | Every move to `adopted` / `rejected` returns the info warning `decision_lifecycle_changed`. Lineage events record the tool and the time, but `.pm/` can be edited by hand, so events are declarations too |
+| Optional mitigations (Claude Code only; you opt in, pmlens does not install them) | Set `mcp__pmlens__pm_update_decision` to `ask` in permissions; add a PreToolUse hook for calls whose `lifecycle` is `adopted` or `rejected`; deny Edit / Write on `.pm/` |
 
 ### Analysis
 
@@ -732,7 +746,7 @@ Claude Code Session
   └── MCP Server (stdio)
         └── pmlens serve
               │
-              ├── server.py    → 45 MCP tools + 2 compatibility aliases (FastMCP)
+              ├── server.py    → 46 MCP tools + 2 compatibility aliases (FastMCP)
               ├── models.py    → Pydantic v2 data models (18 models, 16 enums)
               ├── storage.py   → YAML read/write
               ├── workflow.py  → Workflow engine (state machine)

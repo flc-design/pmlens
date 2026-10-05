@@ -70,6 +70,7 @@ _KNOWN_MUTATORS: frozenset[str] = frozenset(
         "pm_memory_ingest",
         "pm_log",
         "pm_add_decision",
+        "pm_update_decision",
         "pm_discover",
         "pm_cleanup",
         "pm_update_claudemd",
@@ -201,6 +202,13 @@ def test_lens_shows_decisions_but_cannot_record_them(lens_server):
     assert "pm_decision_query" in lens_server.REGISTERED_TOOLS
     assert "pm_add_decision" not in lens_server.REGISTERED_TOOLS
     assert "pm_update_decision" not in lens_server.REGISTERED_TOOLS
+
+
+def test_full_mode_registers_the_decision_writers(normal_server):
+    """Vacuity guard for the test above (PMSERV-224): the ADR writers exist and
+    are registered in full mode, and the derived mutator set holds them."""
+    assert {"pm_add_decision", "pm_update_decision"} <= normal_server.REGISTERED_TOOLS
+    assert {"pm_add_decision", "pm_update_decision"} <= MUTATOR_TOOLS
 
 
 def test_pm_knowledge_query_rejects_update(normal_server, tmp_path):

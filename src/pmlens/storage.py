@@ -823,7 +823,9 @@ def change_decision_lineage(
 
     Returns:
         The result. Expected failures come back as ``status="error"`` with
-        nothing written.
+        nothing written; that includes a decisions.yaml that cannot be loaded
+        (``decisions_yaml_unreadable``, described by exception type and YAML
+        position only).
 
     Raises:
         PmServerError: A lock timed out, or the projected status is not one of
@@ -839,7 +841,20 @@ def change_decision_lineage(
     if problem is not None:
         return LineageChangeResult(status="error", decision_id=decision_id, error=problem)
     with _yaml_transaction(pm_path, "decisions.yaml"):
-        decisions = load_decisions(pm_path)
+        try:
+            decisions = load_decisions(pm_path)
+        except Exception as exc:  # noqa: BLE001 - reported by type only, never quoted
+            # str(exc) would quote the offending YAML line or pydantic's
+            # input_value, which can be a secret (design §4, D11).
+            return LineageChangeResult(
+                status="error",
+                decision_id=decision_id,
+                error=_lineage._error(
+                    "decisions_yaml_unreadable",
+                    f"decisions.yaml could not be read: {_lineage.error_summary(exc)}. Fix the "
+                    "file by hand; nothing was changed.",
+                ),
+            )
         matches = [d for d in decisions if d.id == decision_id]
         if not matches:
             return LineageChangeResult(
@@ -925,6 +940,13 @@ def change_decision_lineage(
                     adr.status = old_status
                     dropped = result.changes.pop("decision_status", {})
                     result.decision_status = dropped.get("from", result.decision_status)
+                    # apply_change said a prior mismatch was resolved; it was not,
+                    # and decision_status_not_projected below says what is left.
+                    result.warnings = [
+                        warning
+                        for warning in result.warnings
+                        if warning.get("code") != "decision_status_mismatch_resolved"
+                    ]
                     result.warnings.append(
                         _lineage.notice(
                             "warning",

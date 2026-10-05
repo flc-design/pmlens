@@ -422,6 +422,91 @@ def test_decisions_round_trip_over_stdio(tmp_project: Path) -> None:
     assert got["lineage"]["events"][0]["kind"] == "created"
 
 
+def _object_of_string_lists(schema: dict[str, Any]) -> bool:
+    """True when ``schema`` (or one of its anyOf branches) is a dict[str, list[str]]."""
+    for branch in schema.get("anyOf", [schema]):
+        values = branch.get("additionalProperties")
+        if (
+            branch.get("type") == "object"
+            and isinstance(values, dict)
+            and values.get("type") == "array"
+            and values.get("items", {}).get("type") == "string"
+        ):
+            return True
+    return False
+
+
+@pytest.mark.smoke
+def test_decision_update_round_trips_over_stdio(tmp_project: Path) -> None:
+    """pm_add_decision → pm_update_decision → pm_decision_query over the wire (design §8.2).
+
+    Proves pm_update_decision's argument schema (``dict[str, list[str]]`` for
+    the links included) and that its response serializes as JSON through a
+    real host path.
+    """
+    project = str(tmp_project)
+
+    def add(title: str) -> dict[str, Any]:
+        return {
+            "name": "pm_add_decision",
+            "arguments": {"title": title, "context": "c", "decision": "d", "project_path": project},
+        }
+
+    session = _mcp_session(
+        lens=False,
+        calls=[
+            add("Use SQLite"),
+            add("Use SQLite with WAL"),
+            {
+                "name": "pm_update_decision",
+                "arguments": {
+                    "decision_id": "ADR-002",
+                    "lifecycle": "adopted",
+                    "reason": "the user approved the design",
+                    "add_links": {"amends": ["ADR-001"]},
+                    "project_path": project,
+                },
+            },
+            {
+                "name": "pm_decision_query",
+                "arguments": {"action": "list", "lifecycle": "adopted", "project_path": project},
+            },
+            {
+                "name": "pm_decision_query",
+                "arguments": {"action": "get", "decision_id": "ADR-001", "project_path": project},
+            },
+        ],
+    )
+    schema = session.tool_definitions["pm_update_decision"]["inputSchema"]
+    assert set(schema["properties"]) == {
+        "decision_id",
+        "lifecycle",
+        "reason",
+        "add_links",
+        "remove_links",
+        "evaluation",
+        "evaluation_kind",
+        "note",
+        "origin",
+        "recorded_timing",
+        "project_path",
+    }
+    assert schema.get("required") == ["decision_id"]
+    assert _object_of_string_lists(schema["properties"]["add_links"])
+    assert _object_of_string_lists(schema["properties"]["remove_links"])
+
+    _first, _second, updated, adopted, got = (
+        json.loads(response["content"][0]["text"]) for response in session.responses
+    )
+    assert updated["status"] == "updated"
+    assert (updated["lifecycle"], updated["decision_status"]) == ("adopted", "accepted")
+    assert updated["links"]["amends"] == ["ADR-001"]
+    assert updated["events_added"] == ["lifecycle", "link"]  # design §2.4 order
+    assert "decision_lifecycle_changed" in {w["code"] for w in updated["warnings"]}
+    assert [(row["id"], row["status"]) for row in adopted["decisions"]] == [("ADR-002", "accepted")]
+    assert got["lineage"]["linked_from"] == {"supersedes": [], "amends": ["ADR-002"]}
+
+
 @pytest.mark.smoke
 def test_handshake_reports_a_protocol_version(record_property):
     """Record which MCP revision we negotiate — deliberately without pinning it.

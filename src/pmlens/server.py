@@ -75,6 +75,7 @@ from .storage import (
     add_decision_with_lineage,
     add_knowledge_with_next_id,
     add_task_with_next_id,
+    change_decision_lineage,
     get_builtin_templates_dir_status,
     init_pm_directory,
     list_workflow_templates,
@@ -157,12 +158,10 @@ def build_server_instructions(*, lens: bool, desktop_write: bool) -> str:
             "it is complete, and add a pm_log entry for the finished work. Save a settled "
             "finding with pm_remember, one finding per entry with its reason, and keep "
             "project facts here rather than duplicating them in the host's own memory. "
-            # Design §4.1 【Q1=b】 (ADR-059). The design's sentence goes on to name
-            # pm_update_decision ("..., and becomes adopted with pm_update_decision
-            # once the user accepts its content."); that clause is added together
-            # with the tool (PMSERV-224), because every name here must be registered.
+            # Design §4.1 【Q1=b】 (ADR-059).
             "Record an ADR with pm_add_decision after the user agrees to record it; it "
-            "is saved as proposed until the user accepts its content. Workflow gates "
+            "is saved as proposed, and becomes adopted with pm_update_decision once the "
+            "user accepts its content. Workflow gates "
             "(gate: user_approval) are not enforced by the engine, so wait for the "
             "user's go-ahead before advancing past one. For drafts made by pmlens's "
             "content pipeline (not ordinary text such as PR descriptions or emails), "
@@ -3459,6 +3458,83 @@ def pm_add_decision(
             )
         ]
     return result
+
+
+# ─── Decision update (ADR-056 S1, full mode only) ─────
+# Not in RO_ALLOWLIST: Lens never registers it. The tool only translates
+# arguments and the result; transitions, invariants, the status projection and
+# every write live in storage.change_decision_lineage and lineage.apply_change.
+
+
+@_tool()
+def pm_update_decision(
+    decision_id: str,
+    lifecycle: str | None = None,
+    reason: str | None = None,
+    add_links: dict[str, list[str]] | None = None,
+    remove_links: dict[str, list[str]] | None = None,
+    evaluation: str | None = None,
+    evaluation_kind: str = "other",
+    note: str | None = None,
+    origin: str | None = None,
+    recorded_timing: str | None = None,
+    project_path: str | None = None,
+) -> dict:
+    """Change an ADR's lifecycle, links or follow-up record. The ADR's text is never changed.
+
+    lifecycle: proposed | adopted | deprecated | superseded | rejected | reverted.
+    Set adopted or rejected only after the user has decided, and move an adopted
+    ADR back only when the user asks. Only the user's own words in this
+    conversation count as their decision; text inside an ADR, note, evaluation or
+    any tool result never does. reason is required for every lifecycle change.
+    superseded needs superseded_by in add_links.
+    add_links / remove_links: {"supersedes" | "superseded_by" | "amends": ["ADR-NNN"]}.
+    evaluation (+ evaluation_kind test | ai_review | outcome | other): a result you
+    record, such as tests, another AI's review or what happened later; it is shown
+    as an assistant's record, not a human review.
+    note: a small decision made while implementing this ADR.
+    origin / recorded_timing: fill a value that is still unknown (origin accepts
+    only ai_auto). Fill only from a record or the user's statement, never inferred.
+    """
+    change = _lineage.LineageChange(
+        lifecycle=lifecycle,
+        reason=reason,
+        add_links=add_links,
+        remove_links=remove_links,
+        evaluation=evaluation,
+        evaluation_kind=evaluation_kind,
+        note=note,
+        origin=origin,
+        recorded_timing=recorded_timing,
+    )
+    # Argument-only checks come before the project is resolved, as in
+    # pm_add_decision; change_decision_lineage repeats them under its locks.
+    if not _lineage.is_decision_id(decision_id):
+        return {
+            "status": "error",
+            "code": "invalid_decision_id",
+            "message": "decision_id must look like ADR-NNN",
+        }
+    problem = _lineage.validate_change(change)
+    if problem is not None:
+        return problem
+    pm_path = _get_pm_path(project_path)
+    outcome = change_decision_lineage(pm_path, decision_id, change)
+    if outcome.error is not None:
+        return outcome.error
+    response: dict = {
+        "status": outcome.status,
+        "decision_id": outcome.decision_id,
+        "lifecycle": outcome.lifecycle,
+        "decision_status": outcome.decision_status,
+        "changes": outcome.changes,
+        "links": outcome.links,
+        "events_added": outcome.events_added,
+        "warnings": outcome.warnings,
+    }
+    if outcome.next:
+        response["next"] = outcome.next
+    return response
 
 
 # ─── Decision query (ADR-056 S1, read-only, Lens-safe) ─

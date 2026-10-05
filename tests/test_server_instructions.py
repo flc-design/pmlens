@@ -83,17 +83,13 @@ def test_full_mode_says_new_adrs_start_proposed():
     assert "proposed" in text
 
 
-def test_full_mode_names_pm_update_decision_once_it_is_registered():
-    # Design §4.1's sentence ends "..., and becomes adopted with
-    # pm_update_decision once the user accepts its content." It cannot name the
-    # tool before the tool exists (test_every_named_tool_is_registered_in_that_mode),
-    # so the shorter sentence stands in until then. This flips the moment the
-    # tool is registered and makes the full sentence mandatory.
+def test_full_mode_says_how_a_proposed_adr_becomes_adopted():
+    # Design §4.1 【Q1=b】: "...; it is saved as proposed, and becomes adopted
+    # with pm_update_decision once the user accepts its content." The tool is
+    # registered in full mode (PMSERV-224), so the sentence can name it.
     text = build_server_instructions(**MODES["full"])
-    if "pm_update_decision" in server.REGISTERED_TOOLS:
-        assert "pm_update_decision" in text
-    else:
-        assert "pm_update_decision" not in text
+    assert "pm_update_decision" in server.REGISTERED_TOOLS
+    assert "becomes adopted with pm_update_decision once the user accepts its content" in text
 
 
 # Tool names that texts in server.py (tool docstrings, warning messages and
@@ -101,7 +97,6 @@ def test_full_mode_names_pm_update_decision_once_it_is_registered():
 # registers it. An entry must go when its tool lands: the next test fails
 # until it does, and the instructions test above then asks for the full text.
 _NAMED_BEFORE_REGISTERED = {
-    "pm_update_decision": "Decision Lineage S1 (PMSERV-224)",
     "pm_outbox_merge_artifact": "outbox phase 2.2",
 }
 
