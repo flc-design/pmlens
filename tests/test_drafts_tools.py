@@ -614,24 +614,57 @@ def test_an_unknown_status_many_drafts_cite_is_scanned_once_per_response(
     assert len(scans) == 1
 
 
+def _put_adopted_lineage(proj: Path, adr_id: str, *, title: str | None = None) -> None:
+    """A lineage saying adopted for ``adr_id`` (anchored to ``title`` when given)."""
+    doc = lineage.new_lineage_doc(Decision(**_entry(adr_id)), {}, "2026-10-05T03:12:00Z")
+    assert doc["lifecycle"] == "adopted"
+    if title is not None:
+        doc["anchor"]["title_sha256"] = lineage.title_sha256(title)
+    path = proj / ".pm" / "decision_lineage" / f"{adr_id}.yaml"
+    path.parent.mkdir(exist_ok=True)
+    path.write_text(lineage.dump_lineage(doc, adr_id), encoding="utf-8")
+
+
 def test_the_lineage_decides_unless_it_was_written_for_another_adr(tmp_path: Path) -> None:
     proj = _make_project(tmp_path)
-    # Both are proposed in decisions.yaml; both lineage files say adopted.
-    _write_decisions(proj, _entry("ADR-001", "proposed"), _entry("ADR-002", "proposed"))
-    for adr_id in ("ADR-001", "ADR-002"):
-        doc = lineage.new_lineage_doc(Decision(**_entry(adr_id)), {}, "2026-10-05T03:12:00Z")
-        assert doc["lifecycle"] == "adopted"
-        if adr_id == "ADR-002":  # left behind by an ADR with another title
-            doc["anchor"]["title_sha256"] = lineage.title_sha256("another title")
-        path = proj / ".pm" / "decision_lineage" / f"{adr_id}.yaml"
-        path.parent.mkdir(exist_ok=True)
-        path.write_text(lineage.dump_lineage(doc, adr_id), encoding="utf-8")
-
-    # ADR-001: the lineage is the source of truth, so it is adopted. ADR-002:
-    # the lineage is not attributed, so its status (proposed) decides.
-    [warning] = _draft(proj, ["ADR-001", "ADR-002"])["warnings"]
+    # Both are accepted in decisions.yaml; ADR-002's lineage says adopted but
+    # was left behind by an ADR with another title, so it is not attributed
+    # and the status decides; ADR-003's lineage is attributed and decides.
+    _write_decisions(proj, _entry("ADR-002", "proposed"), _entry("ADR-003", "accepted"))
+    _put_adopted_lineage(proj, "ADR-002", title="another title")
+    _put_adopted_lineage(proj, "ADR-003")
+    [warning] = _draft(proj, ["ADR-002", "ADR-003"])["warnings"]
     assert warning["code"] == _NOT_ADOPTED
     assert "ADR-002 is proposed" in warning["message"]
+
+
+@pytest.mark.parametrize("status", ["proposed", "superseded", "deprecated"])
+def test_a_lineage_and_status_that_disagree_are_not_taken_as_adopted(
+    tmp_path: Path, status: str
+) -> None:
+    # The lineage says adopted, decisions.yaml says otherwise (a hand edit,
+    # or a projection that failed after the lineage was saved). Which one is
+    # right is the user's call, so the guard does not stay silent on it.
+    proj = _make_project(tmp_path)
+    _write_decisions(proj, _entry("ADR-001", status))
+    _put_adopted_lineage(proj, "ADR-001")
+    shown = srv.pm_decision_query(action="get", decision_id="ADR-001", project_path=str(proj))
+    assert shown["lineage"]["lifecycle"] == "adopted"
+    assert "decision_status_mismatch" in [w["code"] for w in shown["warnings"]]
+
+    saved = _draft(proj, ["ADR-001"])
+    redacted = srv.pm_redact_draft(saved["draft_id"], project_path=str(proj))
+    page = srv.pm_drafts_pending(project_path=str(proj))
+    for res in (saved, redacted, page):
+        [warning] = res["warnings"]
+        assert warning["code"] == _NOT_ADOPTED
+        assert (
+            "ADR-001's lineage says adopted but decisions.yaml says status" in (warning["message"])
+        )
+        assert repr(status) in warning["message"]
+        assert "not treated as adopted" in warning["message"]
+        assert "Ask the user" in warning["remediation"]
+        assert "pm_reject_draft" in warning["remediation"]
 
 
 def test_a_ref_not_in_decisions_yaml_is_info(tmp_path: Path) -> None:

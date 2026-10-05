@@ -513,6 +513,8 @@ _T6_ARG_SETS: dict[str, list[dict]] = {
     "pm_decision_query": [
         {"action": "list"},
         {"action": "list", "lifecycle": "proposed"},
+        # The paging branch (limit / offset, has_more).
+        {"action": "list", "limit": 2, "offset": 1},
         {"action": "get", "decision_id": "ADR-001"},
         {"action": "get", "decision_id": "ADR-002"},
         {"action": "get", "decision_id": "ADR-003"},
@@ -536,6 +538,7 @@ _EXPECTED_REACH = {
     "decision_mismatch_warned": True,
     "decision_unreadable_noted": True,
     "decision_unknown_keys_only_names": True,
+    "decision_page": [["ADR-002", "ADR-003"], True, 3],
 }
 
 # Runs inside the subprocess: import pmlens.server fresh (so PM_LENS /
@@ -599,6 +602,12 @@ _T6_SWEEP_SCRIPT = textwrap.dedent("""
             reach["decision_list_total"] = query().get("total")
             proposed = query(lifecycle="proposed").get("decisions") or []
             reach["decision_proposed_ids"] = [row["id"] for row in proposed]
+            page = query(limit=2, offset=1)
+            reach["decision_page"] = [
+                [row["id"] for row in page.get("decisions") or []],
+                page.get("has_more"),
+                page.get("next_offset"),
+            ]
             derived = query(action="get", decision_id="ADR-001")
             reach["decision_get_derived"] = derived["lineage"]["derived"]
             mismatch = query(action="get", decision_id="ADR-003")

@@ -6,9 +6,11 @@ What this file pins, by the design document's numbering
 * D2: an ADR without a lineage reads as derived / unknown / not_recorded, and
   reading writes nothing (decisions.yaml bytes, no ``.locks/``, no
   ``decision_lineage/``).
-* list and get, the lifecycle filter (on the effective lifecycle), the status
-  mismatch warning, the three not_recorded cases, declared_later, linked_from
-  (and its scan limit), one-sided links, duplicate ids, anchor mismatch.
+* list and get, the lifecycle filter (on the effective lifecycle), paging
+  (a page without rows never says there is more), the status mismatch
+  warning, the three not_recorded cases, declared_later, linked_from (its
+  file limit and byte budget, which also bound what a get reads to check the
+  other side of a link), one-sided links, duplicate ids, anchor mismatch.
 * PMSERV-253: unknown keys come back by name only, nested lineage values only
   through the per-kind allow-list, every response string is redacted at the
   exit, and no error message quotes the file. A secret in a label redacted
@@ -173,7 +175,7 @@ class TestWithoutLineage:
                 "status": "accepted",
                 "lifecycle": "adopted",
                 "derived": True,
-                "origin": "unknown",
+                "declared_origin": "unknown",
             }
         ]
         view = got["lineage"]
@@ -219,8 +221,13 @@ class TestWithoutLineage:
         assert listed == {
             "count": 0,
             "total": 0,
+            "matched": 0,
             "lifecycle_filter": None,
+            "offset": 0,
+            "has_more": False,
+            "next_offset": 0,
             "decisions": [],
+            "notice": listed["notice"],
             "warnings": [],
         }
 
@@ -233,16 +240,16 @@ class TestList:
         _add(tmp_project, "first", origin="ai_auto")
         _add(tmp_project, "second", status="accepted", origin="human")
         listed = _query(tmp_project)
-        assert listed["count"] == listed["total"] == 2
+        assert listed["count"] == listed["total"] == listed["matched"] == 2
         assert listed["lifecycle_filter"] is None
-        fields = ("id", "status", "lifecycle", "derived", "origin")
+        fields = ("id", "status", "lifecycle", "derived", "declared_origin")
         assert [tuple(row[name] for name in fields) for row in listed["decisions"]] == [
             ("ADR-001", "proposed", "proposed", False, "ai_auto"),
             ("ADR-002", "accepted", "adopted", False, "human"),
         ]
 
         proposed = _query(tmp_project, lifecycle="proposed")
-        assert (proposed["count"], proposed["total"]) == (1, 2)
+        assert (proposed["count"], proposed["matched"], proposed["total"]) == (1, 1, 2)
         assert proposed["lifecycle_filter"] == "proposed"
         assert _ids(proposed) == ["ADR-001"]
         assert _ids(_query(tmp_project, lifecycle="adopted")) == ["ADR-002"]
@@ -274,6 +281,109 @@ class TestList:
         message = _warning(listed, "decision_lineage_unreadable")["message"]
         assert "ADR-001" in message and "ADR-002" in message
         assert "ADR-003" not in message
+
+    def test_rows_mark_the_origin_as_declared(self, tmp_project: Path):
+        # origin is what the caller declared; a bare "origin": "human" next to
+        # "lifecycle": "adopted" read as a checked fact, and only get carried
+        # the notice saying it is not.
+        _add(tmp_project, "first", status="accepted", origin="human")
+        listed = _query(tmp_project)
+        [row] = listed["decisions"]
+        assert "origin" not in row
+        assert row["declared_origin"] == "human"
+        assert listed["notice"] == _get(tmp_project, "ADR-001")["notice"]
+        assert "pmlens cannot tell whether a person approved them" in listed["notice"]
+
+    def test_pages_with_limit_and_offset(self, tmp_project: Path):
+        for n in range(1, 6):
+            _add(tmp_project, f"adr {n}", status="accepted" if n % 2 else "proposed")
+        first = _query(tmp_project, limit=2)
+        assert _ids(first) == ["ADR-001", "ADR-002"]
+        assert (first["count"], first["matched"], first["total"]) == (2, 5, 5)
+        assert (first["offset"], first["has_more"], first["next_offset"]) == (0, True, 2)
+        last = _query(tmp_project, limit=2, offset=4)
+        assert _ids(last) == ["ADR-005"]
+        assert (last["has_more"], last["next_offset"]) == (False, 5)
+        past = _query(tmp_project, limit=2, offset=9)
+        assert _ids(past) == [] and past["has_more"] is False and past["next_offset"] == 9
+        # Paging counts the filtered rows; warnings still cover every ADR.
+        adopted = _query(tmp_project, lifecycle="adopted", limit=2, offset=1)
+        assert _ids(adopted) == ["ADR-003", "ADR-005"]
+        assert (adopted["matched"], adopted["total"], adopted["has_more"]) == (3, 5, False)
+
+    def test_a_page_without_rows_never_says_there_is_more(self, tmp_project: Path):
+        # limit=0 counts without listing. It used to say has_more=true with
+        # next_offset unchanged, so a caller paging on has_more / next_offset
+        # asked for the same empty page forever (pm_outbox_pending and
+        # pm_drafts_pending fixed the same thing before).
+        for n in range(1, 6):
+            _add(tmp_project, f"adr {n}")
+        for offset in (0, 3):
+            probe = _query(tmp_project, limit=0, offset=offset)
+            assert (probe["count"], probe["matched"], probe["total"]) == (0, 5, 5)
+            assert (probe["has_more"], probe["next_offset"]) == (False, offset)
+        # A caller that follows has_more / next_offset stops, whatever the limit.
+        for limit in (0, 2, 50):
+            calls, offset, seen = 0, 0, []
+            while True:
+                calls += 1
+                assert calls <= 10, f"limit={limit} never stopped"
+                page = _query(tmp_project, limit=limit, offset=offset)
+                seen += _ids(page)
+                if not page["has_more"]:
+                    break
+                offset = page["next_offset"]
+            assert seen == ([] if limit == 0 else [f"ADR-00{n}" for n in range(1, 6)])
+
+    def test_the_default_page_is_fifty_rows(self, tmp_project: Path):
+        _seed(tmp_project, *(_adr(f"ADR-{n:03d}") for n in range(1, 54)))
+        listed = _query(tmp_project)
+        assert listed["count"] == 50 and listed["matched"] == listed["total"] == 53
+        assert listed["has_more"] is True and listed["next_offset"] == 50
+        assert _ids(_query(tmp_project, offset=50)) == ["ADR-051", "ADR-052", "ADR-053"]
+
+    def test_a_page_stops_before_the_response_gets_too_large(
+        self, tmp_project: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from pmlens import server
+
+        _seed(tmp_project, *(_adr(f"ADR-{n:03d}", title="t" * 150) for n in range(1, 11)))
+        monkeypatch.setattr(server, "_DECISION_LIST_MAX_CHARS", 700)
+        listed = _query(tmp_project, limit=10)
+        assert 1 < listed["count"] < 10
+        assert listed["has_more"] is True
+        assert listed["next_offset"] == listed["count"]
+        warning = _warning(listed, "decision_list_truncated")
+        assert warning["level"] == "info"
+        assert f"{listed['count']} of the 10 ADRs" in warning["message"]
+        assert f"offset={listed['count']}" in warning["remediation"]
+        # At least one row, however small the budget.
+        monkeypatch.setattr(server, "_DECISION_LIST_MAX_CHARS", 1)
+        assert _ids(_query(tmp_project, limit=10, offset=3)) == ["ADR-004"]
+
+    def test_long_titles_a_yaml_alias_repeats_stay_small(self, tmp_project: Path):
+        # 1,000 ADRs sharing one 20,000-character title through an alias: a
+        # 113 KB decisions.yaml listed as a 20 MB response.
+        lines = ["decisions:"]
+        for n in range(1, 1001):
+            title = f'&t "{"x" * 20_000}"' if n == 1 else "*t"
+            lines.append(
+                f"- id: ADR-{n:03d}\n  title: {title}\n  date: 2026-10-01\n"
+                "  status: accepted\n  context: c\n  decision: d"
+            )
+        (_pm(tmp_project) / "decisions.yaml").write_text("\n".join(lines) + "\n", "utf-8")
+        listed = _query(tmp_project, limit=1000)
+        assert len(json.dumps(listed, ensure_ascii=False)) < 40_000
+        assert listed["decisions"][0]["title"] == "x" * 200 + "…"
+        assert listed["has_more"] is True and listed["matched"] == 1000
+        codes = _codes(listed)
+        assert codes.count("decision_list_truncated") == 1
+        assert (
+            "title(s) longer than 200 characters"
+            in _warning(listed, "decision_list_truncated")["message"]
+        )
+        # get still shows the whole title.
+        assert _get(tmp_project, "ADR-001")["decision"]["title"] == "x" * 20_000
 
     def test_more_than_fifty_ids_end_with_a_count(self, tmp_project: Path):
         _seed(tmp_project, *(_adr(f"ADR-{n:03d}", "draft") for n in range(1, 54)))
@@ -537,6 +647,195 @@ class TestLinks:
         got = _get(tmp_project, "ADR-001")
         assert got["lineage"]["linked_from"] == {"supersedes": [], "amends": []}
         assert "decision_lineage_link_asymmetric" not in _codes(got)
+        # Written for something else, so known not to link here: not counted.
+        assert "decision_lineage_linked_from_unreadable" not in _note_codes(got)
+
+    @pytest.mark.parametrize("link_type", ["supersedes", "amends"])
+    def test_a_successor_whose_lineage_cannot_be_read_is_counted(
+        self, tmp_project: Path, link_type: str
+    ):
+        # ADR-002 links to ADR-001; then its lineage is broken by hand. The
+        # link can no longer be seen, and get(ADR-001) used to say nothing:
+        # ADR-001 looked as if nothing replaced or amended it.
+        for title in ("one", "two", "three"):
+            _add(tmp_project, title)
+        _change(tmp_project, "ADR-002", add_links={link_type: ["ADR-001"]})
+        assert _get(tmp_project, "ADR-001")["lineage"]["linked_from"][link_type] == ["ADR-002"]
+        _put_lineage(tmp_project, "ADR-002", "{{{ not yaml")
+        _put_lineage(tmp_project, "ADR-003", "- a list, not a mapping\n")
+
+        got = _get(tmp_project, "ADR-001")
+        assert got["lineage"]["linked_from"] == {"supersedes": [], "amends": []}
+        assert {"code": "decision_lineage_linked_from_unreadable", "count": 2} in got["lineage"][
+            "notes"
+        ]
+        assert "decision_lineage_linked_from_truncated" not in _note_codes(got)
+
+    def test_the_newest_successor_survives_a_cut_scan(
+        self, tmp_project: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # supersedes runs from a newer ADR to an older one. Reading the oldest
+        # files first dropped exactly the newest one: get(ADR-001) lost both
+        # the link and the one-sided-link warning once the scan was cut.
+        for n in range(1, 7):
+            _add(tmp_project, f"adr {n}")
+        for n in range(2, 6):
+            _change(tmp_project, f"ADR-00{n}", note="unrelated")
+        _change(tmp_project, "ADR-006", add_links={"supersedes": ["ADR-001"]})
+        monkeypatch.setattr(lineage, "LINKED_FROM_SCAN_LIMIT", 2)
+        got = _get(tmp_project, "ADR-001")
+        assert got["lineage"]["linked_from"]["supersedes"] == ["ADR-006"]
+        warning = _warning(got, "decision_lineage_link_asymmetric")
+        assert "ADR-006 supersedes ADR-001" in warning["message"]
+        assert {"code": "decision_lineage_linked_from_truncated", "count": 3} in got["lineage"][
+            "notes"
+        ]
+
+    def test_the_scan_stops_at_its_byte_budget(
+        self, tmp_project: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # The file limit alone let 500 files near the size cap be parsed for
+        # one get (tens of seconds); a byte budget stops the scan as well.
+        for n in range(1, 7):
+            _add(tmp_project, f"adr {n}")
+        for n in range(2, 7):
+            _change(tmp_project, f"ADR-00{n}", add_links={"amends": ["ADR-001"]})
+        size = _lineage_path(tmp_project, "ADR-006").stat().st_size
+        reads: list[str] = []
+        read = lineage.read_lineage_raw
+
+        def counting(pm_path: Path, decision_id: str) -> lineage.RawLineage:
+            reads.append(decision_id)
+            return read(pm_path, decision_id)
+
+        monkeypatch.setattr(lineage, "read_lineage_raw", counting)
+        monkeypatch.setattr(lineage, "LINKED_FROM_SCAN_BYTES", size * 2 + 1)
+        got = _get(tmp_project, "ADR-001")
+        # Checked before each file: three files reach the budget, then it stops.
+        assert got["lineage"]["linked_from"]["amends"] == ["ADR-004", "ADR-005", "ADR-006"]
+        assert {"code": "decision_lineage_linked_from_truncated", "count": 2} in got["lineage"][
+            "notes"
+        ]
+        assert reads.count("ADR-002") == reads.count("ADR-003") == 0
+        monkeypatch.undo()
+        # The real budget stops after about 32 files at the size cap.
+        assert lineage.LINKED_FROM_SCAN_BYTES // lineage.MAX_LINEAGE_BYTES <= 32
+
+    def test_get_reads_each_lineage_once(self, tmp_project: Path, monkeypatch):
+        # The one-sided-link check reuses what the linked_from scan read
+        # instead of parsing the other side's lineage a second time.
+        for title in ("one", "two"):
+            _add(tmp_project, title)
+        _change(tmp_project, "ADR-002", add_links={"supersedes": ["ADR-001"]})
+        _change(
+            tmp_project,
+            "ADR-001",
+            lifecycle="superseded",
+            reason="replaced",
+            add_links={"superseded_by": ["ADR-002"]},
+        )
+        reads: list[str] = []
+        read = lineage.read_lineage_raw
+
+        def counting(pm_path: Path, decision_id: str) -> lineage.RawLineage:
+            reads.append(decision_id)
+            return read(pm_path, decision_id)
+
+        monkeypatch.setattr(lineage, "read_lineage_raw", counting)
+        got = _get(tmp_project, "ADR-001")
+        assert got["lineage"]["linked_from"]["supersedes"] == ["ADR-002"]
+        assert "decision_lineage_link_asymmetric" not in _codes(got)
+        assert sorted(reads) == ["ADR-001", "ADR-002"]
+
+    @staticmethod
+    def _count_reads(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
+        """Record how many bytes read_lineage_raw read, per ADR id."""
+        sizes: dict[str, int] = {}
+        read = lineage.read_lineage_raw
+
+        def counting(pm_path: Path, decision_id: str) -> lineage.RawLineage:
+            raw = read(pm_path, decision_id)
+            sizes[decision_id] = sizes.get(decision_id, 0) + raw.size
+            return raw
+
+        monkeypatch.setattr(lineage, "read_lineage_raw", counting)
+        return sizes
+
+    @staticmethod
+    def _supersede(project: Path, newer: str, *older: str) -> None:
+        """``newer`` supersedes each of ``older``, with the reverse link on each."""
+        _change(project, newer, add_links={"supersedes": list(older)})
+        for adr_id in older:
+            _change(
+                project,
+                adr_id,
+                lifecycle="superseded",
+                reason="replaced",
+                add_links={"superseded_by": [newer]},
+            )
+
+    def test_get_reads_other_lineages_only_within_the_byte_budget(
+        self, tmp_project: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # The newest ADR replaces old ones. The scan read the newest lineages
+        # first and stopped at its budget, and the one-sided-link check then
+        # read every old ADR it supersedes again, outside the budget (up to
+        # 100 files): get's time was not bounded by the budget at all.
+        for n in range(1, 9):
+            _add(tmp_project, f"adr {n}")
+        for n in range(4, 8):
+            _change(tmp_project, f"ADR-00{n}", note="x" * 600)
+        self._supersede(tmp_project, "ADR-008", "ADR-001", "ADR-002", "ADR-003")
+        files = {
+            f"ADR-00{n}": _lineage_path(tmp_project, f"ADR-00{n}").stat().st_size
+            for n in range(1, 9)
+        }
+        budget = files["ADR-001"] + files["ADR-002"] + files["ADR-003"] - 1
+        sizes = self._count_reads(monkeypatch)
+        monkeypatch.setattr(lineage, "LINKED_FROM_SCAN_BYTES", budget)
+
+        got = _get(tmp_project, "ADR-008")
+        others = sum(size for adr_id, size in sizes.items() if adr_id != "ADR-008")
+        assert others <= budget + max(files.values()), sizes
+        # The ADRs it supersedes are read first, so their reverse links are
+        # seen: no one-sided link is reported, and the newer lineages the
+        # budget left unread are counted.
+        assert set(sizes) == {"ADR-008", "ADR-001", "ADR-002", "ADR-003"}
+        assert "decision_lineage_link_asymmetric" not in _codes(got)
+        assert {"code": "decision_lineage_linked_from_truncated", "count": 4} in got["lineage"][
+            "notes"
+        ]
+
+    def test_a_link_target_left_unread_is_not_called_one_sided(
+        self, tmp_project: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # When the ADR's own targets alone exceed the budget, the ones left
+        # unread are unknown: they are counted in the truncated note, not
+        # reported as one-sided. A target that was read is still checked.
+        for n in range(1, 6):
+            _add(tmp_project, f"adr {n}")
+        self._supersede(tmp_project, "ADR-005", "ADR-001", "ADR-002", "ADR-003")
+        _change(tmp_project, "ADR-005", add_links={"supersedes": ["ADR-004"]})
+        size = _lineage_path(tmp_project, "ADR-004").stat().st_size
+        sizes = self._count_reads(monkeypatch)
+        monkeypatch.setattr(lineage, "LINKED_FROM_SCAN_BYTES", size + 1)
+
+        got = _get(tmp_project, "ADR-005")
+        # Newest target first: ADR-004 (no reverse link) and ADR-003 are read.
+        assert set(sizes) == {"ADR-005", "ADR-004", "ADR-003"}
+        message = _warning(got, "decision_lineage_link_asymmetric")["message"]
+        assert "ADR-005 supersedes ADR-004" in message
+        assert "ADR-001" not in message and "ADR-002" not in message
+        assert {"code": "decision_lineage_linked_from_truncated", "count": 2} in got["lineage"][
+            "notes"
+        ]
+        monkeypatch.undo()
+        # With the whole budget, every target is checked and only ADR-004 is one-sided.
+        message = _warning(_get(tmp_project, "ADR-005"), "decision_lineage_link_asymmetric")[
+            "message"
+        ]
+        assert "ADR-005 supersedes ADR-004" in message
+        assert "ADR-001" not in message and "ADR-003" not in message
 
     def test_the_linked_from_scan_stops_at_its_limit(
         self, tmp_project: Path, monkeypatch: pytest.MonkeyPatch
@@ -553,21 +852,30 @@ class TestLinks:
         ]
         monkeypatch.setattr(lineage, "LINKED_FROM_SCAN_LIMIT", 2)
         got = _get(tmp_project, "ADR-001")
-        assert got["lineage"]["linked_from"]["amends"] == ["ADR-002", "ADR-003"]
+        # The newest lineages are read first: links run from newer ADRs to
+        # older ones, so the oldest files are the ones left unread.
+        assert got["lineage"]["linked_from"]["amends"] == ["ADR-004", "ADR-005"]
         assert {"code": "decision_lineage_linked_from_truncated", "count": 2} in got["lineage"][
             "notes"
         ]
 
-    def test_the_scan_reads_in_number_order(self, tmp_project: Path, monkeypatch):
+    def test_the_scan_reads_the_newest_first_and_lists_in_number_order(
+        self, tmp_project: Path, monkeypatch
+    ):
         adrs = [_adr(adr_id) for adr_id in ("ADR-001", "ADR-010", "ADR-0100", "ADR-9")]
         _seed(tmp_project, *adrs)
         for adr in adrs[1:]:
             links = {"supersedes": [], "superseded_by": [], "amends": ["ADR-001"]}
             _put_lineage(tmp_project, adr.id, _doc_for(adr, links=links))
-        monkeypatch.setattr(lineage, "LINKED_FROM_SCAN_LIMIT", 2)
         assert _get(tmp_project, "ADR-001")["lineage"]["linked_from"]["amends"] == [
             "ADR-9",
             "ADR-010",
+            "ADR-0100",
+        ]
+        monkeypatch.setattr(lineage, "LINKED_FROM_SCAN_LIMIT", 2)
+        assert _get(tmp_project, "ADR-001")["lineage"]["linked_from"]["amends"] == [
+            "ADR-010",
+            "ADR-0100",
         ]
 
 
@@ -761,7 +1069,7 @@ class TestExitRedaction:
         assert got["lineage"]["declared"]["origin"] == "pasted <REDACTED:secret>"
         assert got["lineage"]["unknown_keys"] == ["key <REDACTED:secret>"]
         assert got["lineage"]["events"][0]["unknown_fields"] == ["field <REDACTED:secret>"]
-        assert listed["decisions"][0]["origin"] == "pasted <REDACTED:secret>"
+        assert listed["decisions"][0]["declared_origin"] == "pasted <REDACTED:secret>"
 
     def test_a_secret_only_in_an_unknown_status_is_counted(self, tmp_project: Path):
         # The status label is redacted before the exit pass, which then finds
@@ -827,7 +1135,8 @@ class TestExitRedaction:
         body = got["decision"]
         assert [body["title"], body["context"], body["decision"]] == [shown] * 3
         assert body["consequences"]["positive"] == [shown]
-        assert listed["decisions"][0]["title"] == shown
+        # A list row cuts the title after redacting it whole.
+        assert listed["decisions"][0]["title"] == shown[:200] + "…"
         for result, count in ((got, 4), (listed, 1)):
             dumped = json.dumps(result)
             assert value not in dumped and "unscanned" not in dumped
@@ -847,7 +1156,7 @@ class TestExitRedaction:
         assert got["decision"]["context"] == (
             f"see {run} and <REDACTED:secret> then <REDACTED:secret>"
         )
-        assert listed["decisions"][0]["title"] == run
+        assert listed["decisions"][0]["title"] == run[:200] + "…"
         assert _warning(got, "decision_text_secrets_redacted")["message"].startswith("2 ")
         assert "decision_text_secrets_redacted" not in _codes(listed)
 
@@ -865,8 +1174,9 @@ class TestExitRedaction:
         got, listed = _get(tmp_project, "ADR-001"), _query(tmp_project)
         assert got["decision"]["title"] == paragraph
         assert got["decision"]["context"] == paragraph
-        assert listed["decisions"][0]["title"] == paragraph
-        assert got["warnings"] == [] and listed["warnings"] == []
+        assert listed["decisions"][0]["title"] == paragraph[:200] + "…"
+        assert got["warnings"] == []
+        assert _codes(listed) == ["decision_list_truncated"]  # the cut title, nothing else
 
     def test_a_private_key_in_the_adr_text_is_removed_whole(self, tmp_project: Path):
         key = "-----BEGIN RSA PRIVATE KEY-----\n" + "\n".join([KEY_LINE] * 4)
@@ -938,6 +1248,8 @@ def _write_good(project: Path) -> None:
         (_write_good, {"action": "get", "decision_id": "ADR-999"}, "decision_not_found"),
         (_write_good, {"lifecycle": "accepted"}, "invalid_lifecycle"),
         (_write_good, {"lifecycle": "nonsense"}, "invalid_lifecycle"),
+        (_write_good, {"limit": -1}, "invalid_pagination"),
+        (_write_good, {"offset": -1}, "invalid_pagination"),
     ],
 )
 def test_every_error_code_returns_an_error_dict_and_writes_nothing(
@@ -1057,6 +1369,53 @@ def _aliased_lineage(adr: Decision) -> str:
     return dump_lineage(doc, adr.id) + f"events:\n- &e {note}\n" + "- *e\n" * 39
 
 
+def test_list_and_the_lifecycle_alone_do_not_build_events(
+    tmp_project: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # A list row and the draft guard need the lifecycle, the declared values
+    # and the links, never the events; building the events redacts every
+    # shown text, which made list pay for 20 events per ADR.
+    adrs = [_adr(f"ADR-00{n}") for n in range(1, 4)]
+    _seed(tmp_project, *adrs)
+    for adr in adrs:
+        doc = _doc_for(adr)
+        doc["events"].append({"at": NOW, "kind": "note", "text": "n", "via": "hand"})
+        _put_lineage(tmp_project, adr.id, doc)
+    built: list[int] = []
+    view_events = lineage._view_events
+
+    def counting(raw: object, notes: object) -> tuple[list[dict], int, list[str]]:
+        built.append(1)
+        return view_events(raw, notes)
+
+    monkeypatch.setattr(lineage, "_view_events", counting)
+    listed = _query(tmp_project)
+    assert listed["count"] == 3 and listed["warnings"] == []
+    assert _query(tmp_project, lifecycle="adopted")["count"] == 3
+    raw = lineage.read_lineage_raw(_pm(tmp_project), "ADR-001")
+    assert lineage.effective_lifecycle(adrs[0], raw) == "adopted"
+    assert built == []
+    got = _get(tmp_project, "ADR-001")
+    assert got["lineage"]["events_total"] == 2 and built == [1]
+    # The light view agrees with the full one on everything it keeps.
+    light = lineage.lineage_view(adrs[0], raw, include_events=False)
+    full = lineage.lineage_view(adrs[0], raw)
+    assert (light.events, light.events_total, light.declared_later) == ([], 0, [])
+    for name in ("lifecycle", "effective_lifecycle", "declared", "links", "status_mismatch"):
+        assert getattr(light, name) == getattr(full, name), name
+
+
+def test_the_description_says_when_to_use_it_and_what_derived_means():
+    doc = " ".join((pm_decision_query.__doc__ or "").split())
+    assert "Use it to see which ADRs are adopted" in doc
+    assert "Do not use it to change an ADR" in doc
+    # derived also covers a lineage that exists but cannot be used.
+    assert "derived=true means no lineage is attributed to the ADR" in doc
+    assert "has no lineage and" not in doc
+    assert "has_more and next_offset" in doc
+    assert "Declared values and events are as recorded, not verified" in doc
+
+
 def test_lineages_built_to_be_slow_to_redact_are_read_quickly(tmp_project: Path):
     # Runs of these units once took some redaction patterns quadratic time:
     # about 3.5 s per ADR for list and get alike, for files within the
@@ -1154,7 +1513,7 @@ def test_a_long_aliased_status_is_listed_quickly(tmp_project: Path):
         _aliased_decisions_yaml(100, 1024 * 1024, "status"), encoding="utf-8"
     )
     started = time.perf_counter()
-    listed = _query(tmp_project)
+    listed = _query(tmp_project, limit=100)
     assert time.perf_counter() - started < 1.5
     assert listed["count"] == 100
     assert listed["decisions"][0]["status"] == "a" * lineage.MAX_LABEL_CHARS + "…"

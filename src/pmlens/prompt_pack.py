@@ -23,6 +23,7 @@ markdown fence and the HTML ``<pre>`` so the two formats never drift.
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
@@ -411,11 +412,14 @@ _PROMPT_PACK_RESERVED_NAMES: frozenset[str] = frozenset(
         "memory.db",
     }
 )
-# Directories a prompt-pack export must never write into, matched against
-# every component of the resolved out_path (the filename check above only sees
-# the basename, so ".pm/decision_lineage/ADR-001.yaml" would pass it).
+# Directories inside a ``.pm`` directory that a prompt-pack export must never
+# write into (the filename check above only sees the basename, so
+# ".pm/decision_lineage/ADR-001.yaml" would pass it). Only a component right
+# after a ".pm" component counts: a "decision_lineage" directory elsewhere
+# (~/work/decision_lineage/pack.md) is not pmlens's and is left alone.
+_PROMPT_PACK_PM_DIR = ".pm"
 _PROMPT_PACK_RESERVED_DIRS: frozenset[str] = frozenset({"decision_lineage"})
-# Both sets are compared case-insensitively (``str.casefold`` on the candidate;
+# All three are compared case-insensitively (``str.casefold`` on the candidate;
 # the entries are lower-case ASCII). macOS (APFS) and Windows file systems are
 # case-insensitive by default, so ".pm/TASKS.yaml" or ".pm/DECISION_LINEAGE/x"
 # names the very same file, and ``Path.resolve`` does not normalise case. On a
@@ -487,21 +491,46 @@ def validate_prompt_pack_args(format: str, group_by: str, out_path: str | None) 
 
 
 def _reserved_dir_in(out_path: str) -> str | None:
-    """The reserved directory ``out_path`` would land in, if any.
+    """The reserved ``.pm`` subdirectory ``out_path`` would land in, if any.
 
-    The path is expanded and resolved first, so ``..`` segments and symlinked
-    parents cannot route around the check, and each component is compared
+    A reserved name counts only right after a ``.pm`` component. Both the
+    path as written (expanded, made absolute, ``..`` folded) and the resolved
+    path are checked: the resolved one so a symlinked parent cannot route
+    around the check, the written one so a symlinked ``.pm`` (which resolves
+    to a directory with another name) cannot either. Components are compared
     case-insensitively, so a different spelling of the same directory on a
-    case-insensitive file system cannot either.
+    case-insensitive file system cannot slip through. The project's own
+    ``.pm`` is checked again by :func:`run_prompt_pack` once it is known.
     """
-    path = Path(out_path)
+    path = Path(out_path).expanduser()
+    candidates = [Path(os.path.normpath(os.path.abspath(path))).parts]
     try:
-        parts = path.expanduser().resolve().parts
+        candidates.append(path.resolve().parts)
     except (OSError, RuntimeError):
-        parts = path.parts
-    for part in parts:
-        if part.casefold() in _PROMPT_PACK_RESERVED_DIRS:
-            return part.casefold()
+        pass
+    for parts in candidates:
+        folded = [part.casefold() for part in parts]
+        for parent, part in zip(folded, folded[1:], strict=False):
+            if parent == _PROMPT_PACK_PM_DIR and part in _PROMPT_PACK_RESERVED_DIRS:
+                return part
+    return None
+
+
+def _inside_reserved_dir(dest: Path, pm_path: Path) -> str | None:
+    """The reserved subdirectory of ``pm_path`` that ``dest`` lands in, if any.
+
+    Both paths are resolved (a symlinked ``.pm`` included) and compared
+    component by component, case-insensitively.
+    """
+    try:
+        dest_parts = [part.casefold() for part in dest.expanduser().resolve().parts]
+        pm_parts = [part.casefold() for part in pm_path.resolve().parts]
+    except (OSError, RuntimeError):
+        return None
+    for name in sorted(_PROMPT_PACK_RESERVED_DIRS):
+        reserved = [*pm_parts, name]
+        if dest_parts[: len(reserved)] == reserved:
+            return name
     return None
 
 
@@ -616,6 +645,15 @@ def run_prompt_pack(
         if out_path
         else pm_path / "exports" / f"prompt-pack-{_prompt_pack_slug(filter_label)}.{ext}"
     )
+    reserved_dir = _inside_reserved_dir(dest, pm_path)
+    if reserved_dir is not None:
+        return {
+            "status": "error",
+            "message": (
+                f"refusing to write a prompt pack inside the reserved directory "
+                f"{reserved_dir!r}; choose a different out_path"
+            ),
+        }
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_text(content, encoding="utf-8")
 

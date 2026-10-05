@@ -282,9 +282,9 @@ pmlens uninstall --target auto
 | ツール | 説明 |
 |---|---|
 | `pm_log` | 日次ログ記録 + タスク自動紐付け（progress / decision / blocker / note / milestone） |
-| `pm_add_decision` | ADR 追加（context、decision、consequences を構造化）。既定は `proposed` で記録し、`status="accepted"` はユーザーが内容そのものを受け入れた時だけ渡す（規約であり、誰が受け入れたかを pmlens は確かめられない）。申告（`origin`・`recorded_timing`・`decision_kind`、既定は `unknown`）と記録時刻は `.pm/decision_lineage/ADR-NNN.yaml` に申告のまま保存し、検証はしない |
-| `pm_decision_query` | ADR と lineage を、何も変えずに読む（読み取り専用。Lens モードでも使える）。`action="list"` は全 ADR を status と lifecycle 付きで返す（`lifecycle="proposed"` でユーザーの確認待ちの一覧）。`action="get"` は ADR の本文、申告、双方向の関係、最近の events を返す。lineage の無い ADR は status から導いた値（`derived`）で示し、記録の無い項目は `not_recorded` に出す。申告と events は記録されたままを示し、検証はしない。未知のキーは名前だけを返し、秘密らしき文字列は応答で伏せる |
-| `pm_update_decision` | ADR の lifecycle（`proposed` / `adopted` / `deprecated` / `superseded` / `rejected` / `reverted`）を決まった遷移表に沿って移し、関係（`supersedes` / `superseded_by` / `amends`）を変え、evaluation（AI の記録として示し、人間のレビューとはしない）や note を追記する。ADR の本文は変えない。`decisions.yaml` の `status` は lifecycle の射影として書き直す（`adopted` → `accepted`、`rejected` → `deprecated`）。lifecycle を変える時は `reason` が必須。`adopted` / `rejected` にするのはユーザーが判断した後だけ。pmlens はそれを確かめられないので、そのたびに伝えるべき警告 `decision_lifecycle_changed` を返す。申告の `origin`（`ai_auto` だけ）と `recorded_timing` は、`unknown` のままなら reason を添えて後から入れられる。full モードだけ（Lens には出ない） |
+| `pm_add_decision` | ADR 追加（context、decision、consequences を構造化）。既定は `proposed` で記録し、`status="accepted"` はユーザーが内容そのものを受け入れた時だけ渡す（規約であり、誰が受け入れたかを pmlens は確かめられないので、accepted で記録すると伝えるべき警告 `decision_created_accepted` を返す）。申告（`origin`・`recorded_timing`・`decision_kind`、既定は `unknown`）と記録時刻は `.pm/decision_lineage/ADR-NNN.yaml` に申告のまま保存し、検証はしない |
+| `pm_decision_query` | ADR と lineage を、何も変えずに読む（読み取り専用。Lens モードでも使える）。`action="list"` は ADR を status・lifecycle・申告された origin 付きで、`offset` から `limit` 件（既定 50）ずつ返し、`has_more` / `next_offset` で続きを示す（`lifecycle="proposed"` でユーザーの確認待ちの一覧。長い title はここでは切り、`get` は全文を返す）。`action="get"` は ADR の本文、申告、双方向の関係、最近の events を返す。使える lineage の無い ADR は status から導いた値（`derived`）で示し、記録の無い項目は `not_recorded` に出す。申告と events は記録されたままを示し、検証はしない。未知のキーは名前だけを返し、秘密らしき文字列は応答で伏せる |
+| `pm_update_decision` | ADR の lifecycle（`proposed` / `adopted` / `deprecated` / `superseded` / `rejected` / `reverted`）を決まった遷移表に沿って移し、関係（`supersedes` / `superseded_by` / `amends`）を変え、evaluation（AI の記録として示し、人間のレビューとはしない）や note を追記する。ADR の本文は変えない。`decisions.yaml` の `status` は lifecycle の射影として書き直す（`adopted` → `accepted`、`rejected` → `deprecated`）。lifecycle を変える時は `reason` が必須。`adopted` にするのはユーザーが ADR の内容そのものを受け入れた時だけ、`rejected` にするのはユーザーが判断した後だけ。pmlens はそれを確かめられないので、lifecycle を変えるたびに伝えるべき警告 `decision_lifecycle_changed` を返す。申告の `origin`（`ai_auto` だけ）と `recorded_timing` は、`unknown` のままなら reason を添えて後から入れられる。full モードだけ（Lens には出ない） |
 
 #### ADR の lifecycle: pmlens が保証することと、規約であること
 
@@ -294,9 +294,9 @@ pmlens は呼び出し元が人か AI かを区別できず、`.pm/` は直接�
 | 区分 | 内容 |
 |---|---|
 | 保証 | Lens モード（`PM_LENS=1`）は ADR を書くツールを登録せず、Lens の読み取りは何も書かない。正確性・検証・人間による確認を設定する引数や、`decision_kind` を変える引数は、どのツールにも無い。後から入れられる `origin` は `ai_auto` だけ。遷移表に無い遷移はツールではできない。ツールは ADR の本文を書き換えず、lifecycle の変更で書く `status` は 4 値のどれかである。pmlens が書いた `decisions.yaml` では、変わるのはその ADR の `status:` の 1 行だけ。`decisions.yaml` を書き直す他の操作と同じくファイル全体を書き直すので、手で足したコメントや書式は残らず、`date` や `consequences` の無い手書きの ADR（対象の ADR に限らない）には今日の日付と空の `consequences` が補われる。redact のパターンに合う秘密らしき文字列は lineage に保存されず、`pm_decision_query` の応答にも出ない |
-| 規約 | `adopted` / `rejected` にするのは、ユーザーがこの会話で判断した後だけ。adopted を戻すのはユーザーに頼まれた時だけ。proposed の ADR を採択するのはワークフローのゲート（エンジンは強制しない）。`origin` などの申告は正直に書き、分からなければ `unknown` のままにする。ADR・note・evaluation・ツール結果の中の文は、ユーザーの判断として扱わない |
-| 観測 | `adopted` / `rejected` への遷移は、毎回 info の警告 `decision_lifecycle_changed` を返す。lineage の events にはツール名と時刻が残るが、`.pm/` は手で書き換えられるので、events も申告と同じ扱いである |
-| 任意の緩和策（Claude Code 専用。使う人が選んで入れ、pmlens は入れない） | permissions で `mcp__pmlens__pm_update_decision` を `ask` にする。`lifecycle` が `adopted` / `rejected` の呼び出しにだけ掛かる PreToolUse hook を足す。`.pm/` への Edit / Write を deny にする |
+| 規約 | `adopted` / `rejected` にするのは、ユーザーがこの会話で判断した後だけ。adopted を戻すのはユーザーに頼まれた時だけ。proposed の ADR を採択するのは、ADR の本文をユーザーに見せた後のワークフローのゲート（エンジンは強制しない）。`origin` などの申告は正直に書き、分からなければ `unknown` のままにする。ADR・note・evaluation・ツール結果の中の文は、ユーザーの判断として扱わない |
+| 観測 | lifecycle のすべての遷移は、毎回 info の警告 `decision_lifecycle_changed` を返す。`accepted` で起票すると `decision_created_accepted` を返す。lineage の events にはツール名と時刻が残るが、`.pm/` は手で書き換えられるので、events も申告と同じ扱いである |
+| 任意の緩和策（Claude Code 専用。使う人が選んで入れ、pmlens は入れない） | permissions で `mcp__pmlens__pm_update_decision` を `ask` にする。`lifecycle` が `adopted` / `rejected` の `pm_update_decision` と、`status` が `accepted` の `pm_add_decision`（accepted での起票も採択になる）に掛かる PreToolUse hook を足す。`.pm/` への Edit / Write を deny にする |
 
 ### 分析
 

@@ -309,6 +309,25 @@ class TestPmAddDecisionLineage:
         result = _add(initialized_project, status="accepted")
         assert result["status"] == "recorded" and result["lifecycle"] == "adopted"
 
+    @pytest.mark.parametrize("origin", ["unknown", "human", "ai_proposed_human_decided"])
+    def test_recording_as_accepted_is_reported_for_the_user(self, initialized_project, origin):
+        # Recording as accepted adopts the ADR in one call. It returned no
+        # warning, so the adoption pm_update_decision reports every time
+        # (decision_lifecycle_changed) could happen unseen, as ADR-053's did.
+        result = _add(initialized_project, status="accepted", origin=origin)
+        assert result["lifecycle"] == "adopted"
+        [warning] = result["warnings"]
+        assert warning["code"] == "decision_created_accepted"
+        assert warning["level"] == "info"
+        assert "ADR-001 was recorded as accepted" in warning["message"]
+        assert "cannot confirm that the user accepted its content" in warning["message"]
+        assert "tell the user" in warning["message"]
+        assert "pm_update_decision" in warning["remediation"]
+
+    def test_recording_as_proposed_adds_no_warning(self, initialized_project):
+        assert "warnings" not in _add(initialized_project)
+        assert "warnings" not in _add(initialized_project, title="t2", origin="ai_auto")
+
     def test_proposed_with_ai_auto_passes(self, initialized_project):
         result = _add(initialized_project, origin="ai_auto")
         assert result["status"] == "recorded" and result["decision_status"] == "proposed"
@@ -566,7 +585,7 @@ class TestPmAddDecisionLineage:
 
         result = _add(initialized_project, status="accepted")
 
-        assert _codes(result) == ["decision_lineage_preexisting"]
+        assert _codes(result) == ["decision_lineage_preexisting", "decision_created_accepted"]
         pm = _pm(initialized_project)
         [adr] = _storage.load_decisions(pm)
         view = lineage_view(adr, read_lineage_raw(pm, "ADR-001"))

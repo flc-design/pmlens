@@ -454,6 +454,37 @@ class TestDecisionLifecycleGuidance:
                 assert "adopted" in gate_step.description, (name, gate_step.id)
         assert scanned >= _KNOWN_ADD_DECISION_STEPS
 
+    def test_a_gate_that_adopts_shows_the_adr_text_first(self) -> None:
+        # Approving a plan, a spec or a direction is not approving the ADR:
+        # the gate shows the ADR's own text, and adopting means the user
+        # accepted that text (ADR-059). Without this, the check gate adopted
+        # an ADR recorded before the spec changed the design.
+        import pmlens.server as srv
+
+        assert "pm_decision_query" in srv.REGISTERED_TOOLS
+        gates: set[tuple[str, str]] = set()
+        for name, tmpl in _builtin_templates().items():
+            for step in tmpl.steps:
+                if not (step.gate and "pm_update_decision" in step.description):
+                    continue
+                gates.add((name, step.id))
+                text = " ".join(step.description.split())
+                assert "pm_decision_query" in text, (name, step.id)
+                assert "Before asking for approval" in text, (name, step.id)
+                assert "accepted what the ADR says" in text, (name, step.id)
+                assert "approves the ADR's content" in text, (name, step.id)
+        assert gates >= {
+            ("development", "check"),
+            ("discovery", "confirm"),
+            ("brainstorming", "record"),
+        }
+        check = load_workflow_template("development").steps[4]
+        text = " ".join(check.description.split())
+        # A design changed after the ADR was recorded gets a new ADR, not the old text.
+        assert "record a new ADR (status=proposed)" in text
+        assert "superseded" in text
+        assert "pm_workflow_status" in text
+
     def test_adoption_is_guided_only_on_gated_steps(self) -> None:
         mentions: set[tuple[str, str]] = set()
         for name, tmpl in _builtin_templates().items():

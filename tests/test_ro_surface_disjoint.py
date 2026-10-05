@@ -478,7 +478,7 @@ class TestWidenedSurfaces:
             "load_decisions",
             "lineage_view",
             "scan_linked_from",
-            "attributed_links",
+            "_attributed_doc",
             "scrub_view",
         } <= _RO_CLOSURE
         assert _OUTBOX_WRITE_SEED <= _GRAPH.defined

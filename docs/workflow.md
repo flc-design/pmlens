@@ -204,8 +204,11 @@ CLAUDE.md ルール更新   → pm_update_claudemd
 ```
 
 組み込みのワークフロー（development / discovery / brainstorming）は、ADR を
-`status=proposed` で記録し、ユーザーがゲートで承認した時に `pm_update_decision` で
+`status=proposed` で記録し、ゲートで承認を求める前に `pm_decision_query`（action=get）で
+ADR の本文をユーザーに見せ、ユーザーがその内容を承認した時に `pm_update_decision` で
 adopted にするよう案内する（ゲートはエンジンが強制しないので、承認を待つのはモデルの規約）。
+spec や plan の承認は ADR の承認ではない。development では、検討の途中で設計が変わったら、
+古い ADR を採択せずに新しい ADR を proposed で記録し、採択後に古い方を superseded にする。
 この案内には次の限界がある。
 
 - 開始済みのワークフローには反映されない（開始時にテンプレートのステップを複製するため）。

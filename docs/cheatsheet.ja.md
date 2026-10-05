@@ -90,7 +90,7 @@ Claude Code セッション:
 |--------|------|----------------|
 | `pm_log` | デイリーログに記録（作業中タスクに自動紐付け） | `entry`, `category="progress"` |
 | `pm_add_decision` | ADR（設計判断記録）を保存（ID自動採番）。既定は proposed、`accepted` はユーザーが内容を受け入れた時だけ | `title`, `context`, `decision`, `status="proposed"`, `origin?`, `recorded_timing?`, `decision_kind?` |
-| `pm_decision_query` | ADR と lineage を何も変えずに読む（Lens 対応）。`lifecycle="proposed"` でユーザーの確認待ちの一覧 | `action="list"`, `decision_id?`（get）, `lifecycle?` |
+| `pm_decision_query` | ADR と lineage を何も変えずに読む（Lens 対応）。`lifecycle="proposed"` でユーザーの確認待ちの一覧。list は `limit` / `offset` でページ送り | `action="list"`, `decision_id?`（get）, `lifecycle?`, `limit=50`, `offset=0` |
 | `pm_update_decision` | ADR の lifecycle を移す（ユーザーが承認したら proposed → adopted など）、関係を変える、evaluation や note を追記する。本文は変えない（full モードだけ） | `decision_id`, `lifecycle?`, `reason?`, `add_links?`, `remove_links?`, `evaluation?`, `note?` |
 | `pm_velocity` | ベロシティとトレンド分析 | `weeks=4` |
 | `pm_risks` | 自動検出 + 手動登録リスク一覧 | `project_path?` |

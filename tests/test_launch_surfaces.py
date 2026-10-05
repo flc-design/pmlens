@@ -405,16 +405,24 @@ def test_decisions_round_trip_over_stdio(tmp_project: Path) -> None:
         ],
     )
     schema = session.tool_definitions["pm_decision_query"]["inputSchema"]
-    assert set(schema["properties"]) == {"action", "decision_id", "lifecycle", "project_path"}
+    assert set(schema["properties"]) == {
+        "action",
+        "decision_id",
+        "lifecycle",
+        "limit",
+        "offset",
+        "project_path",
+    }
     assert not schema.get("required")
 
     added, listed, adopted, got = (
         json.loads(response["content"][0]["text"]) for response in session.responses
     )
     assert added["status"] == "recorded" and added["decision_id"] == "ADR-001"
-    assert [(row["id"], row["lifecycle"], row["origin"]) for row in listed["decisions"]] == [
-        ("ADR-001", "proposed", "ai_auto")
-    ]
+    assert [
+        (row["id"], row["lifecycle"], row["declared_origin"]) for row in listed["decisions"]
+    ] == [("ADR-001", "proposed", "ai_auto")]
+    assert listed["has_more"] is False and listed["next_offset"] == 1
     assert adopted["count"] == 0 and adopted["total"] == 1
     assert got["decision"]["status"] == "proposed"
     assert got["lineage"]["derived"] is False

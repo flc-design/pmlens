@@ -410,6 +410,46 @@ class TestPmPromptPackTool:
         )
         assert res is not None and "decision_lineage" in res["message"]
 
+    def test_a_decision_lineage_directory_outside_pm_is_not_reserved(self, tmp_path):
+        # Only .pm/decision_lineage is pmlens's. A work directory that happens
+        # to share the name used to be refused wherever it was in the path.
+        _seed(tmp_path, [_task(id="P-1", tags=["x"])])
+        for out_path in (
+            tmp_path / "work" / "decision_lineage" / "docs" / "pack.md",
+            tmp_path / "work" / "Decision_Lineage" / "pack.md",
+            tmp_path / ".pm" / "exports" / "decision_lineage" / "pack.md",
+        ):
+            assert validate_prompt_pack_args("md", "none", str(out_path)) is None, out_path
+            res = srv.pm_prompt_pack(
+                filter_tag="x", out_path=str(out_path), project_path=str(tmp_path)
+            )
+            assert res["status"] == "ok", (out_path, res)
+            assert out_path.exists()
+
+    def test_a_symlinked_pm_directory_still_protects_its_lineage(self, tmp_path):
+        # A .pm that is a symlink resolves to a directory with another name, so
+        # no ".pm" component is left in the resolved path; the project's own
+        # .pm is checked once it is known.
+        project = tmp_path / "proj"
+        project.mkdir()
+        pm_path = _seed(project, [_task(id="P-1", tags=["x"])])
+        store = tmp_path / "pm-store"
+        pm_path.rename(store)
+        pm_path.symlink_to(store, target_is_directory=True)
+        lineage_dir = store / "decision_lineage"
+        lineage_dir.mkdir()
+        target = lineage_dir / "ADR-001.yaml"
+        target.write_text("schema: 1\n", encoding="utf-8")
+
+        for out_path in (target, lineage_dir / "pack.md", pm_path / "decision_lineage" / "x.md"):
+            res = srv.pm_prompt_pack(
+                filter_tag="x", out_path=str(out_path), project_path=str(project)
+            )
+            assert res["status"] == "error", out_path
+            assert "reserved" in res["message"]
+        assert target.read_text(encoding="utf-8") == "schema: 1\n"
+        assert sorted(p.name for p in lineage_dir.iterdir()) == ["ADR-001.yaml"]
+
     def test_missing_task_ids_warns(self, tmp_path):
         _seed(tmp_path, [_task(id="P-1", tags=["x"])])
         res = srv.pm_prompt_pack(task_ids=["P-1", "P-404"], project_path=str(tmp_path))

@@ -692,35 +692,44 @@ class TestFailures:
 
 class TestWarnings:
     @pytest.mark.parametrize(
-        ("source", "target", "told"),
+        ("source", "target"),
         [
-            ("proposed", "adopted", True),
-            ("proposed", "rejected", True),
-            ("deprecated", "adopted", True),
-            ("superseded", "adopted", True),
-            ("adopted", "proposed", False),
-            ("adopted", "deprecated", False),
-            ("adopted", "reverted", False),
-            ("rejected", "proposed", False),
+            ("proposed", "adopted"),
+            ("proposed", "rejected"),
+            ("deprecated", "adopted"),
+            ("superseded", "adopted"),
+            # Not only adopted / rejected: leaving proposed takes the ADR off
+            # the list waiting for the user, leaving adopted withdraws it.
+            ("proposed", "superseded"),
+            ("adopted", "proposed"),
+            ("adopted", "deprecated"),
+            ("adopted", "reverted"),
+            ("adopted", "superseded"),
+            ("rejected", "proposed"),
+            ("reverted", "proposed"),
+            ("superseded", "deprecated"),
         ],
     )
-    def test_adopting_or_rejecting_is_always_reported(
-        self, tmp_project: Path, source: str, target: str, told: bool
-    ):
+    def test_every_lifecycle_change_is_reported(self, tmp_project: Path, source: str, target: str):
         successors = ["ADR-002"] if source == "superseded" else []
         _with_lineage(tmp_project, source, superseded_by=successors)
         kwargs: dict = {"lifecycle": target, "reason": "the user said so"}
         if successors:
             kwargs["remove_links"] = {"superseded_by": successors}
+        if target == "superseded":
+            kwargs["add_links"] = {"superseded_by": ["ADR-002"]}
         result = _update(tmp_project, **kwargs)
         assert result["status"] == "updated", result
-        if told:
-            warning = _warning(result, "decision_lifecycle_changed")
-            assert warning["level"] == "info"
-            assert "cannot confirm that the user made this decision" in warning["message"]
-            assert "tell the user" in warning["message"]
-        else:
-            assert "decision_lifecycle_changed" not in _codes(result)
+        warning = _warning(result, "decision_lifecycle_changed")
+        assert warning["level"] == "info"
+        assert f"ADR-001 is now {target} (was {source})" in warning["message"]
+        assert "cannot confirm that the user made this decision" in warning["message"]
+        assert "tell the user" in warning["message"]
+
+    def test_a_call_that_keeps_the_lifecycle_is_not_reported_as_a_change(self, tmp_project: Path):
+        _with_lineage(tmp_project, "adopted")
+        for call in ({"note": "n"}, {"lifecycle": "adopted"}):
+            assert "decision_lifecycle_changed" not in _codes(_update(tmp_project, **call))
 
     def test_supersedes_points_at_the_other_side_without_writing_it(self, tmp_project: Path):
         _add(tmp_project, "Old approach")
@@ -951,6 +960,54 @@ class TestD8:
         assert result["status"] == "error"
         assert result["code"] == "declared_backfill_value_not_allowed"
         assert _snapshot(_pm(tmp_project)) == before
+
+
+# ─── Tool descriptions (design §4: when to use, when not) ──
+
+
+def _description(tool: Callable) -> str:
+    return " ".join((tool.__doc__ or "").split())
+
+
+class TestToolDescriptions:
+    def test_update_says_when_to_use_it_and_when_not(self):
+        doc = _description(pm_update_decision)
+        assert "Use it after the user decides on an ADR" in doc
+        assert "Do not use it to change what an ADR says" in doc
+        # Adopting needs the user's acceptance of the ADR itself.
+        assert "accepted the ADR's own content" in doc
+        assert "approving a plan or a review is not enough" in doc
+        assert "Every lifecycle change returns a warning to relay to the user" in doc
+
+    def test_update_names_every_case_that_needs_a_reason(self):
+        # Only the lifecycle was named; remove_links and a backfill were found
+        # to need one only by the reason_required error.
+        doc = _description(pm_update_decision)
+        assert (
+            "reason is required for a lifecycle change, remove_links, and filling in "
+            "origin or recorded_timing" in doc
+        )
+        for change in (
+            lineage.LineageChange(remove_links={"amends": ["ADR-002"]}),
+            lineage.LineageChange(origin="ai_auto"),
+            lineage.LineageChange(recorded_timing="post_hoc"),
+        ):
+            assert lineage.validate_change(change)["code"] == "reason_required"
+
+    def test_add_says_which_origin_a_consent_to_record_is(self):
+        # ADR-057: agreeing that an ADR may be recorded is not deciding its
+        # content, so it is ai_auto; only a user who decided the content makes
+        # it ai_proposed_human_decided.
+        doc = _description(pm_add_decision)
+        assert "including when the user only agreed that it may be recorded" in doc
+        assert "ai_proposed_human_decided (you proposed it and the user decided its content)" in doc
+        assert "Recording as accepted returns a warning to relay to the user" in doc
+
+    @pytest.mark.parametrize("tool", [pm_add_decision, pm_update_decision, pm_decision_query])
+    def test_descriptions_carry_no_ticket_or_adr_numbers(self, tool: Callable):
+        doc = _description(tool)
+        assert not re.search(r"PMSERV|ADR-\d|docs/", doc), tool.__name__
+        assert "Use it" in doc and "Do not use it" in doc
 
 
 # ─── D11: secrets never stored or shown ──────────────

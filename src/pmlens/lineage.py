@@ -74,7 +74,15 @@ MAX_APPEND_BYTES = MAX_LINEAGE_BYTES - LINEAGE_RESERVE_BYTES
 # limit, checked without recursion (:func:`_nested_deeper_than`), so neither
 # accepts a file the other cannot handle. S1 files nest 3 deep.
 MAX_LINEAGE_DEPTH = 64
+# The linked_from scan reads other ADRs' lineages (the ADR's own supersedes /
+# superseded_by targets first, then the rest newest first) and stops at
+# whichever comes first: this many files, or this many bytes read. It is the
+# only read of other ADRs' lineages in a get, so the byte budget bounds the
+# parse time when many files sit near MAX_LINEAGE_BYTES (each takes tens of
+# milliseconds to safe_load): it holds 500 files of 16 KiB, far more than S1
+# writes, but only about 32 files at the size cap.
 LINKED_FROM_SCAN_LIMIT = 500
+LINKED_FROM_SCAN_BYTES = 8 * 1024 * 1024
 MAX_LINKS_PER_TYPE = 50
 MAX_TEXT_CHARS = 4_000
 MAX_LABEL_CHARS = 100
@@ -281,6 +289,18 @@ def _scrub_clip(text: str, limit: int, cache: ScrubCache | None = None) -> tuple
     scrubbed, count = cache.scrub(text) if cache is not None else scrub_text(text)
     out, cut = _clip(scrubbed, limit)
     return out, cut, count
+
+
+def scrub_cut(text: str, limit: int, cache: ScrubCache | None = None) -> tuple[str, bool, int]:
+    """Redact the whole of ``text``, then cut it to ``limit`` characters.
+
+    For a reader that shows a shortened value and says that it was cut (a
+    list row's title). Pass the response's :class:`ScrubCache` as ``cache``.
+
+    Returns:
+        (text, cut, redactions); the count carries no cleartext.
+    """
+    return _scrub_clip(text, limit, cache)
 
 
 def scrub_label_counted(
@@ -608,6 +628,8 @@ class RawLineage:
         error: A note code when it could not (``decision_lineage_unreadable``
             or ``decision_id_invalid``).
         detail: A content-free reason (exception type, YAML line and column).
+        size: How many bytes were read from the file (0 when nothing was
+            read); what parsing it cost, for readers with a byte budget.
     """
 
     decision_id: str
@@ -615,6 +637,7 @@ class RawLineage:
     data: object = None
     error: str | None = None
     detail: str | None = None
+    size: int = 0
 
 
 def read_lineage_raw(pm_path: Path, decision_id: str) -> RawLineage:
@@ -652,11 +675,16 @@ def read_lineage_raw(pm_path: Path, decision_id: str) -> RawLineage:
         return RawLineage(
             decision_id, exists=True, error=LINEAGE_UNREADABLE, detail=error_summary(exc)
         )
+    size = len(payload)
     try:
         data = yaml.safe_load(payload.decode("utf-8"))
     except Exception as exc:  # noqa: BLE001 - a read never raises; the type is reported
         return RawLineage(
-            decision_id, exists=True, error=LINEAGE_UNREADABLE, detail=error_summary(exc)
+            decision_id,
+            exists=True,
+            error=LINEAGE_UNREADABLE,
+            detail=error_summary(exc),
+            size=size,
         )
     if _nested_deeper_than(data, MAX_LINEAGE_DEPTH):
         return RawLineage(
@@ -664,8 +692,9 @@ def read_lineage_raw(pm_path: Path, decision_id: str) -> RawLineage:
             exists=True,
             error=LINEAGE_UNREADABLE,
             detail=f"nested more than {MAX_LINEAGE_DEPTH} levels deep",
+            size=size,
         )
-    return RawLineage(decision_id, exists=True, data=data)
+    return RawLineage(decision_id, exists=True, data=data, size=size)
 
 
 def link_targets(raw: RawLineage, link_type: str) -> list[str]:
@@ -924,7 +953,7 @@ def _attributed_doc(
     A lineage belongs to the ADR only when the ADR id is valid and unique, the
     file was read, it is a mapping whose ``decision_id`` names this ADR and its
     anchor (when present) matches. :func:`lineage_view` and
-    :func:`attributed_links` share this rule, so a reader never attributes a
+    :func:`scan_linked_from` share this rule, so a reader never attributes a
     lineage the view would not.
 
     Returns:
@@ -949,22 +978,13 @@ def _attributed_doc(
     return doc, None
 
 
-def attributed_links(
-    decision: Decision, raw: RawLineage, *, duplicate: bool = False
-) -> dict[str, list[str]] | None:
-    """The links of the lineage attributed to ``decision``, or ``None``.
-
-    The same attribution rule as :func:`lineage_view` and the same filtering
-    of link values (ADR ids only, deduplicated, at most MAX_LINKS_PER_TYPE),
-    without building the rest of the view. Pure; no I/O.
-    """
-    doc, _ = _attributed_doc(decision, raw, duplicate=duplicate)
-    if doc is None:
-        return None
-    return _view_links(doc.get("links"), _ViewNotes())
-
-
-def lineage_view(decision: Decision, raw: RawLineage, *, duplicate: bool = False) -> LineageView:
+def lineage_view(
+    decision: Decision,
+    raw: RawLineage,
+    *,
+    duplicate: bool = False,
+    include_events: bool = True,
+) -> LineageView:
     """Build what readers show for one ADR; pure, no I/O (design §2.7).
 
     The lineage is attributed to the ADR only when the ADR id is valid and
@@ -976,6 +996,12 @@ def lineage_view(decision: Decision, raw: RawLineage, *, duplicate: bool = False
         decision: The ADR from decisions.yaml.
         raw: :func:`read_lineage_raw` for the same id.
         duplicate: True when decisions.yaml holds this id more than once.
+        include_events: False for a reader that needs only the lifecycle,
+            the declared values, the links and the attribution notes (a list
+            row, the draft guard): the events, ``declared_later`` and the
+            unknown top-level keys are then left empty, so their text is
+            neither redacted nor cut. Everything else is the same as with
+            True.
 
     Returns:
         The view; its notes carry codes and counts only.
@@ -1036,10 +1062,15 @@ def lineage_view(decision: Decision, raw: RawLineage, *, duplicate: bool = False
     if lifecycle == DecisionLifecycle.SUPERSEDED and not links["superseded_by"]:
         notes.add(LINEAGE_NO_SUCCESSOR)
 
-    events, events_total, declared_later = _view_events(doc.get("events"), notes)
-    unknown_keys = _key_names(
-        (key for key in doc if key not in _KNOWN_TOP_LEVEL), MAX_UNKNOWN_KEYS, notes
-    )
+    events: list[dict] = []
+    events_total = 0
+    declared_later: list[str] = []
+    unknown_keys: list[str] = []
+    if include_events:
+        events, events_total, declared_later = _view_events(doc.get("events"), notes)
+        unknown_keys = _key_names(
+            (key for key in doc if key not in _KNOWN_TOP_LEVEL), MAX_UNKNOWN_KEYS, notes
+        )
 
     projected: str | None = None
     mismatch = False
@@ -1075,9 +1106,12 @@ def effective_lifecycle(
     """The lifecycle to act on: the lineage's when attributed and known, else derived.
 
     Pure; takes no lock. ``None`` when neither exists (unknown status, no
-    usable lineage).
+    usable lineage). Builds the view without its events
+    (``include_events=False``): the lifecycle does not depend on them.
     """
-    return lineage_view(decision, raw, duplicate=duplicate).effective_lifecycle
+    return lineage_view(
+        decision, raw, duplicate=duplicate, include_events=False
+    ).effective_lifecycle
 
 
 def key_labels(keys: Iterable[object], limit: int = MAX_UNKNOWN_KEYS) -> tuple[list[str], int]:
@@ -1098,18 +1132,30 @@ class LinkedFrom:
     """Other ADRs whose attributed lineage links to one ADR (design §4.2).
 
     Attributes:
-        supersedes: ADRs that list it under ``supersedes``.
-        amends: ADRs that list it under ``amends``.
+        supersedes: ADRs that list it under ``supersedes``, in number order.
+        amends: ADRs that list it under ``amends``, in number order.
         superseded_by: ADRs that list it under ``superseded_by`` (not shown as
-            ``linked_from``; used to find one-sided links).
-        truncated: How many lineage files were left unread because of the
-            scan limit.
+            ``linked_from``; used to find one-sided links), in number order.
+        truncated: How many lineages of ADRs in decisions.yaml the scan left
+            unread because it reached its file limit or byte budget; neither
+            linked_from nor the check of the other side of a link covers them.
+        unreadable: How many lineage files of ADRs in decisions.yaml were read
+            but could not be used (unreadable, not a mapping, or naming
+            another ADR): whether they link to the ADR is unknown.
+        links_of: The links of every lineage the scan read, by ADR id, as
+            :func:`lineage_view` shows them (ADR ids only, deduplicated, at
+            most MAX_LINKS_PER_TYPE; ``None`` when the lineage is not
+            attributed), so a caller checking the other side of a link need
+            not read the file again. An ADR the scan wanted but left unread is
+            missing here (it is counted in ``truncated``).
     """
 
     supersedes: list[str] = field(default_factory=list)
     amends: list[str] = field(default_factory=list)
     superseded_by: list[str] = field(default_factory=list)
     truncated: int = 0
+    unreadable: int = 0
+    links_of: dict[str, dict[str, list[str]] | None] = field(default_factory=dict)
 
 
 def _decision_order(decision_id: str) -> tuple[int, str]:
@@ -1125,25 +1171,44 @@ def scan_linked_from(
     decision_id: str,
     decisions: Mapping[str, Decision],
     *,
+    first: Iterable[str] = (),
     limit: int | None = None,
+    max_bytes: int | None = None,
 ) -> LinkedFrom:
     """Collect the ADRs whose lineage links to ``decision_id``, without writing.
 
     The lineage directory is globbed for ``ADR-*.yaml``; only stems matching
-    DECISION_ID_RE are read, through the bounded reader, in number order and
-    at most ``limit`` of them (LINKED_FROM_SCAN_LIMIT by default). A file
-    counts only when its lineage is attributed to an ADR of ``decisions``
-    (:func:`attributed_links`), so an orphaned lineage or one written for an
-    older ADR with the same number links nothing.
+    DECISION_ID_RE and naming an ADR of ``decisions`` are read, through the
+    bounded reader. The ADRs in ``first`` (the ADR's own supersedes and
+    superseded_by targets, whose links the caller checks from the other side)
+    are read first, whether or not the glob listed them; then the rest. Each
+    group is read newest (highest number) first: supersedes and amends
+    usually point from a newer ADR to an older one, so when the scan stops
+    early it is the oldest lineages, the least likely to link here, that are
+    left unread. It
+    stops after ``limit`` files (LINKED_FROM_SCAN_LIMIT by default) or once
+    ``max_bytes`` have been read (LINKED_FROM_SCAN_BYTES by default; the file
+    that crosses the budget is still used), so with ``first`` it is the only
+    reader of other ADRs' lineages a get needs. A file counts only when its
+    lineage is attributed to its ADR (the rule :func:`lineage_view` uses), so
+    an orphaned lineage, one written for an older ADR with the same number
+    (anchor mismatch) or one for an ADR not in ``decisions`` links nothing and
+    is not counted. A file of such an ADR that cannot be used (unreadable, not
+    a mapping, or naming another ADR) is counted in ``unreadable``: whether it
+    links here is unknown.
 
     Args:
         pm_path: The project's ``.pm`` directory.
         decision_id: The ADR the links should point to.
         decisions: The ADRs of decisions.yaml whose id is valid and unique.
+        first: ADR ids to read before the others (ids not in ``decisions``,
+            invalid ones and ``decision_id`` itself are ignored).
         limit: How many lineage files to read at most.
+        max_bytes: How many bytes to read at most (checked before each file).
 
     Returns:
-        The linking ADR ids per link type, and how many files were not read.
+        The linking ADR ids per link type (in number order), what each lineage
+        read links to, and how many were left unread or could not be used.
     """
     found = LinkedFrom()
     if not is_decision_id(decision_id):
@@ -1152,30 +1217,45 @@ def scan_linked_from(
     if directory.is_symlink():  # read_lineage_raw refuses it as well
         return found
     try:
-        stems = [entry.stem for entry in directory.glob("ADR-*.yaml")]
+        listed = {entry.stem for entry in directory.glob("ADR-*.yaml")}
     except OSError:
-        return found
-    stems = sorted(
-        (stem for stem in stems if is_decision_id(stem) and stem != decision_id),
+        listed = set()
+
+    def wanted(stem: str) -> bool:
+        return is_decision_id(stem) and stem != decision_id and stem in decisions
+
+    ahead = sorted({stem for stem in first if wanted(stem)}, key=_decision_order, reverse=True)
+    rest = sorted(
+        (stem for stem in listed.difference(ahead) if wanted(stem)),
         key=_decision_order,
+        reverse=True,
     )
+    stems = ahead + rest
     cap = LINKED_FROM_SCAN_LIMIT if limit is None else limit
-    if len(stems) > cap:
-        found.truncated = len(stems) - cap
-        stems = stems[:cap]
-    for stem in stems:
-        source = decisions.get(stem)
-        if source is None:
+    budget = LINKED_FROM_SCAN_BYTES if max_bytes is None else max_bytes
+    spent = 0
+    for index, stem in enumerate(stems):
+        if index >= cap or spent >= budget:
+            found.truncated = len(stems) - index
+            break
+        raw = read_lineage_raw(pm_path, stem)
+        spent += raw.size
+        doc, why_not = _attributed_doc(decisions[stem], raw)
+        if doc is None:
+            found.links_of[stem] = None
+            if why_not == LINEAGE_UNREADABLE:
+                found.unreadable += 1
             continue
-        links = attributed_links(source, read_lineage_raw(pm_path, stem))
-        if links is None:
-            continue
+        links = _view_links(doc.get("links"), _ViewNotes())
+        found.links_of[stem] = links
         if decision_id in links["supersedes"]:
             found.supersedes.append(stem)
         if decision_id in links["amends"]:
             found.amends.append(stem)
         if decision_id in links["superseded_by"]:
             found.superseded_by.append(stem)
+    for ids in (found.supersedes, found.amends, found.superseded_by):
+        ids.sort(key=_decision_order)
     return found
 
 
@@ -1920,16 +2000,16 @@ def apply_change(
                 "and who decided it are not recorded.",
             )
         )
-    if lifecycle_changed and lifecycle_after in (
-        DecisionLifecycle.ADOPTED,
-        DecisionLifecycle.REJECTED,
-    ):
+    if lifecycle_changed:
+        # Every move, not only to adopted / rejected: leaving proposed takes
+        # the ADR off the list waiting for the user's review, and leaving
+        # adopted withdraws a decision, so each is a change the user must see.
         notices.append(
             notice(
                 "info",
                 "decision_lifecycle_changed",
-                f"{adr} is now {lifecycle_after}. pmlens cannot confirm that the user made "
-                "this decision; tell the user about this change.",
+                f"{adr} is now {lifecycle_after} (was {lifecycle_before}). pmlens cannot "
+                "confirm that the user made this decision; tell the user about this change.",
             )
         )
     if lifecycle_after == DecisionLifecycle.SUPERSEDED and not links["superseded_by"]:
