@@ -716,10 +716,10 @@ def pm_decision_query(action: str = "list", decision_id: str | None = None,
     入れ子の値は kind ごとの許可リストだけ。応答の全文字列を出口で
     lineage.scrub_view() でなめ、件数を decision_text_secrets_redacted の
     警告 1 件で返す（ファイルは変えない）。出口より前に伏せた不正な id や
-    未知の status のラベルの件数も足す。ADR の本文には長さの上限が無く、
-    redact の一部のパターンは空白の無い連続の長さの 2 乗の時間がかかるので、
-    出口では空白の無い 4,096 字（MAX_SCAN_RUN_CHARS）超の連続を走査せずに
-    <REDACTED:unscanned> に置き換えて 1 件と数える（時間は文字数に比例）。
+    未知の status のラベルの件数も足す。ADR の本文には長さの上限が無いが、
+    redact の全パターンは文字数に比例する時間で終わる（空白の無い長い連続でも
+    2 乗にならない）ので、各文字列は全体を走査してから表示用に切る。同じ文字列
+    （YAML のエイリアス）は 1 回だけ走査する。
     食い違い・読めない lineage・
     未知の status・重複 id・不正 id・anchor の不一致・片側だけの関係は、
     list では code ごとに 1 件の警告にまとめ、get では対象の ADR について返す。

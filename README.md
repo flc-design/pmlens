@@ -346,9 +346,9 @@ that pmlens supports but cannot enforce (ADR-056):
 **Credentials are scrubbed on the way into the index.** Ingest is the moment a
 note written in one repo becomes searchable from every other repo, and
 auto-memory notes are free-form text nobody wrote expecting an index. High-
-severity credential patterns (AWS keys, GitHub/Slack tokens, private-key
-headers, …) are removed from the indexed copy by default and reported as
-per-category counts — never echoed back. `redact=false` indexes verbatim.
+severity credential patterns (AWS keys, GitHub/Slack tokens, private keys as
+whole PEM blocks, …) are removed from the indexed copy by default and reported
+as per-category counts — never echoed back. `redact=false` indexes verbatim.
 
 Only the credential category is touched. Paths, IP addresses and ticket
 references stay: an index on your own machine that has lost them returns hits

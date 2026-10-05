@@ -379,6 +379,39 @@ class TestPmAddDecisionLineage:
         assert result["code"] == "invalid_status"
         assert secret not in result["message"]
 
+    @pytest.mark.parametrize(
+        ("text", "detail"),
+        [
+            (
+                'decisions:\n- id: ADR-001\n  title: "unterminated {secret}\n  status: x\n',
+                "at line",
+            ),
+            ("decisions:\n- id: ADR-001\n  title: [{secret}, 2]\n", "ValidationError"),
+        ],
+        ids=["yaml-syntax", "validation"],
+    )
+    def test_a_broken_decisions_yaml_is_reported_without_its_text(
+        self, initialized_project, text, detail
+    ):
+        # The YAML error's text quotes the broken line and pydantic's quotes
+        # the input value; either would carry the secret into the response
+        # (or, raised, into the MCP error text). Only the type and the
+        # position are reported, as pm_update_decision and pm_decision_query do.
+        secret = "AKIA" + "Q" * 16
+        (_pm(initialized_project) / "decisions.yaml").write_text(
+            text.format(secret=secret), encoding="utf-8"
+        )
+        before = _ledger_bytes(initialized_project)
+
+        result = _add(initialized_project)
+
+        assert result["status"] == "error"
+        assert result["code"] == "decisions_yaml_unreadable"
+        assert detail in result["message"]
+        assert secret not in str(result) and "unterminated" not in str(result)
+        assert _ledger_bytes(initialized_project) == before
+        assert not (_pm(initialized_project) / "decision_lineage").exists()
+
     @pytest.mark.parametrize("where", ["decisions.yaml", "lineage"])
     def test_exhausted_numbers_write_nothing(self, initialized_project, where):
         if where == "decisions.yaml":

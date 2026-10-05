@@ -45,10 +45,99 @@ class _Pattern:
     severity: _Severity
     regex: re.Pattern[str]
     placeholder: str
+    # The pattern without its guard, tried once right after each match (see
+    # _GUARD_NOTE below); None for an unguarded pattern.
+    resume: re.Pattern[str] | None = None
 
 
-def _p(name: str, category: str, severity: _Severity, pattern: str, placeholder: str) -> _Pattern:
-    return _Pattern(name, category, severity, re.compile(pattern), placeholder)
+def _p(
+    name: str,
+    category: str,
+    severity: _Severity,
+    pattern: str,
+    placeholder: str,
+    *,
+    guard: str = "",
+) -> _Pattern:
+    """Build a catalog entry.
+
+    Args:
+        name: The pattern's name (never reported).
+        category: The report category.
+        severity: ``"high"`` or ``"medium"``.
+        pattern: The regular expression. A named group ``lead`` marks text the
+            pattern consumes only to reach its secret; it is kept verbatim.
+        placeholder: What a match is replaced with.
+        guard: A lookbehind that lets ``pattern`` start only at the first
+            character of a run (see _GUARD_NOTE below).
+
+    Returns:
+        The compiled entry.
+    """
+    resume = re.compile(pattern) if guard else None
+    return _Pattern(name, category, severity, re.compile(guard + pattern), placeholder, resume)
+
+
+# _GUARD_NOTE. A pattern that opens with a character class repeated without
+# bound (an email's local part, a JWT's first segment) is otherwise retried
+# from every character of a long run of that class, each try rescanning the
+# rest of the run: time quadratic in the run (65,536 such characters took
+# seconds). Each run is therefore tried once, from its first character: a
+# one-character lookbehind (``guard``) refuses every other start, and a
+# ``lead`` group takes over the characters the original pattern skipped to
+# reach its first possible start (kept verbatim, so the output is unchanged).
+# Within one run every start meets the same continuation, so the first start
+# succeeds exactly when some start did. A match can end inside a run (an
+# email's top-level domain followed by "."), where the guard would refuse the
+# start the original pattern made next, so the unguarded form is tried once
+# right after each match (``resume``). The guarded patterns match what the
+# unguarded originals matched; tests/test_redaction.py compares them on random
+# text and times every pattern on long runs.
+_GUARD_JWT = r"(?<![A-Za-z0-9_\-])"
+_GUARD_GCP_SA_EMAIL = r"(?<![a-z0-9\-])"
+_GUARD_EMAIL = r"(?<![A-Za-z0-9._%+\-])"
+
+# A private key block (PEM, OpenSSH, PGP armor) goes whole: its BEGIN line,
+# any armor headers, the base64 body and its END line, however long. The body
+# is recognised by key material, a run of 40 base64 characters (a body line
+# holds 64, or 70 for OpenSSH; prose and armor headers hold no such run).
+# Without key material only the BEGIN line goes, as in catalog v2, so prose
+# that names the line ("blocks -----BEGIN RSA PRIVATE KEY----- lines") keeps
+# its words and an ``allow`` entry for the line still applies.
+_KEY_BEGIN = r"-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----"
+_KEY_END = r"-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----"
+# A character short of a run of five dashes, that is of the next BEGIN or END
+# line. An attempt from one BEGIN line never scans past the next such line, so
+# the attempts of a text scan disjoint stretches of it: time linear in it.
+_KEY_UNTIL_LINE = r"(?:[^-]|-(?!----))"
+_KEY_MATERIAL = r"[A-Za-z0-9+/]{40}"
+# What separates the lines of a key as text holds it: whitespace (a YAML plain
+# scalar folds line breaks into spaces), or the two-character "\n" / "\r"
+# escapes of a JSON string (a service-account key file) or a log line.
+_KEY_BREAK = r"(?:\s|\\[rn])"
+# An armor header on a line of its own (legacy encrypted PEM, PGP). Its value
+# stops at the line's end and, like _KEY_UNTIL_LINE, short of the next BEGIN or
+# END line, so the headers of one attempt never run into the next block.
+_KEY_HEADER = (
+    r"[ \t]*+(?:\r?\n|\\r?\\n)[ \t]*+"
+    r"(?:Proc-Type|DEK-Info|Version|Comment|Hash|Charset|MessageID):"
+    r"(?:[^\r\n\\-]++|-(?!----))*+"
+)
+_PRIVATE_KEY = (
+    _KEY_BEGIN
+    + "(?:"
+    # Through the END line, when key material comes before the next BEGIN or
+    # END line and that line is an END line. The atomic group commits to the
+    # first key material, so a failed attempt is not retried from later runs.
+    + rf"(?>{_KEY_UNTIL_LINE}*?{_KEY_MATERIAL}){_KEY_UNTIL_LINE}*+{_KEY_END}"
+    # Otherwise (a key cut off mid-paste) the armor headers and the base64
+    # body after the BEGIN line, when the body opens with key material. The
+    # body ends at the first character that is neither base64 nor a break, so
+    # words after a cut-off key can go with it; nothing of the key stays.
+    + rf"|(?:{_KEY_HEADER})*+{_KEY_BREAK}*+{_KEY_MATERIAL}"
+    + rf"(?:{_KEY_BREAK}*+[A-Za-z0-9+/=]++)*+"
+    + ")?"
+)
 
 
 # A pragmatic IPv6 matcher (full + ``::``-compressed forms). IPv6 grammar is
@@ -82,10 +171,21 @@ _IPV6 = (
 # IP/phone matchers are inherently broad — a 4-segment version string or a long
 # separated digit run can match — so they ship at medium severity and a project
 # can whitelist a specific false positive via the ``allow`` list.
-CATALOG_VERSION = 2
+#
+# v3: a private key with its body is removed as a whole block (BEGIN line,
+# armor headers, body and END line, of any length; v2 removed only the BEGIN
+# line and left the key body in place), PGP private key blocks are included,
+# and the private key pattern runs first, before any other pattern can change
+# a key's body. A BEGIN line without key material after it is removed alone,
+# as in v2. The jwt / gcp_sa_email / email patterns are guarded so they take
+# time linear in the text (what they match is unchanged).
+CATALOG_VERSION = 3
 
 _PATTERNS: tuple[_Pattern, ...] = (
     # --- High severity: credentials / secrets -------------------------------
+    # First: a key's base64 body could hold another pattern's shape, and a
+    # placeholder put inside it would end the body early.
+    _p("private_key", "secret", "high", _PRIVATE_KEY, "<REDACTED:secret>"),
     _p("aws_access_key", "secret", "high", r"AKIA[0-9A-Z]{16}", "<REDACTED:secret>"),
     _p(
         "github_token",
@@ -96,19 +196,15 @@ _PATTERNS: tuple[_Pattern, ...] = (
     ),
     _p("stripe_key", "secret", "high", r"[sp]k_live_[A-Za-z0-9]{16,}", "<REDACTED:secret>"),
     _p("slack_token", "secret", "high", r"xox[baprs]-[A-Za-z0-9-]{10,}", "<REDACTED:secret>"),
+    # The atomic group commits to the run's first "eyJ" (see _GUARD_NOTE).
     _p(
         "jwt",
         "secret",
         "high",
-        r"eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}",
+        r"(?>(?P<lead>[A-Za-z0-9_\-]*?)eyJ)[A-Za-z0-9_\-]{10,}"
+        r"\.eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}",
         "<REDACTED:secret>",
-    ),
-    _p(
-        "private_key_header",
-        "secret",
-        "high",
-        r"-----BEGIN [A-Z ]*PRIVATE KEY-----",
-        "<REDACTED:secret>",
+        guard=_GUARD_JWT,
     ),
     _p(
         "connection_string",
@@ -132,11 +228,13 @@ _PATTERNS: tuple[_Pattern, ...] = (
         r"AccountKey=[A-Za-z0-9+/]{40,}={0,2}",
         "<REDACTED:secret>",
     ),
-    # GCP service-account JSON markers. The private key itself is caught by
-    # private_key_header; these catch the two other high-signal fields — the
-    # 40-hex private_key_id and the *.iam.gserviceaccount.com client email
-    # (placed in the high block so it is scrubbed as a secret BEFORE the generic
-    # medium `email` pattern could downgrade it).
+    # GCP service-account JSON markers. The JSON's "private_key" value keeps
+    # its PEM line breaks as "\n" escapes, which the private_key pattern
+    # above reads as line breaks, so it removes the whole key. These two catch
+    # the other high-signal fields — the 40-hex private_key_id and the
+    # *.iam.gserviceaccount.com client email (placed in the high block so it is
+    # scrubbed as a secret BEFORE the generic medium `email` pattern could
+    # downgrade it).
     _p(
         "gcp_sa_key_id",
         "secret",
@@ -148,8 +246,9 @@ _PATTERNS: tuple[_Pattern, ...] = (
         "gcp_sa_email",
         "secret",
         "high",
-        r"[a-z0-9][a-z0-9\-]*@[a-z0-9\-]+\.iam\.gserviceaccount\.com",
+        r"(?P<lead>-*)[a-z0-9][a-z0-9\-]*@[a-z0-9\-]+\.iam\.gserviceaccount\.com",
         "<REDACTED:secret>",
+        guard=_GUARD_GCP_SA_EMAIL,
     ),
     # Bearer token in an Authorization header / log line. assigned_secret only
     # matches `key=value`, so `Bearer <token>` needs its own rule.
@@ -174,8 +273,9 @@ _PATTERNS: tuple[_Pattern, ...] = (
         "email",
         "email",
         "medium",
-        r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}",
+        r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}",
         "<REDACTED:email>",
+        guard=_GUARD_EMAIL,
     ),
     _p("internal_id", "internal_id", "medium", r"\b(?:PMSERV|ADR|KR|WF)-\d+\b", "<ID>"),
     _p("memory_ref", "internal_id", "medium", r"\bmemory:\d+\b", "<ID>"),
@@ -219,6 +319,47 @@ class RedactionResult:
     flagged: bool = False
 
 
+def _substitute(pat: _Pattern, text: str, allow: frozenset[str] = frozenset()) -> tuple[str, int]:
+    """Replace every match of ``pat`` in ``text`` with its placeholder.
+
+    The leftmost-first scan of ``re.sub``, plus the ``resume`` try right after
+    each match for a guarded pattern (_GUARD_NOTE). A ``lead`` group is kept
+    verbatim and is not part of what ``allow`` is compared with.
+
+    Args:
+        pat: The catalog entry.
+        text: The text to scrub.
+        allow: Matches to leave as they are.
+
+    Returns:
+        The scrubbed text and the number of replacements.
+    """
+    replaced = 0
+    has_lead = "lead" in pat.regex.groupindex
+
+    def replace(match: re.Match[str]) -> str:
+        nonlocal replaced
+        lead = (match.group("lead") or "") if has_lead else ""
+        if match.group(0)[len(lead) :] in allow:
+            return match.group(0)
+        replaced += 1
+        return lead + pat.placeholder
+
+    if pat.resume is None:
+        return pat.regex.sub(replace, text), replaced
+    pieces: list[str] = []
+    pos = 0
+    match = pat.regex.search(text)
+    # No catalog pattern matches the empty string, so each match moves pos on.
+    while match is not None:
+        pieces.append(text[pos : match.start()])
+        pieces.append(replace(match))
+        pos = match.end()
+        match = pat.resume.match(text, pos) or pat.regex.search(text, pos)
+    pieces.append(text[pos:])
+    return "".join(pieces), replaced
+
+
 def _redact_text(
     text: str,
     allow: frozenset[str],
@@ -244,14 +385,9 @@ def _redact_text(
     for pat in _PATTERNS:
         if pat.category == "internal_id" and not scrub_internal_ids:
             continue
-
-        def _sub(m: re.Match[str], _pat: _Pattern = pat) -> str:
-            if m.group(0) in allow:
-                return m.group(0)
-            _bump(_pat.category)
-            return _pat.placeholder
-
-        text = pat.regex.sub(_sub, text)
+        text, replaced = _substitute(pat, text, allow)
+        if replaced:
+            counts[pat.category] = counts.get(pat.category, 0) + replaced
 
     for literal in deny:
         if not literal:
@@ -288,17 +424,17 @@ def redact_secrets(text: str) -> tuple[str, dict[str, int]]:
     Counts are by category and carry no cleartext, matching
     :class:`RedactionResult`'s report discipline: a report that quotes the
     secret to prove it found one has published it again.
+
+    Every pattern takes time linear in the text, so a text of any length can
+    be scanned whole (_GUARD_NOTE).
     """
     counts: dict[str, int] = {}
     for pat in _PATTERNS:
         if pat.category != "secret":
             continue
-
-        def _sub(m: re.Match[str], _pat: _Pattern = pat) -> str:
-            counts[_pat.category] = counts.get(_pat.category, 0) + 1
-            return _pat.placeholder
-
-        text = pat.regex.sub(_sub, text)
+        text, replaced = _substitute(pat, text)
+        if replaced:
+            counts[pat.category] = counts.get(pat.category, 0) + replaced
     return text, counts
 
 

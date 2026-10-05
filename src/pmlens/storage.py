@@ -571,7 +571,10 @@ class DecisionWrite:
 
     Attributes:
         decision: The appended ADR, or ``None`` when ``error`` is set.
-        error: ``decision_id_exhausted`` (nothing written), else ``None``.
+        error: ``decision_id_exhausted`` or ``decisions_yaml_unreadable``
+            (nothing written in either case), else ``None``.
+        error_detail: For ``decisions_yaml_unreadable``, the exception's type
+            and YAML position (:func:`lineage.error_summary`), never its text.
         lineage_state: ``written``; ``not_written`` (checking for or writing
             the lineage failed with an OS error — the ADR is saved without a
             lineage); or ``preexisting`` (a file was already there and was
@@ -587,6 +590,7 @@ class DecisionWrite:
 
     decision: Decision | None
     error: str | None = None
+    error_detail: str | None = None
     lineage_state: str = "written"
     recorded_at: str | None = None
     lifecycle: str | None = None
@@ -647,7 +651,10 @@ def add_decision_with_lineage(
 
     Returns:
         The write result; ``error="decision_id_exhausted"`` when the next
-        number would exceed 999,999 (nothing is written).
+        number would exceed 999,999, and ``error="decisions_yaml_unreadable"``
+        when decisions.yaml cannot be loaded (described in ``error_detail`` by
+        exception type and YAML position only). Nothing is written in either
+        case.
 
     Raises:
         LineageWriteRefused: ``.pm/decision_lineage`` is a symbolic link
@@ -661,7 +668,16 @@ def add_decision_with_lineage(
     if problem is not None:
         raise PmServerError(problem["message"])
     with _yaml_transaction(pm_path, "decisions.yaml"):
-        decisions = load_decisions(pm_path)
+        try:
+            decisions = load_decisions(pm_path)
+        except Exception as exc:  # noqa: BLE001 - reported by type only, never quoted
+            # str(exc) would quote the offending YAML line or pydantic's
+            # input_value, which can be a secret (design §4, D11).
+            return DecisionWrite(
+                decision=None,
+                error="decisions_yaml_unreadable",
+                error_detail=_lineage.error_summary(exc),
+            )
         number = _next_decision_number(pm_path, decisions)
         if number > _lineage.MAX_DECISION_NUMBER:
             return DecisionWrite(decision=None, error="decision_id_exhausted")

@@ -68,13 +68,6 @@ MAX_LABEL_CHARS = 100
 RECENT_EVENTS = 20
 MAX_UNKNOWN_KEYS = 50
 MAX_UNKNOWN_FIELDS = 10
-# The exit pass of a read (scrub_view) withholds, unscanned, any run longer
-# than this without whitespace: some redaction patterns take time quadratic in
-# such a run (65,536 letters take seconds), and ADR text from decisions.yaml
-# has no length cap. At least MAX_TEXT_CHARS, so the pass never withholds a
-# value a lineage view already let through.
-MAX_SCAN_RUN_CHARS = 4_096
-UNSCANNED_PLACEHOLDER = "<REDACTED:unscanned>"
 
 UNKNOWN = "unknown"
 LINK_TYPES: tuple[str, ...] = ("supersedes", "superseded_by", "amends")
@@ -217,12 +210,42 @@ def error_summary(exc: BaseException) -> str:
 def scrub_text(text: str) -> tuple[str, int]:
     """Remove credential-shaped strings (``redaction.redact_secrets``).
 
+    Takes time linear in ``text`` (every catalog pattern does), so callers
+    scan a value whole and cut it for display afterwards.
+
     Returns:
         The scrubbed text and how many matches were replaced. The count carries
         no cleartext, so it may be reported.
     """
     scrubbed, counts = redact_secrets(text)
     return scrubbed, sum(counts.values())
+
+
+class ScrubCache:
+    """:func:`scrub_text` remembered per string, for one view or one response.
+
+    A YAML alias makes one string appear many times (``&e`` once, ``*e`` on
+    every event, or one status on every ADR of decisions.yaml), so without
+    this a small file could be scanned once per place it is shown: 500 ADRs
+    sharing one 256 KiB status took 10 s to list. Remembering by value keeps
+    the work proportional to the distinct text; each appearance still adds its
+    own count. Create one per response (or per view) and pass it to every
+    scrub of that response; it holds the scrubbed copies until dropped.
+    """
+
+    def __init__(self) -> None:
+        self._done: dict[str, tuple[str, int]] = {}
+
+    def scrub(self, text: str) -> tuple[str, int]:
+        """:func:`scrub_text`, scanning each distinct string once.
+
+        Returns:
+            The scrubbed text and how many matches were replaced.
+        """
+        found = self._done.get(text)
+        if found is None:
+            found = self._done[text] = scrub_text(text)
+        return found
 
 
 def _clip(text: str, limit: int) -> tuple[str, bool]:
@@ -232,115 +255,78 @@ def _clip(text: str, limit: int) -> tuple[str, bool]:
     return text[:limit], True
 
 
-_SPACE_RE = re.compile(r"\s")
+def _scrub_clip(text: str, limit: int, cache: ScrubCache | None = None) -> tuple[str, bool, int]:
+    """Redact the whole of ``text``, then cut it to ``limit``.
 
+    Redaction comes first, over the full value, so a secret straddling the
+    limit is replaced as a whole rather than left half-visible, and a keyword
+    stays next to its value (``password = <value>``, ``Bearer <token>``).
 
-def _safe_cut(text: str, end: int) -> int:
-    """Where to cut ``text`` near ``end`` without splitting a secret's value.
-
-    Returns the index of the last whitespace character at or before ``end``
-    (0 when there is none), so ``text[:index]`` is the kept part. The patterns
-    of :func:`redaction.redact_secrets` either contain no whitespace (tokens,
-    keys, connection strings, JWTs) or keep the secret value after their only
-    whitespace (``Bearer <token>``, ``password = <value>``,
-    ``"private_key_id": "<hex>"``), so a cut just before a whitespace
-    character leaves every secret value either whole (and redacted) or out.
-    Python's ``\\s`` is used so the notion of whitespace is the patterns' own.
+    Returns:
+        (text, truncated, redactions).
     """
-    last = 0
-    for match in _SPACE_RE.finditer(text, 0, end + 1):
-        last = match.start()
-    return last
-
-
-def _scrub_clip(text: str, limit: int) -> tuple[str, bool, int]:
-    """Redact, then cut to ``limit``; returns (text, truncated, redactions).
-
-    Redaction runs before the final cut so a secret straddling the limit is
-    not left half-visible. A long value is first cut to about ``limit * 4``
-    characters, because some redaction patterns take quadratic time on long
-    runs (65,536 letters already take seconds). That first cut lands just
-    before a whitespace character (:func:`_safe_cut`), never inside a token:
-    a cut inside a token could leave a secret's head that no longer matches
-    its pattern, and redaction shrinking the text before it (a long connection
-    string becomes ``<REDACTED:conn>``) would pull that head inside the final
-    limit. A long value with no whitespace in that window keeps nothing.
-    """
-    coarse = limit * 4 + 256
-    pre = text if len(text) <= coarse else text[: _safe_cut(text, coarse)]
-    scrubbed, count = scrub_text(pre)
+    scrubbed, count = cache.scrub(text) if cache is not None else scrub_text(text)
     out, cut = _clip(scrubbed, limit)
-    return out, cut or len(text) > len(pre), count
+    return out, cut, count
 
 
-def scrub_label_counted(value: object, limit: int = MAX_LABEL_CHARS) -> tuple[str, int]:
+def scrub_label_counted(
+    value: object, limit: int = MAX_LABEL_CHARS, cache: ScrubCache | None = None
+) -> tuple[str, int]:
     """:func:`scrub_label`, also returning how many redactions were made.
 
     For a reader that reports the redactions of a response
     (``decision_text_secrets_redacted``): a label redacted before the exit
     pass reaches :func:`scrub_view` already clean, so its count must be
     carried separately or it is lost.
+
+    Args:
+        value: The untrusted value.
+        limit: How many characters of the redacted text to keep.
+        cache: One :class:`ScrubCache` for every label of a response. A
+            reader that labels a value from each of many records needs it: the
+            whole value is scanned before the cut, and a YAML alias can give
+            every record the same long value.
+
+    Returns:
+        The label and how many redactions were made in ``value``.
     """
-    text, cut, count = _scrub_clip(str(value), limit)
+    text, cut, count = _scrub_clip(str(value), limit, cache)
     return (text + "…" if cut else text), count
 
 
-def scrub_label(value: object, limit: int = MAX_LABEL_CHARS) -> str:
+def scrub_label(
+    value: object, limit: int = MAX_LABEL_CHARS, cache: ScrubCache | None = None
+) -> str:
     """A short, redacted rendering of an untrusted value for a message.
 
-    ``str(value)`` is redacted and cut to ``limit`` characters; "…" marks a cut.
+    ``str(value)`` is redacted whole, then cut to ``limit`` characters; "…"
+    marks a cut. Pass ``cache`` when labelling values from many records in
+    one response (:func:`scrub_label_counted`).
     """
-    return scrub_label_counted(value, limit)[0]
-
-
-# A whitespace-free run longer than MAX_SCAN_RUN_CHARS. The lookbehind lets
-# only the first character of a run start a match, so finding the runs takes
-# time linear in the text (a bare ``\S{n,}`` would retry inside every run).
-_LONG_RUN_RE = re.compile(rf"(?<!\S)\S{{{MAX_SCAN_RUN_CHARS + 1},}}")
-
-
-def _scrub_any_length(text: str) -> tuple[str, int]:
-    """:func:`scrub_text` for a string of any length, in time linear in it.
-
-    The patterns whose cost grows with the square of a run's length only
-    match runs without whitespace, so each such run longer than
-    MAX_SCAN_RUN_CHARS is first replaced, whole and unscanned, by
-    UNSCANNED_PLACEHOLDER. Whole runs: a run cut into pieces could leave a
-    secret split so that no piece matches its pattern. The rest of the text is
-    kept as is, so the patterns that span whitespace (``Bearer <token>``,
-    ``password = <value>``) still see their context.
-
-    Returns:
-        The scrubbed text and the count of replacements, each withheld run
-        counting as one.
-    """
-    withheld = 0
-    if len(text) > MAX_SCAN_RUN_CHARS:
-        text, withheld = _LONG_RUN_RE.subn(UNSCANNED_PLACEHOLDER, text)
-    scrubbed, count = scrub_text(text)
-    return scrubbed, count + withheld
+    return scrub_label_counted(value, limit, cache)[0]
 
 
 def scrub_view(value: object) -> tuple[object, int]:
     """Redact every string in a response built from plain dicts and lists.
 
     Meant for the exit of a read tool: one pass over the whole response so no
-    field is missed. The response's shape is bounded by its allow-list, but
-    not every string in it is (ADR text from decisions.yaml has no length
-    cap), so a whitespace-free run longer than MAX_SCAN_RUN_CHARS is withheld
-    unscanned and counted (:func:`_scrub_any_length`); the pass then takes
-    time linear in the response. Dict keys are left alone (responses use fixed
-    key names; untrusted key names travel as list values). Nothing is mutated.
+    field is missed. Every string is scanned whole, in time linear in its
+    length (ADR text from decisions.yaml has no length cap); a string that
+    appears more than once is scanned once (:class:`ScrubCache`). Dict keys
+    are left alone (responses use fixed key names; untrusted key names travel
+    as list values). Nothing is mutated.
 
     Returns:
         A redacted copy and the total number of replacements.
     """
     total = 0
+    cache = ScrubCache()
 
     def walk(node: object) -> object:
         nonlocal total
         if isinstance(node, str):
-            text, count = _scrub_any_length(node)
+            text, count = cache.scrub(node)
             total += count
             return text
         if isinstance(node, dict):
@@ -624,6 +610,7 @@ class _ViewNotes:
     def __init__(self) -> None:
         self.counts: dict[str, int] = {}
         self.redactions = 0
+        self._cache = ScrubCache()
 
     def add(self, code: str, count: int = 1) -> None:
         self.counts[code] = self.counts.get(code, 0) + count
@@ -632,7 +619,7 @@ class _ViewNotes:
         self.add(LINEAGE_ITEMS_SKIPPED, count)
 
     def text(self, value: str, limit: int) -> tuple[str, bool]:
-        out, cut, count = _scrub_clip(value, limit)
+        out, cut, count = _scrub_clip(value, limit, self._cache)
         self.redactions += count
         return out, cut
 

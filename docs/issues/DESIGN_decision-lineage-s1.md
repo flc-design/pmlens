@@ -414,7 +414,7 @@ def pm_decision_query(
   - load_decisions を、ロックを取らずに呼ぶ。例外はすべて捕まえ、`decisions_yaml_unreadable` のエラーの dict で返す。message は例外の型名と、YAMLError なら行と列だけにする（§4 の共通規約）。T6 の引数付きの呼び出しは、例外が 0 件であることが条件になっている（tests/test_lens_invariant.py:593）。
   - 各 ADR の lineage は `read_lineage_raw` と `lineage_view` で読む。
   - 何も作らない。
-- **応答の出口の redact**: 応答を返す直前に、組み立てた dict のすべての文字列（title、本文、consequences、events の text と reason、notes、unknown_keys の名前、未知の status / lifecycle の文字列、declared の値を含む）を `lineage.scrub_view()` で 1 回なめる。件数が 1 以上なら、警告 `decision_text_secrets_redacted` を 1 件だけ付け、件数だけを出す（前例: server.py:2218-2233）。ファイルは変えない。remediation は「鍵の失効と、ファイルの手での修正」。応答は許可リストで組み立てた有界な dict なので、再帰でなめても大きさは抑えられる。
+- **応答の出口の redact**: 応答を返す直前に、組み立てた dict のすべての文字列（title、本文、consequences、events の text と reason、notes、unknown_keys の名前、未知の status / lifecycle の文字列、declared の値を含む）を `lineage.scrub_view()` で 1 回なめる。件数が 1 以上なら、警告 `decision_text_secrets_redacted` を 1 件だけ付け、件数だけを出す（前例: server.py:2218-2233）。ファイルは変えない。remediation は「鍵の失効と、ファイルの手での修正」。応答の形は許可リストで有界だが、decisions.yaml の本文の文字列には長さの上限が無い。redact_secrets の全パターンは文字数に比例する時間で終わる（空白の無い長い連続でも 2 乗にならない。tests/test_redaction.py が計時する）ので、各文字列は全体を走査してから表示用に切り、走査せずに伏せる上限は設けない。同じ文字列（YAML のエイリアス）は 1 回だけ走査する。
   - 未知の status と lifecycle の文字列は 100 字で切る。
 
 **action="list"**
@@ -648,7 +648,7 @@ only ai_auto). Fill only from a record or the user's statement, never inferred.
 |---|---|---|
 | invalid_action | query | action が list / get 以外 |
 | decision_id_required | query | get で decision_id が無い |
-| decisions_yaml_unreadable | query | load_decisions が例外（message は型名と行・列だけ） |
+| decisions_yaml_unreadable | query、update、add | load_decisions が例外（message は型名と行・列だけ） |
 | invalid_status | add | status が proposed / accepted 以外 |
 | invalid_origin / invalid_recorded_timing / invalid_decision_kind / invalid_evaluation_kind | add、update | 語彙外の値 |
 | status_conflicts_with_origin | add | accepted と ai_auto |

@@ -588,6 +588,32 @@ def test_an_unknown_status_is_not_adopted_and_not_quoted(tmp_path: Path) -> None
     assert _FAKE_AWS not in json.dumps(res)
 
 
+def test_an_unknown_status_many_drafts_cite_is_scanned_once_per_response(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The status is redacted whole, then cut for the warning. One review page
+    # shares one index, so a long status (a YAML alias can make any ADR's
+    # status long) is scanned once however many drafts cite the ADR.
+    proj = _make_project(tmp_path)
+    length = 64 * 1024
+    _write_decisions(proj, _entry("ADR-007", "x" * length))
+    for n in range(1, 6):
+        _draft(proj, ["ADR-007", f"memory:{n}"])
+    scans: list[int] = []
+    scrub_text = lineage.scrub_text
+
+    def counting(text: str) -> tuple[str, int]:
+        if len(text) >= length:
+            scans.append(len(text))
+        return scrub_text(text)
+
+    monkeypatch.setattr(lineage, "scrub_text", counting)
+    page = srv.pm_drafts_pending(filter_status="draft", project_path=str(proj))
+    assert [w["code"] for w in page["warnings"]] == [_NOT_ADOPTED] * 5
+    assert "x" * 101 not in json.dumps(page)
+    assert len(scans) == 1
+
+
 def test_the_lineage_decides_unless_it_was_written_for_another_adr(tmp_path: Path) -> None:
     proj = _make_project(tmp_path)
     # Both are proposed in decisions.yaml; both lineage files say adopted.

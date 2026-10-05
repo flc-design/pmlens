@@ -7,8 +7,11 @@ exact scrubbed output + count-only report are frozen.
 
 Two guarantees ride on this golden:
 
-* **catalog v2 scrubs the secret/path/email/ip surface** — a regression that
-  weakened a pattern would change the pinned output and fail here.
+* **the catalog scrubs the secret/path/email/ip surface** — a regression that
+  weakened a pattern would change the pinned output and fail here. (Catalog
+  v3 changed only the report's catalog_version here: it removes a private key
+  as a whole block and makes every pattern linear-time, and this golden has
+  no private key, so its scrubbed text is the same as under v2.)
 * **internal IDs stay VISIBLE by default (PMSERV-121 item 1)** — the build-in-
   public voice keeps PMSERV-/ADR-/memory: refs, so the golden asserts they are
   present, not scrubbed.
@@ -51,7 +54,7 @@ EXPECTED_SEGMENTS = [
     "Lesson saved as memory:190 - the full thread reconstructs from .pm.",
 ]
 EXPECTED_REPORT = {
-    "catalog_version": 2,
+    "catalog_version": 3,
     "total": 4,
     "high_severity_total": 1,
     "by_category": {"secret": 1, "email": 1, "path": 1, "ip": 1},

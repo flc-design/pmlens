@@ -32,7 +32,7 @@ from .draft_store import (
     get_draft_store,
     normalize_source_refs,
 )
-from .lineage import error_summary, scrub_label
+from .lineage import ScrubCache, error_summary, scrub_label
 from .memory import MemoryStore, SearchDiagnostics, _has_pm_server_schema
 from .models import (
     ConfidenceLevel,
@@ -1054,7 +1054,9 @@ def _decision_ledger_warnings(pm_path: Path) -> list[dict]:
     Nothing from the file is quoted verbatim (PMSERV-258): a parse failure is
     described by exception type and YAML line/column only (``str(exc)`` quotes
     the offending line or pydantic's ``input_value``), and each listed id and
-    status is cut to 100 characters and passed through ``redact_secrets``.
+    status is passed whole through ``redact_secrets``, then cut to 100
+    characters. One scrub cache serves the list, so a value that a YAML alias
+    repeats on every ADR is scanned once.
     """
     try:
         unknown = unknown_decision_statuses(load_decisions(pm_path))
@@ -1072,7 +1074,11 @@ def _decision_ledger_warnings(pm_path: Path) -> list[dict]:
     if not unknown:
         return []
     shown = unknown[:_UNKNOWN_STATUS_LIST_LIMIT]
-    listed = ", ".join(f"{scrub_label(u['id'])}={scrub_label(u['status'])!r}" for u in shown)
+    cache = ScrubCache()
+    listed = ", ".join(
+        f"{scrub_label(u['id'], cache=cache)}={scrub_label(u['status'], cache=cache)!r}"
+        for u in shown
+    )
     if len(unknown) > len(shown):
         listed += f" and {len(unknown) - len(shown)} more"
     return [
@@ -3038,6 +3044,7 @@ class _DraftDecisionIndex:
         self._unreadable: str | None = None
         self._by_number: dict[int, list[Decision]] = {}
         self._lifecycles: dict[int, str | None] = {}
+        self._labels = ScrubCache()
 
     def _load(self) -> None:
         if self._loaded:
@@ -3074,6 +3081,14 @@ class _DraftDecisionIndex:
             raw = _lineage.read_lineage_raw(self._pm_path, adr.id)
             self._lifecycles[number] = _lineage.effective_lifecycle(adr, raw)
         return self._lifecycles[number]
+
+    def status_label(self, adr: Decision) -> str:
+        """The ADR's status for a warning: redacted whole, then cut (lineage.scrub_label).
+
+        Many drafts can cite the same ADR, so each distinct status is scanned
+        once per response.
+        """
+        return scrub_label(adr.status, cache=self._labels)
 
 
 def _draft_decision_warnings(
@@ -3181,7 +3196,7 @@ def _draft_decision_warnings(
             if lifecycle is None:
                 message = (
                     f"Draft {draft_id}: {_draft_adr_label(adr)} has no known lifecycle "
-                    f"(status {scrub_label(adr.status)!r}), so it is not treated as adopted"
+                    f"(status {index.status_label(adr)!r}), so it is not treated as adopted"
                 )
             else:
                 message = f"Draft {draft_id}: {_draft_adr_label(adr)} is {lifecycle} (not adopted)"
@@ -3659,6 +3674,17 @@ def pm_add_decision(
     except _lineage.LineageWriteRefused as refused:
         # Checked before anything is written (a symlinked lineage directory).
         return {"status": "error", "code": refused.code, "message": str(refused)}
+    if written.error == "decisions_yaml_unreadable":
+        # error_detail is the exception's type and YAML position only: its
+        # text could quote a secret from the broken file.
+        return {
+            "status": "error",
+            "code": written.error,
+            "message": (
+                f"decisions.yaml could not be read: {written.error_detail}. Fix the file by "
+                "hand; nothing was recorded."
+            ),
+        }
     if written.error is not None or written.decision is None:
         return {
             "status": "error",
@@ -3877,26 +3903,28 @@ def _decision_query_error(code: str, message: str) -> dict:
     return {"status": "error", "code": code, "message": message}
 
 
-def _decision_id_label(decision_id: str) -> tuple[str, int]:
+def _decision_id_label(decision_id: str, cache: ScrubCache) -> tuple[str, int]:
     """An ADR id for a response and its redaction count.
 
     A well-formed id is returned as is; any other is redacted and cut to 100
     characters. The count is reported in ``decision_text_secrets_redacted``:
     the label reaches the exit pass already clean, which would not count it.
+    ``cache`` is the response's own: a YAML alias can give every ADR the same
+    long id, which is then scanned once.
     """
     if _lineage.is_decision_id(decision_id):
         return decision_id, 0
-    return _lineage.scrub_label_counted(decision_id)
+    return _lineage.scrub_label_counted(decision_id, cache=cache)
 
 
-def _decision_status_label(status: DecisionStatus | str) -> tuple[str, int]:
+def _decision_status_label(status: DecisionStatus | str, cache: ScrubCache) -> tuple[str, int]:
     """A status for a response and its redaction count (see _decision_id_label).
 
     An unknown value is redacted and cut to 100 characters.
     """
     if isinstance(status, DecisionStatus):
         return status.value, 0
-    return _lineage.scrub_label_counted(status)
+    return _lineage.scrub_label_counted(status, cache=cache)
 
 
 def _decision_query_warning(code: str, items: list[str]) -> dict:
@@ -3958,8 +3986,9 @@ def _decision_query_list(
     problems: dict[str, list[str]] = {}
     rows: list[dict] = []
     redactions = 0
+    labels = ScrubCache()
     for adr in decisions:
-        id_label, id_hits = _decision_id_label(adr.id)
+        id_label, id_hits = _decision_id_label(adr.id, labels)
         # Only a malformed id can need redacting, and decision_id_invalid
         # always names it, so its label is in the response even when the row
         # is filtered out.
@@ -3971,7 +4000,7 @@ def _decision_query_list(
             problems.setdefault(code, []).append(id_label)
         if lifecycle is not None and view.effective_lifecycle != lifecycle:
             continue
-        status_label, status_hits = _decision_status_label(adr.status)
+        status_label, status_hits = _decision_status_label(adr.status, labels)
         redactions += view.redactions + status_hits
         rows.append(
             {
@@ -4081,8 +4110,9 @@ def _decision_query_get(
     view = _decision_view(pm_path, adr, id_counts)
     linked = _lineage.scan_linked_from(pm_path, adr.id, unique)
     # Each label is counted once, though the warnings below may repeat it.
-    id_label, id_hits = _decision_id_label(adr.id)
-    status_label, status_hits = _decision_status_label(adr.status)
+    labels = ScrubCache()
+    id_label, id_hits = _decision_id_label(adr.id, labels)
+    status_label, status_hits = _decision_status_label(adr.status, labels)
     body, body_hits = _decision_body(adr, id_label, status_label)
 
     lineage: dict = {}
@@ -4122,10 +4152,9 @@ def _scrub_decision_response(response: dict, found: int) -> dict:
 
     ``found`` counts what was already redacted while the response was built
     (lineage views, key names, id and status labels; for ``list`` that
-    includes lineage fields the rows do not show). The exit pass withholds a
-    whitespace-free run longer than MAX_SCAN_RUN_CHARS unscanned and counts it
-    too (lineage.scrub_view). The total is reported as one warning carrying
-    only the count; the files are not changed.
+    includes lineage fields the rows do not show). The exit pass scans every
+    string whole (lineage.scrub_view). The total is reported as one warning
+    carrying only the count; the files are not changed.
     """
     scrubbed, count = _lineage.scrub_view(response)
     result = scrubbed if isinstance(scrubbed, dict) else {}
@@ -4137,9 +4166,7 @@ def _scrub_decision_response(response: dict, found: int) -> dict:
                 "decision_text_secrets_redacted",
                 f"{total} secret-like string(s) were found while reading these ADRs and "
                 "their lineage; none of them is shown in this response, and the files were "
-                "not changed. A run of more than "
-                f"{_lineage.MAX_SCAN_RUN_CHARS} characters without whitespace counts as one: "
-                f"it is shown as {_lineage.UNSCANNED_PLACEHOLDER} without being scanned.",
+                "not changed.",
                 remediation=(
                     "If a real credential is in .pm, revoke it and remove it from the file by hand."
                 ),

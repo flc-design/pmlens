@@ -981,6 +981,23 @@ class TestD11:
         got = pm_decision_query(action="get", decision_id="ADR-001", project_path=str(tmp_project))
         assert SECRET not in json.dumps(got)
 
+    def test_a_private_key_in_a_note_is_removed_with_its_body(self, tmp_project: Path):
+        # Catalog v2 removed only the BEGIN line, so the key's base64 body was
+        # saved in the lineage file and returned by get under a warning that
+        # said the secret had been removed.
+        body = "\n".join(["Zm9v" * 16] * 5)
+        key = f"-----BEGIN OPENSSH PRIVATE KEY-----\n{body}\n-----END OPENSSH PRIVATE KEY-----"
+        _add(tmp_project)
+        result = _update(tmp_project, note=f"deploy key:\n{key}\nrotate it")
+        assert result["status"] == "updated"
+        assert _warning(result, "decision_lineage_secrets_redacted")["message"].startswith("1 ")
+        written = _lineage_path(tmp_project).read_text(encoding="utf-8")
+        doc = yaml.safe_load(written)
+        assert doc["events"][-1]["text"] == "deploy key:\n<REDACTED:secret>\nrotate it"
+        got = pm_decision_query(action="get", decision_id="ADR-001", project_path=str(tmp_project))
+        for shown in (written, json.dumps(result), json.dumps(got)):
+            assert "Zm9v" not in shown and "PRIVATE KEY" not in shown
+
     def test_a_secret_in_a_link_removal_reason_is_removed(self, tmp_project: Path):
         _add(tmp_project, "A")
         _add(tmp_project, "B")

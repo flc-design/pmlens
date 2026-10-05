@@ -13,9 +13,12 @@ What this file pins, by the design document's numbering
   through the per-kind allow-list, every response string is redacted at the
   exit, and no error message quotes the file. A secret in a label redacted
   before the exit (an unknown status, a malformed id) is still counted in
-  ``decision_text_secrets_redacted``, and the exit pass takes time linear in
-  the text: a whitespace-free run longer than MAX_SCAN_RUN_CHARS is withheld
-  unscanned.
+  ``decision_text_secrets_redacted``. Every string is scanned whole, in time
+  linear in its length: a keyword glued to a long run keeps its value hidden,
+  a long Japanese paragraph is shown as written, a private key's body never
+  appears, lineages built to be slow to redact are read in milliseconds, and
+  an id or status that a YAML alias repeats on every ADR is scanned once per
+  response (pm_status too).
 * Hostile lineage files (FIFO, symlink, oversize, directory) do not block or
   raise.
 * Every error code returns the error dict and leaves the files as they were.
@@ -36,10 +39,12 @@ import yaml
 from pmlens import lineage, storage
 from pmlens.lineage import LineageChange, anchor_for, dump_lineage, new_lineage_doc
 from pmlens.models import Decision, DecisionStatus
-from pmlens.server import pm_add_decision, pm_decision_query
+from pmlens.server import pm_add_decision, pm_decision_query, pm_status
 
 NOW = "2026-10-05T03:12:00Z"
 SECRET = "AKIA" + "Q" * 16
+TOKEN = "tok" + "Z9" * 12  # a bearer token's shape, assembled at runtime
+KEY_LINE = "Zm9v" * 16  # filler for a private key's body
 ADR_DATE = dt.date(2026, 10, 1)
 ALL_NOT_RECORDED = ["recorded_at", "origin", "recorded_timing", "decision_kind"]
 
@@ -727,48 +732,84 @@ class TestExitRedaction:
         assert results[0]["decision"]["id"] == "ADR-<REDACTED:secret>"
         assert _ids(results[1]) == ["ADR-<REDACTED:secret>"] and _ids(results[2]) == []
 
-    def test_a_long_run_is_withheld_unscanned_and_counted(self, tmp_project: Path):
-        # Some redaction patterns take time quadratic in a run without
-        # whitespace: unscanned-run withholding is what keeps these two calls
-        # from taking about 15 s each on a 128 KiB run.
+    @pytest.mark.parametrize(
+        "prefix, secret_part, value",
+        [
+            ("A" * 5_000, "password = hunter2hunter2", "hunter2hunter2"),
+            ("A" * 5_000, "Bearer " + TOKEN, TOKEN),
+            ("A" * 5_000, "password: hunter2hunter2", "hunter2hunter2"),
+            ("see https://x.example/" + "a" * 5_000 + "?", "password= hunter2hunter2", "hunter2"),
+        ],
+        ids=["assigned", "bearer", "colon", "url-query"],
+    )
+    def test_a_keyword_glued_to_a_long_run_keeps_its_value_hidden(
+        self, tmp_project: Path, prefix: str, secret_part: str, value: str
+    ):
+        # The keyword ends a 5,000-character run without whitespace and its
+        # value follows a space. Withholding the run unscanned took the
+        # keyword with it and left the value in the response.
+        text = prefix + secret_part
+        pm_add_decision(
+            title=text,
+            context=text,
+            decision=text,
+            consequences_positive=[text],
+            project_path=str(tmp_project),
+        )
+        got, listed = _get(tmp_project, "ADR-001"), _query(tmp_project)
+        shown = prefix + "<REDACTED:secret>"
+        body = got["decision"]
+        assert [body["title"], body["context"], body["decision"]] == [shown] * 3
+        assert body["consequences"]["positive"] == [shown]
+        assert listed["decisions"][0]["title"] == shown
+        for result, count in ((got, 4), (listed, 1)):
+            dumped = json.dumps(result)
+            assert value not in dumped and "unscanned" not in dumped
+            message = _warning(result, "decision_text_secrets_redacted")["message"]
+            assert message.startswith(f"{count} secret-like")
+
+    def test_a_long_run_is_scanned_whole_in_linear_time(self, tmp_project: Path):
+        # Some redaction patterns once took time quadratic in a run without
+        # whitespace (about 15 s for this one); now the whole text is scanned.
         run = "a" * (128 * 1024)
-        token = "t" * (lineage.MAX_SCAN_RUN_CHARS + 1)
-        context = f"see {run} and Bearer {token} then {SECRET}"
+        context = f"see {run} and Bearer {'t' * 5_000} then {SECRET}"
         _seed(tmp_project, _adr("ADR-001", title=run, context=context))
         started = time.perf_counter()
         got, listed = _get(tmp_project, "ADR-001"), _query(tmp_project)
-        assert time.perf_counter() - started < 5
-        hidden = lineage.UNSCANNED_PLACEHOLDER
-        assert got["decision"]["title"] == hidden
+        assert time.perf_counter() - started < 2
+        assert got["decision"]["title"] == run
         assert got["decision"]["context"] == (
-            f"see {hidden} and Bearer {hidden} then <REDACTED:secret>"
+            f"see {run} and <REDACTED:secret> then <REDACTED:secret>"
         )
-        assert listed["decisions"][0]["title"] == hidden
-        for result, count in ((got, 4), (listed, 1)):
-            message = _warning(result, "decision_text_secrets_redacted")["message"]
-            assert message.startswith(f"{count} secret-like")
-            assert f"shown as {hidden} without being scanned" in message
-            assert len(json.dumps(result)) < 8 * 1024
+        assert listed["decisions"][0]["title"] == run
+        assert _warning(got, "decision_text_secrets_redacted")["message"].startswith("2 ")
+        assert "decision_text_secrets_redacted" not in _codes(listed)
 
-    def test_the_run_limit_boundary_and_the_scanned_worst_case(self):
-        limit = lineage.MAX_SCAN_RUN_CHARS
-        at_limit = SECRET + "x" * (limit - len(SECRET))
-        scrubbed, count = lineage.scrub_view(
-            {"at": at_limit, "over": at_limit + "x", "long": f"{at_limit} tail"}
+    def test_a_long_japanese_paragraph_is_shown_as_written(self, tmp_project: Path):
+        # Japanese is usually written without spaces; a paragraph on one line
+        # is an ordinary run of thousands of characters, not a secret.
+        paragraph = "これは改行を入れずに書いた日本語の長い段落で、空白もありません。" * 170
+        assert len(paragraph) >= 5_000 and not any(char.isspace() for char in paragraph)
+        pm_add_decision(
+            title=paragraph,
+            context=paragraph,
+            decision="d",
+            project_path=str(tmp_project),
         )
-        kept = "<REDACTED:secret>" + "x" * (limit - len(SECRET))
-        assert scrubbed == {
-            "at": kept,
-            "over": lineage.UNSCANNED_PLACEHOLDER,
-            "long": f"{kept} tail",
-        }
-        assert count == 3
-        # The slowest text the pass still scans: runs of exactly the limit,
-        # here 128 KiB of them (about 0.5 s; time grows with the limit).
-        runs = ("a" * limit + " ") * (128 * 1024 // (limit + 1))
-        started = time.perf_counter()
-        assert lineage.scrub_view(runs) == (runs, 0)
-        assert time.perf_counter() - started < 5
+        got, listed = _get(tmp_project, "ADR-001"), _query(tmp_project)
+        assert got["decision"]["title"] == paragraph
+        assert got["decision"]["context"] == paragraph
+        assert listed["decisions"][0]["title"] == paragraph
+        assert got["warnings"] == [] and listed["warnings"] == []
+
+    def test_a_private_key_in_the_adr_text_is_removed_whole(self, tmp_project: Path):
+        key = "-----BEGIN RSA PRIVATE KEY-----\n" + "\n".join([KEY_LINE] * 4)
+        context = f"pasted by mistake:\n{key}\n-----END RSA PRIVATE KEY-----\nthe rest"
+        _seed(tmp_project, _adr("ADR-001", context=context))
+        got = _get(tmp_project, "ADR-001")
+        assert got["decision"]["context"] == "pasted by mistake:\n<REDACTED:secret>\nthe rest"
+        assert KEY_LINE not in json.dumps(got)
+        assert _warning(got, "decision_text_secrets_redacted")["message"].startswith("1 ")
 
     def test_the_files_are_not_changed_by_redaction(self, tmp_project: Path):
         _seed(tmp_project, _adr("ADR-001", title=f"about {SECRET}"))
@@ -924,3 +965,133 @@ def test_a_symlinked_lineage_directory_is_not_followed(tmp_project: Path, tmp_pa
     assert got["lineage"]["derived"] is True
     assert "decision_lineage_unreadable" in _note_codes(got)
     assert _get(tmp_project, "ADR-002")["lineage"]["linked_from"]["amends"] == []
+
+
+# ─── read cost: lineages built to be slow to redact ──
+
+
+def _slow_lineage(adr: Decision, unit: str) -> str:
+    """A lineage just under the size limit whose notes are 16 K runs of ``unit``."""
+    doc = _doc_for(adr)
+    note = {"at": NOW, "kind": "note", "text": (unit * 16_256)[:16_256], "via": "hand"}
+    sizes = []
+    for _ in range(2):
+        doc["events"].append(dict(note))  # copies: a shared dict would dump as an alias
+        sizes.append(len(dump_lineage(doc, adr.id).encode("utf-8")))
+    more = (lineage.MAX_LINEAGE_BYTES - 20_000 - sizes[1]) // (sizes[1] - sizes[0])
+    doc["events"].extend(dict(note) for _ in range(more))
+    return dump_lineage(doc, adr.id)
+
+
+def _aliased_lineage(adr: Decision) -> str:
+    """One 240,000-character note that every event repeats through a YAML alias."""
+    doc = _doc_for(adr)
+    del doc["events"]
+    note = f"{{at: '{NOW}', kind: note, via: hand, text: {'a1' * 120_000}}}"
+    return dump_lineage(doc, adr.id) + f"events:\n- &e {note}\n" + "- *e\n" * 39
+
+
+def test_lineages_built_to_be_slow_to_redact_are_read_quickly(tmp_project: Path):
+    # Runs of these units once took some redaction patterns quadratic time:
+    # about 3.5 s per ADR for list and get alike, for files within the
+    # 256 KiB limit. The aliased note would be scanned once per event shown.
+    adrs = [_adr(f"ADR-00{n}") for n in range(1, 5)]
+    _seed(tmp_project, *adrs)
+    for adr, unit in zip(adrs, ("a", "a1", "eyJ"), strict=False):
+        _put_lineage(tmp_project, adr.id, _slow_lineage(adr, unit))
+    _put_lineage(tmp_project, "ADR-004", _aliased_lineage(adrs[3]))
+    for adr in adrs:
+        size = _lineage_path(tmp_project, adr.id).stat().st_size
+        assert 220_000 < size <= lineage.MAX_LINEAGE_BYTES
+
+    started = time.perf_counter()
+    listed = _query(tmp_project)
+    assert time.perf_counter() - started < 0.5 * len(adrs)
+    assert listed["count"] == 4 and listed["warnings"] == []
+    for adr in adrs:
+        started = time.perf_counter()
+        got = _get(tmp_project, adr.id)
+        assert time.perf_counter() - started < 1.0, adr.id
+        events = got["lineage"]["events"]
+        assert events and events[-1]["truncated"] is True
+        assert len(events[-1]["text"]) == lineage.MAX_TEXT_CHARS
+    started = time.perf_counter()
+    raw = lineage.read_lineage_raw(_pm(tmp_project), "ADR-001")
+    assert lineage.effective_lifecycle(adrs[0], raw) == "adopted"  # the draft guard's path
+    assert time.perf_counter() - started < 0.5
+
+
+# ─── read cost: one long id or status that a YAML alias repeats ──
+
+
+def _aliased_decisions_yaml(count: int, length: int, field: str) -> str:
+    """decisions.yaml whose ``count`` ADRs share one ``length``-character ``field``.
+
+    The value is written once (``&v``) and repeated by alias (``*v``), so the
+    file stays small while every ADR carries the long value.
+    """
+    lines = ["decisions:"]
+    for n in range(1, count + 1):
+        value = f'&v "{"a" * length}"' if n == 1 else "*v"
+        adr_id = value if field == "id" else f"ADR-{n:03d}"
+        status = value if field == "status" else "accepted"
+        lines.append(
+            f"- id: {adr_id}\n  title: t\n  date: 2026-10-01\n  status: {status}\n"
+            "  context: c\n  decision: d"
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _count_long_scans(monkeypatch: pytest.MonkeyPatch, length: int) -> list[int]:
+    """Record every redaction scan of a string at least ``length`` long."""
+    scans: list[int] = []
+    scrub_text = lineage.scrub_text
+
+    def counting(text: str) -> tuple[str, int]:
+        if len(text) >= length:
+            scans.append(len(text))
+        return scrub_text(text)
+
+    monkeypatch.setattr(lineage, "scrub_text", counting)
+    return scans
+
+
+@pytest.mark.parametrize("field", ["status", "id"])
+def test_a_label_a_yaml_alias_repeats_is_scanned_once_per_response(
+    tmp_project: Path, monkeypatch: pytest.MonkeyPatch, field: str
+):
+    # A malformed id or an unknown status is redacted whole before it is cut
+    # to a label, so labelling the same aliased value on every ADR used to
+    # scan it once per ADR (list: 500 x 256 KiB took 10 s).
+    length = 64 * 1024
+    (_pm(tmp_project) / "decisions.yaml").write_text(
+        _aliased_decisions_yaml(40, length, field), encoding="utf-8"
+    )
+    scans = _count_long_scans(monkeypatch, length)
+
+    listed = _query(tmp_project)
+    assert listed["count"] == 40
+    assert len(scans) == 1
+    scans.clear()
+    codes = {w["code"]: w for w in pm_status(project_path=str(tmp_project))["warnings"]}
+    if field == "status":
+        assert "ADR-040=" in codes["decision_status_unknown"]["message"]
+        assert len(scans) == 1
+    else:
+        assert scans == []
+
+
+def test_a_long_aliased_status_is_listed_quickly(tmp_project: Path):
+    # 100 ADRs sharing one 1 MiB status took list about 8 s and pm_status
+    # about 4 s; each now scans it once.
+    (_pm(tmp_project) / "decisions.yaml").write_text(
+        _aliased_decisions_yaml(100, 1024 * 1024, "status"), encoding="utf-8"
+    )
+    started = time.perf_counter()
+    listed = _query(tmp_project)
+    assert time.perf_counter() - started < 1.5
+    assert listed["count"] == 100
+    assert listed["decisions"][0]["status"] == "a" * lineage.MAX_LABEL_CHARS + "…"
+    started = time.perf_counter()
+    pm_status(project_path=str(tmp_project))
+    assert time.perf_counter() - started < 1.5

@@ -633,22 +633,43 @@ class TestScrubbing:
         assert label.endswith("…") and len(label) == lineage.MAX_LABEL_CHARS + 1
         assert scrub_label(DecisionStatus.ACCEPTED) == "accepted"
 
-    def test_the_coarse_cut_never_leaves_part_of_a_secret(self):
-        # A long value is cut to ~limit*4 before redaction (some patterns are
-        # quadratic). Redaction then shrinks what precedes that cut (a long
-        # connection string becomes "<REDACTED:conn>"), so a token split by the
-        # cut would surface inside the final limit. The cut lands before
-        # whitespace instead, never inside a token.
+    def test_the_whole_value_is_redacted_before_the_cut(self):
+        # Every redaction pattern takes linear time, so the full value is
+        # scanned and only then cut: no part of a secret is left, whatever
+        # precedes it or however long it is.
         label = scrub_label("postgres://" + "u" * 634 + " " + SECRET)
-        assert label == "<REDACTED:conn>…"
+        assert label == "<REDACTED:conn> <REDACTED:secret>"
         text, cut, count = lineage._scrub_clip("postgres://" + "u" * 16_234 + " " + SECRET, 4_000)
-        assert "AKIA" not in text and text == "<REDACTED:conn>" and cut and count == 1
-        # Whitespace-separated text keeps its content up to the limit.
-        text, cut, _ = lineage._scrub_clip("word " * 2_000 + SECRET, 100)
-        assert text == ("word " * 20)[:100] and cut
-        # No whitespace before the coarse cut: nothing is kept rather than a part.
-        assert scrub_label("u" * 700 + SECRET) == "…"
-        assert scrub_label("u" * 640 + SECRET + " tail") == "…"
+        assert (text, cut, count) == ("<REDACTED:conn> <REDACTED:secret>", False, 2)
+        # Whitespace-separated text keeps its content up to the limit, and a
+        # secret past the limit is still counted.
+        text, cut, count = lineage._scrub_clip("word " * 2_000 + SECRET, 100)
+        assert text == ("word " * 20)[:100] and cut and count == 1
+        # A long run without whitespace is scanned too, then cut.
+        assert scrub_label("u" * 700 + SECRET) == "u" * 100 + "…"
+        kept = scrub_label("u" * 640 + SECRET + " tail", 700)
+        assert kept == "u" * 640 + "<REDACTED:secret> tail"
+        # A keyword glued to the end of a long run still meets its value.
+        glued = "A" * 5_000 + "password = hunter2hunter2"
+        assert scrub_label(glued, 6_000) == "A" * 5_000 + "<REDACTED:secret>"
+
+    def test_a_string_shown_many_times_is_scanned_once(self, monkeypatch: pytest.MonkeyPatch):
+        # A YAML alias repeats one note on every event. The view scans it once
+        # and still counts each appearance (the last RECENT_EVENTS are shown).
+        scanned: list[int] = []
+        real = lineage.scrub_text
+
+        def counting(text: str) -> tuple[str, int]:
+            scanned.append(len(text))
+            return real(text)
+
+        monkeypatch.setattr(lineage, "scrub_text", counting)
+        adr = _adr()
+        note = {"at": NOW, "kind": "note", "text": "x " * 50_000 + SECRET, "via": "hand"}
+        view = lineage_view(adr, _raw(adr, _doc(adr, events=[note] * 30)))
+        assert scanned.count(len(note["text"])) == 1
+        assert view.redactions == lineage.RECENT_EVENTS
+        assert all(event["text"].startswith("x x ") for event in view.events)
 
     def test_scrub_view_walks_everything_and_counts(self):
         response = {"a": SECRET, "b": [f"x {SECRET}", {"c": SECRET}], "n": 3, "none": None}
@@ -657,6 +678,17 @@ class TestScrubbing:
         assert SECRET not in json.dumps(scrubbed)
         assert scrubbed["n"] == 3 and scrubbed["none"] is None
         assert response["a"] == SECRET  # not mutated
+
+    def test_scrub_view_scans_long_runs_whole_and_counts_each_appearance(self):
+        # Nothing is withheld unscanned: a long paragraph without whitespace
+        # (ordinary Japanese) is shown as written, and a keyword at the end of
+        # a long run keeps its value hidden. A string that appears twice (a
+        # YAML alias) is scanned once and counted twice.
+        paragraph = "改行を入れずに書いた日本語の段落です。" * 300
+        glued = "A" * 5_000 + "Bearer " + "t" * 30
+        scrubbed, count = scrub_view({"p": paragraph, "g": [glued, glued]})
+        assert scrubbed == {"p": paragraph, "g": ["A" * 5_000 + "<REDACTED:secret>"] * 2}
+        assert count == 2
 
 
 # ─── Bounded read (I/O) ──────────────────────────────────────────────────
