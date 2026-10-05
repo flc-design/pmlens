@@ -1,11 +1,11 @@
 # Decision Lineage S1 仕様と実装計画（改訂版）
 
-- 対象: PMSERV-221〜227、PMSERV-253（ADR-056 の S1。ADR-057 と ADR-058 による改定を反映）
-- 前提: ブランチ feat/decision-lineage-s0。S0 は 0806422 と 4bcd2ba でコミット済み
+- 対象: PMSERV-221〜227、PMSERV-253（ADR-056 の S1。ADR-057 と ADR-058 による改定と、ADR-059 の決定を反映）
+- 前提: ブランチ feat/decision-lineage-s0。S0 は 0806422 と 4bcd2ba、S1 は c727b6c〜7180461 でコミット済み。S1 のレビュー（adversarial review）の修正は 4ff9f89・561d205・6096fe9
 - 方針: ADR-056/057/058 と S0 のガードを満たす、最も小さい設計を選ぶ。S2 以降の機能は作らず、置き場と継ぎ目だけを用意する
-- 根拠の書き方: 既存コードについての記述には file:line を付ける（行番号は 4bcd2ba で確かめた）。`.pm/decisions.yaml` の行番号は、事実シート（他エージェントが検証済み）から引いている
-- 改訂: 草案に 3 つのレンズ（invariants / lens-security / testability-scope）のレビューを反映した。指摘ごとの対応は §11 にある
-- 印 【Q1=b】: 論点 Q1 で (b)（既定を proposed にする）を選んだ場合の文面。(a) の文面は同じ箇所に並べた
+- 根拠の書き方: 既存コードについての記述には file:line を付ける（行番号は計画の時点の 4bcd2ba で確かめたもので、実装後のコードでは確かめ直していない）。`.pm/decisions.yaml` の行番号は、事実シート（他エージェントが検証済み）から引いている
+- 改訂: 草案に 3 つのレンズ（invariants / lens-security / testability-scope）のレビューを反映した。指摘ごとの対応は §11 にある。実装と S1 のレビューの後に、決定済みの論点と実装に合わせて本文を改めた。改めた点の一覧は §12 にある
+- 論点: Q1・Q2 はユーザーの承認を得て ADR-059 で決まった（Q1 は (b)、Q2 は推奨どおり）。Q5 も ADR-059 の決定 4 に書かれている。決める前に並べていた (a) の文面と「Q2 で承認された場合」の条件は消し、§10 は決定の記録として残した
 
 ---
 
@@ -22,16 +22,16 @@ S1 は「ADR が状態を持てるようにする」段階です。
 
 これで、ADR-053 のように「誰も確認していない ADR が、既定の動作で accepted として残る」経路を無くします（ADR-056 の consequences と ADR-057 の 1・3）。
 
-ただし、サーバーは呼び出し元が人か AI かを区別できず、`.pm/` は AI も直接書けます（ADR-056 の context (5)）。そのため、**AI が自分で adopted にすることは規約でしか止められません**。S1 が保証するのは「既定で accepted にならない」「Lens に書き込みの経路が無い」「確認を立てる引数が無い」までで、採択が人の判断に基づくことは、規約と、毎回ユーザーに見せる警告（lifecycle を変えるたびの `decision_lifecycle_changed` と、accepted で起票した時の `decision_created_accepted`）と、ユーザーが選んで入れる緩和策で支えます。区分の全体は §8.4 にまとめます。
+ただし、サーバーは呼び出し元が人か AI かを区別できず、`.pm/` は AI も直接書けます（ADR-056 の context (5)）。そのため、**AI が自分で adopted にすることは規約でしか止められません**。S1 が保証するのは「既定で accepted にならない」「Lens に書き込みの経路が無い」「確認を立てる引数が無い（引数名による検査）」までで、採択が人の判断に基づくことは、規約と、毎回ユーザーに見せる警告（lifecycle を変えるたびの `decision_lifecycle_changed` と、accepted で起票した時の `decision_created_accepted`）と、ユーザーが選んで入れる緩和策で支えます。区分の全体は §8.4 にまとめます。
 
 ### 1.2 S1 で作るもの
 
 | タスク | 作るもの |
 |---|---|
-| PMSERV-221 | lineage の保存層。`.pm/decision_lineage/ADR-NNN.yaml`、ADR ごとのロックとロック順序の実行時の検査、大きさに上限のある寛容な読み取り（生の読み取りと純関数の view に分ける）、status との相互の射影、ADR との対応を確かめる anchor、prompt_pack の予約ディレクトリ、redact の入口 |
+| PMSERV-221 | lineage の保存層。`.pm/decision_lineage/ADR-NNN.yaml`、ADR ごとのロックとロック順序の実行時の検査、大きさに上限のある寛容な読み取り（生の読み取りと純関数の view に分ける）、status との相互の射影、ADR との対応を確かめる anchor、prompt_pack の予約ディレクトリ（予約名の照合は大文字小文字を区別しない。§8.3）、redact の入口 |
 | PMSERV-222 | pm_add_decision の拡張。status（proposed / accepted）、申告項目、recorded_at、lineage の同時作成 |
 | PMSERV-223 + 253 | pm_decision_query（読み取り専用で Lens にも公開）。get と list を持つ。未知キーは名前だけ、入れ子の値は kind ごとの許可リストだけを返し、応答の全文字列に redact を掛ける |
-| PMSERV-224 | pm_update_decision（書き込み専用で Lens には出さない）。lifecycle の遷移、links、evaluation と note の追記、申告の後付け（Q2 の結果による） |
+| PMSERV-224 | pm_update_decision（書き込み専用で Lens には出さない）。lifecycle の遷移、links、evaluation と note の追記、申告の後付け（ADR-059 の 2 の範囲） |
 | PMSERV-225 | 採択されていない ADR を起点にした下書きへの警告。pm_draft_content の保存時に加え、pm_drafts_pending / pm_x_drafts_pending と pm_redact_draft の応答でも、読み取り時に判定して出す |
 | PMSERV-226 | ワークフローの文面。development.yaml の decision ステップでは proposed で記録し、check ゲートで採択する。discovery.yaml の confirm と brainstorming.yaml の record も、同じ形（proposed で記録し、同じステップのゲートで採択）にする |
 | PMSERV-227 | 既存 ADR のデータ修正。1 件ずつユーザーの承認を得て行う。.pm は git 管理外なので PR には含めない |
@@ -42,6 +42,7 @@ S1 は「ADR が状態を持てるようにする」段階です。
 - decision_policy.yaml（姿勢、PMSERV-255）、pm_status での姿勢の表示
 - ダッシュボード・recall・prompt pack への lifecycle のラベル付け（S3、PMSERV-236 / 237）
 - MCP instructions と SKILL.md の本格的な書き換え（S3 の PMSERV-241、ルール v16 の PMSERV-247）。S1 で触るのは、full モードの pm_add_decision の 1 文と、Lens の 2 つの文面に「decisions」を足すことだけ
+  - そのため S3 までは、配布済みのルール v15（「承認されたら pm_add_decision で保存」）に従って記録した ADR も proposed になり、採択の手順は MCP instructions・ツールの説明・3 つのワークフローのゲートにしか無い（S1 のレビュー DL-S1-12 / PP-04）。CHANGELOG の Upgrade notes に「採択は pm_update_decision で行う」と書いて知らせる。
 - git による observed（T3）、境界サマリー（T7）
 - 自動での関係の遡及。本文から links を推測して書き込むことはしない
 - 緩和策（permissions の ask、PreToolUse hook）の同梱。文書で選択肢として示すだけにする（§8.4）
@@ -71,17 +72,17 @@ S1 の仕様は、タスク記述から次の点で変えた。サブエージ�
 | 対象 | 差分 | 記録先の案 |
 |---|---|---|
 | PMSERV-221 | ロックの置き場を `.pm/.locks/decision_lineage-ADR-NNN.lock` にした（§2.1）。ロック順序を実行時に検査する。anchor（title の SHA-256 と date）を持つ。大きさの上限 256 KiB。読み取りを生の読み取りと純関数の view に分ける | 221 の description |
-| PMSERV-222 | 受け入れ条件の「申告を省いた時は表示では記録なし」を、not_recorded の規則（§3.2）で具体化した。既定値は Q1 による | 222 の受け入れ条件。Q1 で (b) なら「既定は accepted のまま」を書き換える |
+| PMSERV-222 | 受け入れ条件の「申告を省いた時は表示では記録なし」を、not_recorded の規則（§3.2）で具体化した。既定値は Q1 で (b) に決まった（ADR-059 の 1）ので proposed | 222 の受け入れ条件の「既定は accepted のまま」を書き換える |
 | PMSERV-224 | `caused_by` は S2 に送った（tasks.yaml:152-153 の「caused_by でフィードバック ID を参照できるようにする」は満たさない） | 224 から外し、PMSERV-231 の description に移す |
 | PMSERV-224 | note の追記を足した（根拠は ADR-057 の 1「実装中の ADR の lineage events に残す」。ADR-056 の pm_update_decision の範囲には書かれていない） | 224 の受け入れ条件に足す |
-| PMSERV-224 | 申告の後付け（Q2 で承認された場合。origin は ai_auto だけ） | 224 の受け入れ条件と、227 の手順 |
+| PMSERV-224 | 申告の後付け（ADR-059 の 2。origin は ai_auto だけ） | 224 の受け入れ条件と、227 の手順 |
 | PMSERV-224 | 遷移表に superseded → deprecated を足した。食い違いの自動修復はしない（lifecycle を明示した時だけ射影し直す） | 224 の description |
 | PMSERV-225 | signal_type を限定しない。保存時だけでなく pm_drafts_pending / pm_x_drafts_pending / pm_redact_draft でも読み取り時に判定する。ref は大文字小文字を区別せず番号で照合する | 225 の description と受け入れ条件 |
 | PMSERV-226 | discovery.yaml の confirm と brainstorming.yaml の record も対象にした。受け入れ条件の test_workflow_pins は GitHub Actions の SHA 固定のテストで、テンプレートとは関係が無い（tests/test_workflow_pins.py:1-19） | 226 の description と受け入れ条件 |
 | PMSERV-223 | 「ドキュメントのツール一覧が更新されている」をテストで固定する（§9.1） | 223 の受け入れ条件 |
-| 新しいイシュー | pm_status の `decisions_yaml_unreadable` が例外の本文を返している（server.py:1045）。`decision_status_unknown` も未知の status の値を長さの制限なしで返している（server.py:1053）。Lens の pm_status からも呼ばれる（server.py:835） | severity=defect、親は PMSERV-253 か 218 |
-| 新しいイシュー候補 | `_next_number_from_ids` は `isdigit` で判定してから `int` を呼ぶ（storage.py:234-235）。decisions.yaml の id が手編集で `ADR-²` になると、pm_add_decision が毎回 ValueError で落ちる。lineage のファイル名は §5.1 の正規表現で除くので S1 の経路には影響しない | severity=enhancement |
-| 新しいイシュー候補 | prompt_pack の予約名の照合が basename だけで、tracks.yaml など未登録の名前もある（prompt_pack.py:459） | 草案と同じ |
+| 新しいイシュー（対応済み） | pm_status の `decisions_yaml_unreadable` が例外の本文を返している（server.py:1045）。`decision_status_unknown` も未知の status の値を長さの制限なしで返している（server.py:1053）。Lens の pm_status からも呼ばれる（server.py:835） | c727b6c で PMSERV-258 として直した（読めない時は例外の型名と YAML の行・列だけを返し、id と status は redact してから 100 字で切る） |
+| 新しいイシュー候補（未対応） | `_next_number_from_ids` は `isdigit` で判定してから `int` を呼ぶ（storage.py:234-235）。decisions.yaml の id が手編集で `ADR-²` になると、pm_add_decision が毎回 ValueError で落ちる。lineage のファイル名は §5.1 の正規表現で除くが、decisions.yaml 側の id は絞っていないので、S1 の起票の経路でも残る（S1 のレビュー SEC-10 / DL-S1-06 で再現した）。同じレビューは、孤立した lineage ファイル 1 つ（`ADR-999999.yaml`）で `decision_id_exhausted` が続き、メッセージが原因のファイルを示さないことも見つけた | severity=enhancement。採番の入力を `DECISION_ID_RE` に合う id に絞り、exhausted のメッセージに最大値の出どころを入れる |
+| 新しいイシュー候補 | prompt_pack の予約名の照合が basename だけで、tracks.yaml など未登録の名前もある（prompt_pack.py:459）。S1 で予約名の照合は大文字小文字を区別しなくなったが（§8.3）、未登録の名前はそのまま | 草案と同じ |
 
 ---
 
@@ -129,8 +130,10 @@ events:                                # 追記だけ
 
 - 時刻は `YYYY-MM-DDTHH:MM:SSZ` 形式の文字列にする。safe_dump は timestamp に見える文字列を引用符で囲むので、読み戻しても文字列のまま扱える。手で編集されて引用符が外れた値は、読み取りで扱う（§2.7）。
 - **anchor**: 旧版（0.16.0）は decisions.yaml だけから採番する（`git show a5a08de:src/pmlens/storage.py` の :331-340）。そのため、ADR を手で消した後に残った lineage の番号を、旧版が新しい ADR に使い回すことがある。lineage が正なので、照合しないと新しい ADR に古い lifecycle・申告・events が付く。anchor が ADR の現在の date と title に一致しない時は、読み取りでは lineage を帰属させず（derived）、書き込みは拒否する（§2.7、§4.4）。
-  - 手で title や date を直しただけの場合も一致しなくなる。回復は「lineage ファイルから `anchor` を消す」で、次の書き込みが現在の ADR に付け直す（`decision_lineage_anchor_missing`）。anchor の無い lineage は照合しない。S1 が作る lineage は必ず anchor を持つので、無いのは手で編集した場合だけである。
+  - 手で title や date を直しただけの場合も一致しなくなる。回復は「lineage ファイルから `anchor` を消す」で、次の書き込みが現在の ADR に付け直す（`decision_lineage_anchor_missing`）。anchor の無い lineage は照合しない。S1 が作る lineage は必ず anchor を持つので、無いのは手で編集した場合だけである。この回復手順は、書き込みの拒否（`decision_lineage_anchor_mismatch`）のメッセージにも書く。別の ADR のための lineage なら `decision_lineage/` の外へ手で移す、という選択肢も同じメッセージに書く（S1 のレビュー PP-05）。
+  - **title は保存される形で扱う**（S1 のレビュー DL-S1-01）: YAML の書き出しと読み戻しで変わる文字列がある（U+0085 は読み戻すと改行になり、空白に畳まれる）。起票の経路は、title を decisions.yaml が読み戻す形（`lineage.stored_title()`）に直してから保存し、その形で anchor のハッシュを取る。そうしないと、起票した直後の読み取りから anchor が合わない。pm_add_decision の戻り値の `title` も、保存した形を返す。
   - **date キーの無い ADR（PMSERV-221 のレビューで追加）**: decisions.yaml の項目に `date` が無いと、モデルの既定値（その日の日付）が入る。この値は日ごとに変わり、どの版でも decisions.yaml を書き直した日の日付で固定されるので、指紋にならない。そこで、読み込んだ ADR の `date` が明示されていない時（`model_fields_set` に無い時）は `anchor.date` を null にし、照合は title だけで行う。`anchor.date` が null の lineage は、後から ADR に日付が入っても外れない。起票の経路は ADR を date ごと書き出すので、常に date を入れる。`anchor` に `date` キーそのものが無いものは手で編集したものとして不一致にする。
+    - 同じ理由で、pm_decision_query も date キーの無い ADR の `date` を今日の日付ではなく null で返し、info の `decision_date_not_recorded` を付ける（§4.2。S1 のレビュー SEM-08）。
 
 ### 2.3 語彙と既定値
 
@@ -138,11 +141,11 @@ events:                                # 追記だけ
 |---|---|---|---|
 | `schema` | 整数（S1 は 1） | 1 | 互換の無い変更をした時だけ上げる。足すだけの変更なら 1 のまま |
 | `lifecycle` | proposed / adopted / deprecated / superseded / rejected / reverted | 起票時の status から決まる | pm_update_decision で変える（§4.3 の遷移表） |
-| `declared.origin` | ai_auto / ai_proposed_human_decided / human / unknown | unknown | 起票時に申告する。後から入れられるのは、値が unknown の時に ai_auto だけ（Q2 で承認された場合） |
-| `declared.recorded_timing` | before_impl / during_impl / post_hoc / unknown | unknown | 起票時に申告する。後から入れられるのは、値が unknown の時だけ（Q2） |
+| `declared.origin` | ai_auto / ai_proposed_human_decided / human / unknown | unknown | 起票時に申告する。後から入れられるのは、値が unknown の時に ai_auto だけ（ADR-059 の 2） |
+| `declared.recorded_timing` | before_impl / during_impl / post_hoc / unknown | unknown | 起票時に申告する。後から入れられるのは、値が unknown の時だけ（ADR-059 の 2） |
 | `declared.decision_kind` | spec_policy / premise_dependent / technical / unknown | unknown | 起票時だけ。変更の引数は作らない（ADR-056「分類の変更を設定する引数は作らない」） |
 | `anchor` | `{date, title_sha256}` | 作成時の ADR から | サーバーだけが書く。引数は作らない |
-| `links.*` | `re.fullmatch(r"ADR-[0-9]{1,6}", s)` に合う id の配列。1 種類につき最大 50 件 | [] | pm_update_decision の add_links / remove_links |
+| `links.*` | `re.fullmatch(r"ADR-[0-9]{1,6}", s)` に合う id の配列。1 種類につき最大 50 件（add_links / remove_links の引数も 1 種類 50 件まで。§4.3） | [] | pm_update_decision の add_links / remove_links |
 | `events[].kind` | created / lineage_started / lifecycle / link / declared / evaluation / note / status_reprojected | — | サーバーだけが追記する |
 | `evaluation_kind` | test / ai_review / outcome / other | other | 名前に「ai_」を付け、人間のレビューと取り違えないようにする |
 
@@ -157,14 +160,19 @@ events:                                # 追記だけ
 |---|---|---|
 | created | lifecycle, status | pm_add_decision |
 | lineage_started | basis: derived_from_status, status, lifecycle | lineage の無い既存 ADR に、初めて pm_update_decision を呼んだ時 |
-| lifecycle | from, to, status（射影した値）, reason | 状態を移した時 |
-| link | op: add / remove, type, target, reason（remove では必須） | links を変えた時 |
-| declared | field, value, basis: backfill, reason | 申告を後から入れた時（Q2 で承認された場合） |
+| lifecycle | from, to, status（射影した値）, reason（下の reason の規則） | 状態を移した時 |
+| link | op: add / remove, type, target, reason（同上） | links を変えた時 |
+| declared | field, value, basis: backfill, reason（同上） | 申告を後から入れた時（ADR-059 の 2） |
 | evaluation | evaluation_kind, text | テスト・別 AI のレビュー・その後の結果を記録した時（ADR-056 5.1、ADR-058 5） |
 | note | text | 実装中の小さな判断を記録した時（ADR-057 1「実装中の ADR の lineage events に残す」） |
 | status_reprojected | from_status, to_status | links の変更や、lifecycle を明示した修復で、status だけが変わった時 |
 
-- 1 回の呼び出しで複数の event ができる時は、同じ `at` で上の表の順に並べる。`at` は `lineage._utc_now()` から取る。
+- 1 回の呼び出しで複数の event ができる時は、同じ `at` で上の表の順（created, lineage_started, lifecycle, link, declared, evaluation, note, status_reprojected）に並べる。`at` は `lineage._utc_now()` から取る。変更を当てて検査する順（§4.3 の処理 2）とは別で、event の並びはこの表の順に限る（実装は lineage.py の `_EVENT_FIELDS` の順）。
+  - **再生の注意**: superseded に移して後継を足す呼び出しは、lifecycle（to: superseded）の event が link（superseded_by）の event より前に並ぶ。そのため、event を 1 件ずつ当てて検査すると、不変条件 1（§4.3）を途中で破った状態を通る。S1 には event を再生する処理は無い。再生する側を作る時は、1 回の呼び出しの event（ファイル上で連続し、同じ `at` と `via` を持つ。同じ秒の呼び出しどうしは、kind の並びと下の reason の規則で区切る）をまとめて当ててから検査する（S1 のレビュー SEM-06）。
+- **reason の規則**（S1 のレビュー DL-S1-02 / CP-8）: 1 回の呼び出しの reason は 1 つなので、その呼び出しの lifecycle / link / declared の event のうち**最後の 1 件にだけ**保存する。初版はすべての event に複製していて、50 件の link と 4,000 字の reason を 1 回渡すだけで、大きさの上限の大半を使えた。
+  - 最後の 1 件に置くのは、読み取りがファイルの末尾 20 件を見せるためである。1 回の呼び出しの event は連続し、lifecycle / link / declared は evaluation / note / status_reprojected より前に並ぶので、そのどれかが見える範囲には reason を持つ event も入る。
+  - reason を渡さない呼び出し（add_links だけは reason なしで呼べる）でも、その event は空文字の `reason` を持つ。同じ秒の呼び出しは `at` と `via` が同じになるので、`reason` を持つ event が呼び出しの区切りになる（`reason` の無い lifecycle / link / declared の event は、次に `reason` を持つ event と同じ呼び出しのもの）。
+  - lifecycle / link / declared の event を作らない呼び出し（note・evaluation だけ、対角の再射影だけ）に渡した reason は、置く event が無いので保存しない。警告も出さない（S1 のレビュー SEM-12 の改善候補）。
 - **view の型の規則**:
   - 値は str に限る。自由文（`text`、`reason`）は 4,000 字まで、それ以外（列挙値・id・時刻）は 100 字までで切り、切ったら `truncated: true` を付ける。
   - `at` が date / datetime（引用符の無い時刻を safe_load が変換したもの）なら isoformat の文字列にする。それ以外の型なら null にして注記を付ける。
@@ -185,7 +193,7 @@ events:                                # 追記だけ
 
 lineage の書き手は pydantic のモデルを経由しない。safe_load が返した dict を直接変える。
 
-1. ロックを持った状態で、ファイルを §2.7 の有界な読み取りで読む（シンボリックリンク・通常のファイルでないもの・256 KiB を超えるものは、この時点で拒否される）。
+1. ロックを持った状態で、ファイルを §2.7 の有界な読み取りで読む（シンボリックリンク・通常のファイルでないもの・256 KiB を超えるもの・入れ子が 64 段を超えるものは、この時点で拒否される）。
 2. 次の検証で 1 つでも外れたら、書かずに `LineageWriteRefused`（PmServerError のサブクラス。code を持つ）を投げる。書けない状態のファイルを上書きしないためである。
    - トップレベルが dict である（外れたら `decision_lineage_unreadable`）。
    - `decision_id` がファイル名と一致する（同上）。
@@ -194,8 +202,12 @@ lineage の書き手は pydantic のモデルを経由しない。safe_load が�
    - `links` と `events` が、無いか、正しい型である（`decision_lineage_unreadable`）。
    - `anchor` が無いか、現在の ADR の date と title に一致する（`decision_lineage_anchor_mismatch`）。
 3. 自分が持つキーだけを差し替える（lifecycle、links の該当リスト、declared の該当値、events への追記、anchor が無ければ付け直す）。
-4. 差し替えた dict を `lineage.dump_lineage()`（safe_dump の結果の文字列を返す純関数）で直列化し、`MAX_LINEAGE_BYTES` を超えるなら書かずに `decision_lineage_too_large` で拒否する。読み手が読めないファイルを書き手が作らないためである。
+4. 差し替えた dict を直列化し、`MAX_LINEAGE_BYTES` を超えるなら書かずに `decision_lineage_too_large` で拒否する。読み手が読めないファイルを書き手が作らないためである。
+   - **直列化は大きさの上限つき**（S1 のレビュー SEC-05）: 未知のキーにエイリアスで繰り返された長い文字列があると、safe_dump は繰り返しのたびに全文を書き出す。`lineage.dump_lineage()`（上限の無い純関数）で直列化すると、ロックを持ったまま数十秒・GB 級のメモリを使えた。書き手は storage の上限つきの直列化（同じ文字列を作り、上限を超えた時点で止める）を使う。直列化が例外になった時（深い入れ子など）も `decision_lineage_unreadable` の拒否にする。
+   - **note と evaluation の余白**（S1 のレビュー DL-S1-02 / PP-06 / SEM-07 / CP-8）: note と evaluation は件数の制限なしに追記できるので、追記した後の大きさが `MAX_APPEND_BYTES`（= 256 KiB − 16 KiB の `LINEAGE_RESERVE_BYTES`）を超える呼び出しは、`decision_lineage_too_large` で拒否する。残りの 16 KiB は lifecycle・link・declared の変更のために空けておく（3 バイトの文字で 4,000 字の reason を持つ lifecycle の event は約 12.5 KB）。初版はこの余白が無く、note で埋まった lineage は採択・却下を含むすべての更新が拒否された。ただし link と lifecycle の変更を繰り返せば余白も使い切るので、余白は保証ではない。remediation もそれを約束せず、「note と evaluation を含めずに呼ぶ」「reason を短くする」「古い note と evaluation の event を `.pm/decision_lineage/` の外へ手で移す（lifecycle・link・declared の event は残す）」を案内する。読み手は `MAX_LINEAGE_BYTES` までを受け付ける。
 5. dict ごと `_save_yaml` に渡す。
+
+- **入れ子の深さ**（S1 のレビュー SEC-12）: 読み手と書き手は、同じ上限 `MAX_LINEAGE_DEPTH`（64 段）を、再帰を使わずに検査する。PyYAML は約 350 段の入れ子を読めるが、書き戻すと RecursionError になる。上限を超えるファイルは、読み取りでは `decision_lineage_unreadable` の注記、書き込みでは同じ code の拒否にする。S1 が書くファイルは 3 段である。
 
 - **起票の経路**（§5.1）では、対象のファイルが既にあれば上書きしない。ADR は保存し、応答に `"lineage": "missing"` と警告 `decision_lineage_preexisting` を付ける。採番は lineage のファイル名も数える（§5.1）ので、通常は起きない。S2 の書き手が継ぎ目の規約（§1.4）に反して lineage を先に作った場合や、手で置いた場合の防御である。
 
@@ -228,7 +240,7 @@ lineage の書き手は pydantic のモデルを経由しない。safe_load が�
 | ファイルが無い | `exists=False`。status から逆写像し `derived=True`（§3.2） | — |
 | シンボリックリンク、通常のファイルでない（FIFO・ディレクトリ）、256 KiB を超える | derived で返す | `decision_lineage_unreadable` |
 | YAML の構文エラー、UnicodeDecodeError、OSError（権限が無いなど） | derived で返す | `decision_lineage_unreadable` |
-| トップレベルが dict でない、decision_id がファイル名と違う | derived で返す | `decision_lineage_unreadable` |
+| トップレベルが dict でない、decision_id がファイル名と違う、入れ子が 64 段を超える（§2.6） | derived で返す | `decision_lineage_unreadable` |
 | anchor が現在の ADR の date / title と違う | derived で返し、lineage の値は出さない | `decision_lineage_anchor_mismatch` |
 | anchor が無い | 照合せずに使う | `decision_lineage_anchor_missing`（info） |
 | decisions.yaml に同じ id が 2 件以上ある | 両方とも derived で返し、lineage を帰属させない | `decision_id_duplicate` |
@@ -245,6 +257,7 @@ lineage の書き手は pydantic のモデルを経由しない。safe_load が�
 
 - `decision_id` は `DECISION_ID_RE` で検証してから path を組み立てる。これをパストラバーサルの防御にする。
 - declared は既知の 3 キーだけを出す。値が str でなければ `unknown` として扱い、件数を注記に出す。links も既知の 3 キーだけを出す。
+  - 書き手も同じ扱いにする: 手で編集されて str でなくなった（null や数値の）申告は unknown とみなし、後付け（§4.3）で埋められる。初版は表示では unknown なのに後付けを `declared_already_set` で拒否していた（S1 のレビュー DL-S1-08）。
 
 ---
 
@@ -325,7 +338,7 @@ lineage の無い ADR（または帰属させなかった ADR）は次のよう�
 - 引数の列挙値は `Literal` を使わず、素の `str` で受ける。取りうる値は docstring に書く（server.py には `Literal` が無い。事実シート tools §1）。
 - 予想できる失敗は `{"status": "error", "code": ..., "message": ...}` で返す（前例: server.py:2993-3013）。ロックのタイムアウトや OSError など予想外のものは、PmServerError のまま送出する。
 - warnings は `_build_warning(level, code, message, remediation?)` の形（server.py:1068-1077）にし、level は "warning" か "info" にする。
-- **エラーの dict・warnings・notes に例外の本文（`str(exc)`）を入れない**。型名と、YAMLError なら行と列だけにする（§2.7）。前例の server.py:1038-1050 は 1045 行で `{exc}` を返しているので、真似をしない（既存の漏れは §1.5 の新しいイシュー）。
+- **エラーの dict・warnings・notes に例外の本文（`str(exc)`）を入れない**。型名と、YAMLError なら行と列だけにする（§2.7）。前例の server.py:1038-1050 は 1045 行で `{exc}` を返しているので、真似をしない（この既存の漏れは c727b6c で PMSERV-258 として直した。§1.5）。
 - docstring は PMSERV-203 の規約で書く。使う時と使わない時を書き、PMSERV や ADR の番号、docs のパス、「MUST ... verbatim」を入れない。言語は既存に合わせて英語にする。
 - 警告とエラーの code は §4.4 の表にまとめ、テストは code で照合する。
 
@@ -339,7 +352,7 @@ def pm_add_decision(
     decision: str,
     consequences_positive: list[str] | None = None,
     consequences_negative: list[str] | None = None,
-    status: str = "proposed",          # 【Q1=b】。(a) なら "accepted"
+    status: str = "proposed",          # Q1=b（ADR-059 の 1）
     origin: str = "unknown",
     recorded_timing: str = "unknown",
     decision_kind: str = "unknown",
@@ -352,7 +365,7 @@ def pm_add_decision(
   - status は {proposed, accepted} のいずれか（`invalid_status`）。adopted のような lifecycle の語は受け付けず、メッセージで accepted を案内する。
   - 3 つの申告が語彙の範囲内（`invalid_origin`、`invalid_recorded_timing`、`invalid_decision_kind`）。
   - `status="accepted"` と `origin="ai_auto"` の組み合わせは拒否する（`status_conflicts_with_origin`）。これは**申告どうしの矛盾の検出**である。ai_auto は「AI が確認せずに決めた」、accepted は「ユーザーが内容を受け入れた」という申告で、両立しない（ADR-057 の 1）。origin を省けば通るので、採択を強制する仕組みではない（§8.4）。
-    - 【Q1=a】の場合は、origin=ai_auto だけを渡して status を省いた呼び出しもこのエラーになる。メッセージで status=proposed を案内する。
+- **書き込み先の検査**: `.pm/decision_lineage` がシンボリックリンクなら、decisions.yaml にも何も書かずに `decision_lineage_unreadable` のエラーの dict を返す（§5.1）。ADR だけが保存されて lineage の無い状態を作らないためである。
 - **採番**: build のクロージャは server.py に置いたまま、モジュールの global の `generate_decision_id`（server.py:92、utils.py:161-163）を呼ぶ。tests/test_id_allocation.py:249、272 がこの経路を監視している。次の番号が 999,999 を超える時は、書く前に `decision_id_exhausted` を返す（id の正規表現の上限を超え、lineage が書けなくなるため）。
 - **保存**: `storage.add_decision_with_lineage(pm_path, build, declared=...)` で行う（§5.1）。
 - **戻り値**: 既存のキーはすべて残す（tests/test_server.py:161-172）。
@@ -363,9 +376,11 @@ def pm_add_decision(
  "recorded_at": "2026-10-05T03:12:00Z"}
 ```
 
-  - lineage を書けなかった時（§5.3）は `"lineage": "missing"` を加え、警告 `decision_lineage_not_written`（OSError）か `decision_lineage_preexisting`（ファイルが既にあった）を付ける。
+  - `title` は保存した形（§2.2。YAML の読み戻しで変わる文字を直した後の値）を返す。
+  - lineage を書けなかった時（§5.3）は `"lineage": "missing"` を加え、警告 `decision_lineage_not_written`（OSError）か `decision_lineage_preexisting`（ファイルが既にあった）を付ける。preexisting の時の `lifecycle` は、読み取りがいま見せる値（既にあったファイルの値）にする。
+  - decisions.yaml が読めない時は `decisions_yaml_unreadable` のエラーの dict を返し、message には例外の型名と YAML の行・列だけを入れる（§4 の共通規約）。初版の pm_add_decision だけは、例外の本文（壊れた行の抜粋や pydantic の `input_value`）をそのまま返していた（S1 のレビュー DL-S1-05 / PP-01 / SEC-09）。
   - `status="accepted"` で起票した時は、info の `decision_created_accepted` を付ける（lineage の警告がある時はその後ろ）。accepted での起票は 1 回の呼び出しで採択になるので、pm_update_decision の遷移と同じく「pmlens はユーザーが内容を受け入れたかを確かめられない。ユーザーに伝える」と書き、remediation に「受け入れていなければ pm_update_decision で proposed に戻す」を書く（レビュー DL-S1-03 / PP-02 / SEC-06 / SEM-01）。
-- **docstring の案**（【Q1=b】。(a) の差分は下に示す）:
+- **docstring**（実装と同じ文面）:
 
 ```
 Record an architecture decision (ADR); the id is assigned automatically.
@@ -392,11 +407,9 @@ leave a value unknown rather than guess it.
 To record that it amends or supersedes another ADR, call pm_update_decision next.
 ```
 
-  - 【Q1=a】の場合の status の段落: "status: accepted (default) | proposed. Pass proposed unless the user has reviewed and accepted the content itself; agreeing that it may be recorded is not acceptance. A proposed ADR is adopted later with pm_update_decision."
 - **MCP instructions**（full モード。server.py:155 の 1 文を置き換える）:
-  - 【Q1=b】の案: "Record an ADR with pm_add_decision after the user agrees to record it; it is saved as proposed, and becomes adopted with pm_update_decision once the user accepts its content."（合計 1,516 字）
-  - 【Q1=a】の案: "Record an ADR with pm_add_decision after the user agrees to record it; pass status=proposed unless the user has accepted its content, and adopt it later with pm_update_decision."（合計 1,519 字）
-  - 上限は 2,048 字（tests/test_server_instructions.py:53-56）。現在の full の文面は 1,399 字。
+  - 文面: "Record an ADR with pm_add_decision after the user agrees to record it; it is saved as proposed, and becomes adopted with pm_update_decision once the user accepts its content."（計画の時点の合計 1,516 字）
+  - 上限は 2,048 字（tests/test_server_instructions.py:53-56）。計画の時点（4bcd2ba）の full の文面は 1,399 字。
 - **Lens の 2 つの文面**: read-only（server.py:172-179）と Desktop outbox（server.py:163-170）の両方を「status, tasks, decisions, memory and workflows」に直す。ツール名は足さない。RO_ALLOWLIST はどちらのモードでも登録されるので（server.py:247-253）、pm_decision_query は両方のモードに出る。
 - PMSERV-241 / 247 で揃える本格的な文面には手を付けない。
 
@@ -421,6 +434,8 @@ def pm_decision_query(
   - 各 ADR の lineage は `read_lineage_raw` と `lineage_view` で読む。
   - 何も作らない。
 - **応答の出口の redact**: 応答を返す直前に、組み立てた dict のすべての文字列（title、本文、consequences、events の text と reason、notes、unknown_keys の名前、未知の status / lifecycle の文字列、declared の値を含む）を `lineage.scrub_view()` で 1 回なめる。件数が 1 以上なら、警告 `decision_text_secrets_redacted` を 1 件だけ付け、件数だけを出す（前例: server.py:2218-2233）。ファイルは変えない。remediation は「鍵の失効と、ファイルの手での修正」。応答の形は許可リストで有界だが、decisions.yaml の本文の文字列には長さの上限が無い。redact_secrets の全パターンは文字数に比例する時間で終わる（空白の無い長い連続でも 2 乗にならない。tests/test_redaction.py が計時する）ので、各文字列は全体を走査してから表示用に切り、走査せずに伏せる上限は設けない。同じ文字列（YAML のエイリアス）は 1 回だけ走査する。
+  - 経緯（S1 のレビュー SEC-01 / SEC-04 / CP-2 / CP-3 / SEM-03）: 初版は、空白の無い 4,096 字を超える連続を走査せずに `<REDACTED:unscanned>` で伏せていた（2 乗の時間がかかるパターンを避けるため）。これは日本語の長い段落を丸ごと隠して「秘密らしき文字列があった」と警告し、連続の末尾に付いた `password` や `Bearer` のキーワードを連続ごと消すので、その後ろの値がどのパターンにも合わずに応答に出た。全パターンを線形時間にして（先頭が無制限の文字クラスのパターンは、連続の先頭からだけ試す）、伏せる上限を消した。
+  - **秘密鍵**（S1 のレビュー SEC-02）: redact のパターン集（catalog）を v3 に上げた。PEM・OpenSSH・PGP の秘密鍵は、BEGIN 行の後に鍵の本体（base64 の 40 字の連続）があれば、BEGIN 行・armor ヘッダ・本体・END 行をブロックごと除く（長さを問わない。JSON の `\n` で行を区切った鍵も含む）。本体が無い BEGIN 行（文章の中で行の名前を挙げただけのもの）は、v2 と同じく BEGIN 行だけを除く。v2 は BEGIN 行しか除かず、鍵の本体が lineage にも応答にも残るのに、警告は「除いた」と言っていた。catalog は pm_redact_draft と pm_memory_ingest と共有なので、この変更はそちらにも効く（CHANGELOG に書く）。
   - 未知の status と lifecycle の文字列は 100 字で切る。
 
 **action="list"**
@@ -445,7 +460,8 @@ def pm_decision_query(
 - **行は lineage の events を作らない**（レビュー SEC-04 (b)）: list は全 ADR の lineage を読む（絞り込み・matched・警告がすべての ADR に掛かるため）が、view は `include_events=False` で作り、events・declared_later・未知のキーを組み立てない（行はそのどれも見せず、作れば表示する全文を redact する費用がかかる）。読む費用は YAML の解析だけになる。PMSERV-225 のガードの `effective_lifecycle` も同じ軽い view を使う。
 - **申告は申告として示す**（レビュー SEC-06）: 行の origin は `declared_origin` という名前で返し、get と同じ `notice` を list の応答にも付ける。
 - `lifecycle="proposed"` を「未確認の一覧」とする（ADR-057 の 1）。語彙外の値は `invalid_lifecycle` のエラーの dict で返す。
-- 食い違い・読めない lineage・未知の status（既存の `decision_status_unknown` を使う）・重複・anchor の不一致・片側だけの関係は、code ごとに 1 件の警告にまとめ、対象の id を並べる（50 件まで。それを超えたら件数）。
+- 食い違い・読めない lineage・未知の status（既存の `decision_status_unknown` を使う）・date キーの無い ADR（info の `decision_date_not_recorded`。§2.2）・重複・anchor の不一致・片側だけの関係は、code ごとに 1 件の警告にまとめ、対象の id を並べる（50 件まで。それを超えたら件数）。get も同じ code を対象の ADR について返す。
+- date キーの無い ADR は、行でも get でも `date` を null で返す（モデルの既定値の今日の日付は、決めた日ではなく毎日変わるため。S1 のレビュー SEM-08）。
 
 **action="get"**（decision_id は必須。無ければ `decision_id_required` のエラーの dict）
 
@@ -487,7 +503,7 @@ def pm_decision_query(
   - `model_dump(mode="json")` は使わない。S0 は未知キーを safe_load のオブジェクトのまま保持していて（storage.py:176-190）、bytes、エイリアス、秘密情報を含みうるためである。
 - **該当なし**: `{"status": "error", "code": "decision_not_found", ...}` を返す。同じ id が複数ある時は、最初の 1 件の本文を返し、lineage は帰属させず（derived）、警告 `decision_id_duplicate` に件数を出す。
 - `action="update"` などを渡された時は、`invalid_action` のエラーの dict で拒否する（前例: server.py:3926-3931）。
-- **docstring の案**:
+- **docstring**（実装と同じ文面）:
 
 ```
 Read ADRs and their lineage without changing anything.
@@ -525,8 +541,8 @@ def pm_update_decision(
     evaluation: str | None = None,
     evaluation_kind: str = "other",                      # test | ai_review | outcome | other
     note: str | None = None,
-    origin: str | None = None,          # Q2 で承認された場合だけ。unknown の時に ai_auto だけを入れられる
-    recorded_timing: str | None = None, # Q2 で承認された場合だけ。unknown の時だけ入れられる
+    origin: str | None = None,          # unknown の時に ai_auto だけを入れられる（ADR-059 の 2）
+    recorded_timing: str | None = None, # unknown の時だけ入れられる（ADR-059 の 2）
     project_path: str | None = None,
 ) -> dict:
 ```
@@ -562,19 +578,21 @@ def pm_update_decision(
 1. lifecycle が superseded なら、superseded_by が 1 件以上ある。
 2. superseded_by があるのは、lifecycle が superseded か reverted の時だけ。superseded から adopted / deprecated に移す時は、同じ呼び出しで remove_links により外す。
 3. links の対象は id の正規表現に合い（`invalid_link_target`）、decisions.yaml に実在し（`link_target_not_found`）、自分自身ではなく（`self_link`）、重複せず、1 種類につき 50 件まで（`too_many_links`）。
+   - add_links / remove_links の引数も、1 種類につき 50 件までにする。リストの長さは、要素を見る前に、ロックを取る前に検査する（`too_many_links`）。重複の除去は線形時間で行う。初版は引数の長さに上限が無く、2 乗の重複除去を両方のロックを持ったまま走らせていた（S1 のレビュー SEC-11 / CP-1）。
+   - 既にある対象の add と、無い対象の remove は、エラーにせず読み飛ばす（再実行しても同じ結果になる）。読み飛ばしたことは応答に出さない（S1 のレビュー SEM-12 の改善候補）。remove_links は、対象が無くても reason を求める（状態に依らない規則）。
 4. reason は、lifecycle を別の値に変える時、remove_links、申告の後付けの時に必須（`reason_required`）。
 5. reason / note / evaluation は各 4,000 字まで（`text_too_long`）。保存の前に `lineage.scrub_text()`（redact_secrets）を通す。
 
 - **不変条件 1・2 を検査するのは、その呼び出しが変えた部分だけ**: lifecycle を別の値に変えた時と、superseded_by を足すか外した時だけ検査する。note・evaluation・amends・supersedes だけの呼び出しは、既存の状態が条件を満たさなくても拒否しない（`decision_lineage_superseded_without_successor` を info で返す）。後継の無い superseded の既存 ADR に、lineage_started を作って note や amends を書けるようにするためである。不変条件 3〜5 は、呼び出しが渡した値に常に掛ける。
-- **申告の後付け**（Q2 で承認された場合）: origin は、現在の値が unknown の時に `ai_auto` だけを入れられる。`human` と `ai_proposed_human_decided` は `declared_backfill_value_not_allowed` で拒否する。人間が関わったという主張を、後から AI が付けられないようにするためである（ADR-056「人間による確認を設定する引数は作らない」「推測した情報は保存しない」）。recorded_timing は unknown の時だけ、before_impl / during_impl / post_hoc を入れられる。既に unknown 以外なら `declared_already_set`。
+- **申告の後付け**（ADR-059 の 2）: origin は、現在の値が unknown の時に `ai_auto` だけを入れられる。`human` と `ai_proposed_human_decided` は `declared_backfill_value_not_allowed` で拒否する。人間が関わったという主張を、後から AI が付けられないようにするためである（ADR-056「人間による確認を設定する引数は作らない」「推測した情報は保存しない」）。recorded_timing は unknown の時だけ、before_impl / during_impl / post_hoc を入れられる。既に unknown 以外なら `declared_already_set`。
 
 **処理**（§5.2 の複合関数の中）:
 
-1. lineage が無ければ、`lineage_started` の event とともに作る（recorded_at は null、declared はすべて unknown、anchor は現在の ADR から）。
-2. 申告の後付け → links → lifecycle → evaluation → note の順に変更を当て、event を足す。
+1. lineage が無ければ、`lineage_started` の event とともに作る（recorded_at は null、declared はすべて unknown、anchor は現在の ADR から）。ただし、この呼び出しで足す event が他に 1 件も無い時（対角の指定だけ、無い対象の remove_links だけなど）は、lineage を作らず、`.pm/decision_lineage/` も作らずに `unchanged` を返す。
+2. 申告の後付け → links → lifecycle → evaluation → note の順に変更を当てて検査し、event を足す。event の並びは §2.4 の表の順（lifecycle, link, declared, evaluation, note, status_reprojected）で、当てた順とは違う。reason は §2.4 の reason の規則で 1 件にだけ置く。
 3. status を決める（§3.3 の 4）。呼び出しの前から食い違いがあり lifecycle を明示していなければ、status は変えない。
 4. status を変える時は、新しい値を入れた ADR に `_require_known_status`（storage.py:426-435）を明示的に掛ける。`_save_decisions`（storage.py:403-410）は `_with_sibling_keys` しか通らず、この検査をしないためである。外れたら何も書かずに PmServerError にする（`project_status` が全関数なので通常は起きない。テストでは `project_status` を壊すモンキーパッチで拒否を確かめる）。
-5. lineage を保存する（直列化した大きさを先に確かめる。§2.6 の 4）。
+5. lineage を保存する（上限つきで直列化した大きさを先に確かめる。note か evaluation を足す呼び出しは `MAX_APPEND_BYTES` まで。§2.6 の 4）。
 6. status が変わっていれば decisions.yaml を保存する。ADR の本文には触れない。
 
 **戻り値**
@@ -590,15 +608,21 @@ def pm_update_decision(
     "decision_status": {"from": "accepted", "to": "superseded"}
   },
   "links": {"supersedes": [], "superseded_by": ["ADR-047"], "amends": []},
-  "events_added": ["lineage_started", "link", "lifecycle"],
-  "warnings": [{"level": "info", "code": "decision_lineage_started", "message": "…"}]
+  "events_added": ["lineage_started", "lifecycle", "link"],
+  "warnings": [{"level": "info", "code": "decision_lineage_started", "message": "…"},
+               {"level": "info", "code": "decision_lifecycle_changed", "message": "…"},
+               {"level": "info", "code": "decision_lineage_link_asymmetric", "message": "…"}],
+  "next": "ADR-047 does not list ADR-007 in supersedes. If it replaces ADR-007, call pm_update_decision on ADR-047 with add_links supersedes=[ADR-007]."
 }
 ```
 
 - `lifecycle` と `decision_status` は、pm_add_decision と pm_decision_query と同じく現在の値の文字列で返す。変化は `changes` にまとめ、変わったものだけを入れる。
 - 何も変わらない呼び出しは `"status": "unchanged"` を返す（対角で食い違いも無い場合など）。
 - 前例: 遷移の結果を追加のキーで返す形は pm_update_task（server.py:960-971）。
-- 他の ADR の lineage は書かない。add_links で supersedes を付けた時は、`next` に「相手の ADR の lifecycle と superseded_by は変わっていない。必要なら pm_update_decision で superseded にし、superseded_by を足す」という案内を返し、info の `decision_lineage_link_asymmetric` を付ける（前例: pm_draft_content の `next`、server.py:3072）。
+- 他の ADR の lineage は書かない。add_links で supersedes か superseded_by を付けて、相手の ADR の lineage に逆向きの記録（supersedes には superseded_by、superseded_by には supersedes）が無い時は、`next` で案内し、info の `decision_lineage_link_asymmetric` を付ける（前例: pm_draft_content の `next`、server.py:3072）。
+  - supersedes を付けた時の案内: 相手の ADR の lifecycle と superseded_by は変わっていない。置き換えるなら、相手に pm_update_decision で lifecycle=superseded と superseded_by を付ける。
+  - superseded_by を付けた時の案内: 相手の ADR の supersedes にこの ADR が無い。相手がこの ADR を置き換えるなら、相手に pm_update_decision で supersedes を足す（上の例）。
+  - 逆向きの記録が既にある時と、この呼び出しで supersedes / superseded_by が新しく付かなかった時（既にあるリンクの add や amends だけの時を含む）は、`next` のキーを返さない。
 
 **warnings**（v15 に従い、状態の変化をユーザーに伝えられるようにする）
 
@@ -609,12 +633,12 @@ def pm_update_decision(
 | decision_lineage_anchor_missing | info | anchor の無い lineage に、現在の ADR の anchor を付け直した |
 | decision_status_mismatch | warning | 呼び出しの前から食い違いがあり、lifecycle を明示していないので status を変えなかった。両方の値と、2 つの選択肢を remediation に書く（「どちらが正しいかをユーザーに確認する」） |
 | decision_status_mismatch_resolved | warning | 呼び出しの前から食い違いがあり、lifecycle の明示により lineage に合わせて書き直した |
-| decision_status_not_projected | warning | lineage は書けたが decisions.yaml の書き込みに失敗した。remediation は「同じ lifecycle を指定して再実行すると射影し直す」 |
+| decision_status_not_projected | warning | lineage は書けたが decisions.yaml の書き込みに失敗した。remediation は「同じ lifecycle を指定して再実行すると射影し直す」。この時は `decision_status_mismatch_resolved` を返さず、`changes` から decision_status を外す |
 | decision_lineage_secrets_redacted | warning | reason / note / evaluation から秘密らしき文字列を除いた。件数だけを出す |
 | decision_lineage_superseded_without_successor | info | 後継の無い superseded のまま、他の変更だけを書いた |
 | decision_lineage_link_asymmetric | info | この呼び出しで、相手側に逆向きの記録が無い supersedes / superseded_by を作った |
 
-**docstring の案**:
+**docstring**（実装と同じ文面）:
 
 ```
 Change an ADR's lifecycle, links or follow-up record. The ADR's text is never changed.
@@ -643,8 +667,6 @@ origin / recorded_timing: fill a value that is still unknown (origin accepts
 only ai_auto). Fill only from a record or the user's statement, never inferred.
 ```
 
-（Q2 で後付けを採らない場合は、最後の段落と 2 つの引数を消す。）
-
 ### 4.4 警告とエラーの code の一覧
 
 接頭辞は、ADR 単位の状態を `decision_*`、lineage ファイルの状態を `decision_lineage_*`、引数の検証を `invalid_*`（既存の `invalid_signal_type` などに合わせる）、パイプラインのガードを `draft_source_decision_*` にそろえる。既存の `decisions_yaml_unreadable` と `decision_status_unknown`（server.py:1044、1057）は再利用する。
@@ -655,6 +677,7 @@ only ai_auto). Fill only from a record or the user's statement, never inferred.
 |---|---|---|---|
 | decisions_yaml_unreadable | warning | 225 では `draft_source_decision_unchecked` に置き換える | （query ではエラー。下の表） |
 | decision_status_unknown | warning | query（list / get） | ADR の status が 4 値の外 |
+| decision_date_not_recorded | info | query（list / get） | ADR に date キーが無い。`date` は null で返す（§2.2、§4.2） |
 | decision_status_mismatch | warning | query、update | §3.3 の 3・4 |
 | decision_status_mismatch_resolved | warning | update | §3.3 の 4 |
 | decision_status_not_projected | warning | update | §5.3 |
@@ -701,12 +724,13 @@ only ai_auto). Fill only from a record or the user's statement, never inferred.
 | decision_status_unknown | update | 遷移元が導けない |
 | invalid_lifecycle | query、update | 語彙外の値 |
 | transition_not_allowed | update | 遷移表に無い（`allowed_to` を添える） |
-| invalid_link_type / invalid_link_target / link_target_not_found / self_link / too_many_links | update | 不変条件 3 |
+| invalid_link_type / invalid_link_target / link_target_not_found / self_link / too_many_links | update | 不変条件 3。too_many_links は、引数の 1 種類が 50 件を超える時（ロックの前）と、変更後の links が 50 件を超える時 |
 | superseded_by_required / superseded_by_not_allowed | update | 不変条件 1・2 |
 | reason_required / text_too_long | update | 不変条件 4・5 |
 | declared_already_set / declared_backfill_value_not_allowed | update | 申告の後付け |
-| decision_lineage_unreadable / decision_lineage_schema_unsupported / decision_lineage_lifecycle_unknown / decision_lineage_anchor_mismatch | update | §2.6 の書き込みの拒否 |
-| decision_lineage_too_large | update | 変更後の lineage が 256 KiB を超える |
+| decision_lineage_unreadable | add | `.pm/decision_lineage` がシンボリックリンク。decisions.yaml にも何も書かない（§4.1、§5.1） |
+| decision_lineage_unreadable / decision_lineage_schema_unsupported / decision_lineage_lifecycle_unknown / decision_lineage_anchor_mismatch | update | §2.6 の書き込みの拒否。decision_lineage_unreadable は、入れ子が 64 段を超える時と、書き戻しの直列化が例外になった時にも返す。anchor_mismatch の message は回復手順を書く（§2.2） |
+| decision_lineage_too_large | update | 変更後の lineage が 256 KiB を超える。note か evaluation を足す呼び出しは、`MAX_APPEND_BYTES`（240 KiB）を超える時（§2.6 の 4） |
 
 ---
 
@@ -716,20 +740,25 @@ only ai_auto). Fill only from a record or the user's statement, never inferred.
 
 ```python
 with _yaml_transaction(pm_path, "decisions.yaml"):
-    decisions = load_decisions(pm_path)
+    try:
+        decisions = load_decisions(pm_path)
+    except Exception as exc:                      # 型名と YAML の行・列だけを返す（§4 の共通規約）
+        return DecisionWrite(error="decisions_yaml_unreadable", error_detail=error_summary(exc))
     number = _next_number_from_ids(chain(ids(decisions), _lineage_stems(pm_path)))  # stem は DECISION_ID_RE に合うものだけ
     if number > 999_999: return DecisionWrite(error="decision_id_exhausted")
     decision = build(number)                      # server の closure（id 生成はロックの中）
     _require_known_status(decision); _reject_duplicate_id(...)
+    decision.title = stored_title(decision.title)  # YAML の読み戻しと同じ形にする（§2.2）
     with _yaml_transaction(pm_path, f"decision_lineage-{decision.id}"):   # 書く前に取る
+        lineage_path = _lineage_write_target(pm_path, decision.id)   # decision_lineage がリンクなら LineageWriteRefused（まだ何も書いていない）
         decisions.append(decision); _save_decisions(pm_path, decisions)   # ① decisions
-        if lineage_path.exists() or lineage_path.is_symlink():
-            lineage_state = "preexisting"                                  # 上書きしない
-        else:
-            try:
+        try:                                       # exists() も EACCES で OSError になりうる
+            if lineage_path.exists() or lineage_path.is_symlink():
+                lineage_state = "preexisting"                              # 上書きしない
+            else:
                 _save_yaml(lineage_path, new_lineage_doc(decision, declared, _utc_now()), header)  # ② lineage
-            except OSError:
-                lineage_state = "not_written"
+        except OSError:
+            lineage_state = "not_written"
 ```
 
 - **ロックの順序**: decisions → lineage(ADR-N)（ADR-056「保存」）。
@@ -750,11 +779,12 @@ with _yaml_transaction(pm_path, "decisions.yaml"):
     if len(matches) > 1: return error("decision_id_duplicate")       # 何も書かない
     adr = matches[0]
     with _yaml_transaction(pm_path, f"decision_lineage-{decision_id}"):
-        raw = _read_lineage_for_write(path, adr)   # 無ければ None。リンク・大きさ・形・schema・lifecycle・anchor を検査し、外れたら LineageWriteRefused
-        if raw is None: raw = started_doc(adr, _utc_now())
-        outcome = apply_change(raw, adr, change, known_ids, _utc_now())   # 純関数。エラーか、(new_raw, events, new_status) を返す
+        raw = _read_lineage_for_write(path, adr)   # 無ければ None。リンク・大きさ・入れ子・形・schema・lifecycle・anchor を検査し、外れたら LineageWriteRefused
+        outcome = apply_change(raw, adr, change, known_ids, _utc_now())   # 純関数。raw が None なら lineage_started の文書から始める。エラーか、(new_raw, events, new_status) を返す
         if outcome.error: return outcome.error
-        if size_of(dump_lineage(outcome.new_raw)) > MAX_LINEAGE_BYTES: return error("decision_lineage_too_large")
+        if not outcome.changed: return unchanged                         # 足す event が無ければ何も書かない（lineage も作らない）
+        text = _dump_lineage_capped(outcome.new_raw, MAX_LINEAGE_BYTES)  # 上限を超えたら None。直列化の例外は decision_lineage_unreadable
+        if size_refusal(text, change): return error("decision_lineage_too_large")   # note / evaluation を足すなら MAX_APPEND_BYTES まで
         if outcome.new_status != adr.status:
             _require_known_status(adr.model_copy(update={"status": outcome.new_status}))   # 書く前に検査
         _save_yaml(path, outcome.new_raw, header)                    # ① lineage（正）
@@ -767,7 +797,8 @@ with _yaml_transaction(pm_path, "decisions.yaml"):
 - 遷移と不変条件の検証は、ロックの中で現在の状態に対して行う。そのため、並行した更新で検証をすり抜けることはない。
 - `apply_change` は lineage.py の純関数にする。ロックも I/O も持たないので、単体でテストできる。「呼び出しの前の食い違い」と「lifecycle の明示」から、§3.3 の 4 に従って new_status を決めるのもこの関数である。
 - 1 回の呼び出しで書く lineage は 1 ファイルだけ（§4.3「他の ADR の lineage は書かない」）。
-- lineage の読み書きは decisions のロックの中で行うので、大きさの上限（256 KiB）が、他の ADR の書き手を待たせる時間の上限にもなる。
+- lineage の読み書きは decisions のロックの中で行う。大きさの上限（256 KiB）と入れ子の上限、上限つきの直列化（§2.6）が抑えるのは、lineage の読み書きがロックの保持時間に上乗せする分である。保持時間の全体は decisions.yaml の大きさにも比例する（全体の解析と書き直し。S1 以前の add_decision_with_next_id から同じ）。status を射影する更新は、起票と同じだけの decisions.yaml の書き直しをする（S1 のレビュー CP-4。初版の「256 KiB が待たせる時間の上限にもなる」は言い過ぎだった）。
+- id は完全一致で照合する（`ADR-010` と `ADR-0010` は別の id）。番号で照合するのは PMSERV-225 のガードだけである（§6.1。S1 のレビュー PP-10）。
 
 ### 5.3 途中で失敗した時の状態と回復
 
@@ -776,13 +807,16 @@ with _yaml_transaction(pm_path, "decisions.yaml"):
 | decisions のロックのタイムアウト | 変化なし | — | 再実行。PM_LOCK_TIMEOUT_S（storage.py:114-131） |
 | 起票: lineage のロックのタイムアウト | 変化なし（書く前に取るため） | — | 再実行 |
 | 起票: ①の後、②の前にプロセスが落ちた／②が OSError | ADR はあるが lineage が無い | derived（proposed → proposed、accepted → adopted）。recorded_at と申告は失われる | プロセスが生きていれば、`decision_lineage_not_written` を返す。後から pm_update_decision を呼ぶと lineage_started として作られる（recorded_at は null のまま。時刻を捏造しない） |
+| 起票: `.pm/decision_lineage` がシンボリックリンク | 変化なし（decisions.yaml を書く前に検査する） | — | `decision_lineage_unreadable` のエラーを返す。リンクを通常のディレクトリに置き換えてから再実行する |
 | 起票: lineage が既にあった | ADR はあるが、lineage は前からあったもののまま | anchor が合わなければ derived と `decision_lineage_anchor_mismatch` | `decision_lineage_preexisting` を返す。既存の lineage を調べ、別の ADR のものなら `decision_lineage/` の外へ手で移す |
 | 更新: ①の後、②の前 | lineage は新しく、status は古い | `decision_status_mismatch`（lineage が正） | 同じ lifecycle を指定して再実行すると、対角の規則で status_reprojected により修復される |
+| 更新: lineage が大きさの上限に近い | 変化なし（直列化した大きさを書く前に確かめる） | — | `decision_lineage_too_large`。note・evaluation を含めずに呼べば、lifecycle・link・declared の変更は余白（§2.6 の 4）に収まることが多い。収まらなければ、古い note と evaluation の event を `.pm/decision_lineage/` の外へ手で移す |
 | 更新: supersedes の関係の 2 つ目の呼び出しをしていない | A.supersedes と B.superseded_by の片側だけがある | `decision_lineage_link_asymmetric` | 相手側の ADR に pm_update_decision を呼ぶ（応答の `next` が案内する） |
 | 書き込み中の SIGKILL | 原子的な置き換えなので、旧か新のどちらか。`tmp*.tmp` が残りうる（utils.py:277-290） | glob は `ADR-*.yaml` で、stem を正規表現で絞るので影響しない | tmp ファイルは手で消す |
 | 孤立した lineage（ADR を手で削除した） | ファイルだけが残る | list には出ない | 新しい書き手は採番で飛ばす（§5.1）。旧版がその番号を使い回した場合は、anchor の不一致として検出する（§2.2）。片付けは手で行う |
 | 旧版が重複した id を作った | 同じ id の ADR が 2 件 | 両方 derived と `decision_id_duplicate` | 更新は拒否される。どちらかの id を手で直す |
 
+- 既知の限界: 正常な更新の途中でも、ロックを持たない読み手（pm_decision_query、PMSERV-225 のガード）には、①と②の間に「lineage は新しく、status は古い」状態が見え、`decision_status_mismatch` が一時的に出る。この時間窓は decisions.yaml の書き直しにかかる時間で、台帳の大きさに比例する。食い違いを見たら、もう一度読んで確かめてからユーザーに尋ねる（S1 のレビュー CP-7。窓を縮める修正は S1 では行っていない）。
 - 既知の限界: git で decisions.yaml だけを戻すと、lineage と ADR の対応がずれうる。title か date が変わっていれば anchor で検出できる。同じ title と date のまま status だけが戻った場合は、`decision_status_mismatch` として出る。
 - 旧版の書き手（pipx 0.16.0、Desktop 0.15.0、plugin の `uvx pm-server@0.16.0`）は decisions.yaml のロックだけを取る（同じ `.pm/.locks/decisions.lock`）。lineage を知らないので触れることもない。status は 4 値の範囲で書き戻すので、射影も保たれる（D3）。ただし、旧版は採番をロックの外で行い、孤立した lineage の番号を飛ばさないので、版が混在する間は §3.3 の 5 と §2.2 の anchor で検出する。CHANGELOG の Upgrade notes に「同じ .pm を使うホストは、plugin の固定版と Desktop の mcpb も含めて、同時に上げる」と書く。
 - fsync は無い（事実シート storage §3）。電源断に対する耐久性は既存の台帳と同じ水準で、S1 では変えない。
@@ -815,6 +849,9 @@ with _yaml_transaction(pm_path, "decisions.yaml"):
   - どの応答でも、警告が 1 件以上ある時だけ `warnings` キーを足す。警告の無い応答は今と同じ形のまま（tests/test_content_golden.py と、`page == pm_x_drafts_pending(...)` の比較: tests/test_drafts_tools.py の test_content_names_share_existing_drafts）。
   - skipped と debounced の経路（server.py:3022-3056）は変えない。この経路では下書きを作らないからである。既存のテストは `warnings[0]["reason"]` を見ている（tests/test_drafts_tools.py:114、138）。
   - saved・redacted・pending の応答にはもともと warnings が無いので、1 つの応答の中で `reason` 形と `_build_warning` 形が混ざることはない。形の統一は PMSERV-205 に残す。
+- **下書きの状態ごとの扱い**（S1 のレビュー SEM-06）:
+  - pm_drafts_pending / pm_x_drafts_pending は、rejected の下書きを検査しない。公開されないので、警告しても取る行動が無いためである。
+  - posted の下書きは検査する（公開済みの投稿が、採択されていない ADR を決まったことのように書いているかもしれない）。ただし posted の下書きは pm_reject_draft で取り下げられない（DraftStore の mark_rejected は draft と redacted の行だけを受け付ける）ので、remediation は pm_reject_draft を案内せず、「公開した投稿を手で確かめ、必要なら直す（ADR の lifecycle は pm_decision_query で見る）」にする。`draft_source_decision_missing` と `draft_source_decision_unchecked` の remediation も posted の下書きでは同じ考え方で書き分ける。
 - **拒否はしない**（既定は警告。PMSERV-225 の「既定は警告にする」）。force の意味（デバウンスだけを越える: server.py:2989）も変えない。
 - **任意の追加**: content-pipeline.yaml の extract ステップ（templates/workflows/content-pipeline.yaml:23-32）に、"For an ADR, use one whose lifecycle is adopted (pm_decision_query shows it), and list every ADR the draft relies on in source_refs." の 1 文を足す。
 - **ゴールデンテスト**: tests/test_content_golden.py:101-108 は decisions.yaml の無いプロジェクトで ADR-024 を参照する。info の not_found が付くだけで、`draft_id` だけを使っているテストは通る。
@@ -862,7 +899,7 @@ when the user says so.
 
 **discovery.yaml の confirm と brainstorming.yaml の record**
 
-- どちらも `tool_hint: pm_add_decision` と `gate: user_approval` を同じステップに持ち、ADR は承認の前に記録される（templates/workflows/discovery.yaml:65-77、brainstorming.yaml:161-180）。development だけを直すと、Q1 が (a) なら ADR-053 型の経路（確認前に accepted）がここに残り、(b) なら承認されても adopted にする案内が無く、proposed のまま溜まる。
+- どちらも `tool_hint: pm_add_decision` と `gate: user_approval` を同じステップに持ち、ADR は承認の前に記録される（templates/workflows/discovery.yaml:65-77、brainstorming.yaml:161-180）。development だけを直すと、既定が proposed になった（ADR-059 の 1）ので、承認されても adopted にする案内が無く、proposed のまま溜まる（既定が accepted のままだったら、ADR-053 型の経路、つまり確認前の accepted がここに残っていた）。
 - 両方の description に次を足す。tool_hint・gate・id・required_artifacts は変えない（tests/test_workflow.py:282-293 が record の位置と gate を固定している）。
 
 ```
@@ -890,7 +927,7 @@ adopted with pm_update_decision, giving the approval as the reason.
 
 ### 7.1 手順
 
-1. **前提**: 224 までが入った pmlens で行う。いつ本番に適用するかは Q5。
+1. **前提**: 224 までが入った pmlens で行う。本番への適用は、PR のマージで lineage ファイルの形式が確定してからにする（ADR-059 の 4。§10 の Q5）。
 2. **リハーサル**: `.pm` を scratch にコピーし（PMSERV-220 の方式）、下の計画表どおりに呼び出す。各 ADR について、pm_decision_query の結果と decisions.yaml の status の差分を確かめる。
 3. **ユーザーの承認**: 計画表を 1 行ずつ示し、行ごとに承認を得る（まとめて承認されても、行ごとの記録は残す）。重複の組は、どちらを残すかをユーザーが決める。
 4. **適用**: 本番の `.pm` に適用する前に、decisions.yaml と decision_lineage/ のバックアップを取る（.pm は git 管理外: .gitignore:60）。承認された行だけを pm_update_decision で適用する。
@@ -904,7 +941,7 @@ adopted with pm_update_decision, giving the approval as the reason.
 
 | ADR | 呼び出し（要点） | 根拠 |
 |---|---|---|
-| ADR-053 | (Q2 承認時) origin=ai_auto、recorded_timing=before_impl を後付け（どちらも後付けできる値の範囲内）。note「2026-09-17 に WF-042 の decision ステップで未確認のまま accepted として記録 → 2026-10-04 にユーザーが事後に承認（PMSERV-215）。実装は v0.16.0 で公開済み」。lifecycle は adopted のまま | PMSERV-215 の notes、PMSERV-227 の notes |
+| ADR-053 | origin=ai_auto、recorded_timing=before_impl を後付け（どちらも後付けできる値の範囲内）。note「2026-09-17 に WF-042 の decision ステップで未確認のまま accepted として記録 → 2026-10-04 にユーザーが事後に承認（PMSERV-215）。実装は v0.16.0 で公開済み」。lifecycle は adopted のまま | PMSERV-215 の notes、PMSERV-227 の notes |
 | ADR-056 | evaluation(outcome)「未決 (1) は ADR-057、(3) は ADR-058 で決定。(4) は ADR-053 の事後承認（PMSERV-215）で解消。(2) は未決（PMSERV-239）」 | PMSERV-227 の notes |
 | ADR-057 | add_links amends=[ADR-056] | ADR-057 の決定 5 |
 | ADR-058 | add_links amends=[ADR-056] | ADR-058 の決定 4（.pm/decisions.yaml:3331） |
@@ -919,7 +956,7 @@ adopted with pm_update_decision, giving the approval as the reason.
 
 - 重複を表す専用の link（duplicate_of など）は足さない。ADR-056 の links は supersedes / amends に限られているため、superseded と reason で表す。
 - ADR-053 の履歴は、過去の日付の event を作らずに、note の本文に日付を書いて残す。event の `at` はサーバーが刻む時刻なので、これを捏造しない。
-- Q2 で後付けを採らない場合は、ADR-053 の origin / recorded_timing は unknown のままにし、経緯を note の本文だけに残す。
+- 後付けは ADR-059 の 2 の範囲（origin は ai_auto だけ、どちらも unknown の時だけ）に収まる。「人間が判断した」ことは、origin ではなく、ユーザーの承認による adopted と note で残す（ADR-059 の 3）。
 
 ---
 
@@ -933,9 +970,9 @@ adopted with pm_update_decision, giving the approval as the reason.
 | D2 | lineage の無い ADR が derived / unknown / not_recorded で返る。読んだ後も decisions.yaml のバイトが変わらず、`.locks/` も `decision_lineage/` も作られない。本リポの .pm のコピーで、58 件すべてを例外なく返せる | tests/test_decision_query.py（新設）と、実データでの検証（§9.3） |
 | D3 | lineage を書いた後に、現行の `storage.add_decision`（storage.py:438-446）を呼んでも、0.16.0 と同じ形の書き戻し（extra=ignore のモデルで decisions.yaml を全件書き直す）をしても、lineage のバイトと射影された status が変わらない | tests/test_lineage.py |
 | D7（S1 の分） | 同じ ADR に、N 本の note の追記をスレッドとプロセスから並行して呼ぶと、note の event がちょうど N 件になる（lifecycle の遷移は並行させない。後続が unchanged や transition_not_allowed になり件数が決まらないため）。pm_add_decision を並行して呼んでも、id が一意で、それぞれの lineage の decision_id と anchor が一致する。フィードバック ID の部分は S2 | tests/test_lineage.py（前例は tests/test_concurrent.py） |
-| D8 | (a) 全 `@_tool()` の引数名に `accura|verif|confirm|human|reader_hint|anchor|^mode$` が無い。今は該当 0 件で、`kind` は pm_draft_content / pm_draft_x の 2 件だけ。(b) pm_update_decision の引数集合が §4.3 の一覧と完全に一致する（足す時は意図してテストを直す）。(c) `decision_kind` が pm_add_decision にしか無い。(d)（Q2 で後付けを採る場合）`origin="human"` と `"ai_proposed_human_decided"` の後付けが `declared_backfill_value_not_allowed` で拒否され、ファイルのバイトが変わらない。**D8 が検査するのは引数の名前と後付けの値だけで、意味の上で同じ経路（lifecycle=adopted を AI が呼ぶこと）は検出しない**（§8.4） | tests/test_decision_update.py（新設） |
+| D8 | (a) 全 `@_tool()` の引数名に `accura|verif|confirm|human|reader_hint|anchor|^mode$` が無い。今は該当 0 件で、`kind` は pm_draft_content / pm_draft_x の 2 件だけ。(b) pm_update_decision の引数集合が §4.3 の一覧と完全に一致する（足す時は意図してテストを直す）。(c) `decision_kind` が pm_add_decision にしか無い。(d) `origin="human"` と `"ai_proposed_human_decided"` の後付けが `declared_backfill_value_not_allowed` で拒否され、ファイルのバイトが変わらない。**D8 が検査するのは引数の名前と後付けの値だけで、意味の上で同じ経路（AI が pm_update_decision に lifecycle=adopted を、pm_add_decision に status=accepted や origin=human / ai_proposed_human_decided を渡すこと）は検出しない**（§8.4） | tests/test_decision_update.py（新設） |
 | D9 | PM_LENS=1 で pm_decision_query が登録され、pm_update_decision は登録されない。T6 の引数付きの呼び出しで書き込みが 0 件。stdio の wire でも同じ | tests/test_lens_mode.py（自動）、tests/test_lens_invariant.py、tests/test_launch_surfaces.py |
-| D11（S1 の分） | reason / note / evaluation に入れた偽の AWS キーが、lineage ファイルにも応答にも残らない。件数だけが警告に出る。pm_decision_query の出口の redact は、title・未知のキー名・未知の status・events の text に入れた秘密でも効く。壊れた decisions.yaml（引用符の閉じていない行に秘密）と、ValidationError（title が list で中に秘密）で、エラーの dict に秘密の値が出ない | tests/test_decision_update.py、test_decision_query.py |
+| D11（S1 の分） | reason / note / evaluation に入れた偽の AWS キーが、lineage ファイルにも応答にも残らない。件数だけが警告に出る。pm_decision_query の出口の redact は、title・未知のキー名・未知の status・events の text に入れた秘密でも効く。秘密鍵は本体ごと残らない（§4.2）。壊れた decisions.yaml（引用符の閉じていない行に秘密）と、ValidationError（title が list で中に秘密）で、pm_decision_query・pm_update_decision・pm_add_decision のエラーの dict に秘密の値が出ない | tests/test_decision_update.py、test_decision_query.py、test_server.py、test_redaction.py |
 
 ### 8.2 S0 のガードが求める追加
 
@@ -982,6 +1019,7 @@ adopted with pm_update_decision, giving the approval as the reason.
   - pm_draft_content / pm_drafts_pending / pm_redact_draft の応答は、警告が無ければ今と同じ形のまま。
 - **予約ディレクトリ**:
   - prompt_pack の `validate_prompt_pack_args`（prompt_pack.py:448-467）に、`.pm` の要素の直後が `decision_lineage` のパスを拒否する照合を足す（大文字小文字は区別しない）。書いたままのパス（expanduser・絶対パス化・`..` の畳み込み）と、resolve したパスの両方を見る。前者はシンボリックリンクの `.pm`、後者はシンボリックリンクの親ディレクトリを塞ぐ。
+  - 既存の予約ファイル名（tasks.yaml・decisions.yaml など 8 つ）の照合も、大文字小文字を区別しないように変えた（`casefold`）。macOS（APFS）と Windows のファイルシステムは既定で大文字小文字を区別しないので、`.pm/TASKS.yaml` は tasks.yaml そのものを指す。大文字小文字を区別するファイルシステムでは、害の無い名前もいくつか拒否する。0.16.0 からの動作の変更なので CHANGELOG に書く（S1 のレビュー SEM-13）。照合するのは書いたままのパスの basename だけで、どのディレクトリにあっても予約名なら拒否し、resolve したパスは見ない（0.16.0 と同じ。変えたのは大文字小文字の扱いだけ）。
   - パスのどこかに `decision_lineage` があれば拒否する初版の照合は、`~/work/decision_lineage/docs/pack.md` のような pmlens と無関係な場所まで拒否していた（レビュー PP-11）。`.pm` の直後に限る。
   - `validate_prompt_pack_args` はプロジェクトを解決する前に呼ばれる（PMSERV-157）ので、`run_prompt_pack` が書き込む直前に、解決したプロジェクトの `.pm/decision_lineage` の中かを resolve したパスどうしで確かめ直す（`.pm` が別名のディレクトリへのシンボリックリンクでも塞ぐ）。
   - 今の照合は basename だけを見ているため（:459）、`.pm/decision_lineage/ADR-001.yaml` への書き込みを止められない。
@@ -997,8 +1035,8 @@ ADR-056 は「保証の範囲は MCP / CLI にその経路を作らないまで�
 | 区分 | 内容 | 担保するもの |
 |---|---|---|
 | 保証 | Lens（PM_LENS=1）に書き込み系のツールが登録されず、Lens の読み取りは何も書かない | D9、T6 |
-| 保証 | 正確性の確認・分類の変更・人間による確認を設定する引数が、どのツールにも無い（名前による検査） | D8 (a)〜(c) |
-| 保証 | 後から付けられる origin は ai_auto だけ（Q2 で後付けを採る場合） | D8 (d) |
+| 保証 | 正確性の確認・分類の変更・人間による確認を設定する引数が、どのツールにも無い（引数名による検査。AI が pm_update_decision に lifecycle=adopted を、pm_add_decision に status=accepted や origin=human / ai_proposed_human_decided を渡すことは検出しない。それらは下の規約と観測で扱う） | D8 (a)〜(c) |
+| 保証 | 後から付けられる origin は ai_auto だけ | D8 (d) |
 | 保証 | 遷移表に無い遷移はツールではできない | test_decision_update の 36 通り |
 | 保証 | ツールは ADR の本文を書き換えない。射影で変わるのは対象の `status:` の 1 行だけ | バイト差分のテスト（§9.1） |
 | 保証 | decisions.yaml の status は 4 値に収まる | D1 |
@@ -1050,7 +1088,7 @@ ADR-056 は「保証の範囲は MCP / CLI にその経路を作らないまで�
 
 1. **Docker**: `make dev-build`（Dockerfile に変更が無ければ省く）→ `make dev-test` → `make dev-lint`。使い捨ての HOME（CONTRIBUTING.md:44-51）で行う。
 2. **コンテナの中での MCP の実地検証**: `make dev-shell` の中で、使い捨ての HOME にテストプロジェクトを作る（pmlens init）。`python -m pmlens serve` に stdio の JSON-RPC で順に呼び出す（tests/test_launch_surfaces.py の `_mcp_session` と同じ方式）。
-   - pm_add_decision(status 省略) → Q1 で決めた既定値で入ること
+   - pm_add_decision(status 省略) → proposed で入ること（Q1 の決定）
    - pm_decision_query(list, lifecycle=proposed)
    - pm_update_decision(adopted, reason) → status が accepted になり、`decision_lifecycle_changed` が返ること
    - pm_update_decision で superseded と superseded_by を同時に指定し、相手側に supersedes を足す前後で `decision_lineage_link_asymmetric` が出て消えること
@@ -1066,9 +1104,11 @@ ADR-056 は「保証の範囲は MCP / CLI にその経路を作らないまで�
 
 ---
 
-## 10. ユーザーに確認する論点（推奨つき）
+## 10. ユーザーに確認した論点（決定の記録）
 
-**Q1. pm_add_decision の status の既定値**
+Q1・Q2 は 2026-10-05 にユーザーが承認し、ADR-059 に記録した。Q5 は ADR-059 の決定 4 に書かれている。Q3・Q4 は既存の決定から導いた。以下は、決める前に示した選択肢と推奨を、判断の経緯として残したものである。
+
+**Q1. pm_add_decision の status の既定値**（決定: (b)。ADR-059 の 1）
 
 - 選択肢:
   - (a) accepted のまま（PMSERV-222 の記述どおり。後方互換）
@@ -1083,14 +1123,15 @@ ADR-056 は「保証の範囲は MCP / CLI にその経路を作らないまで�
   - ADR-057 は「未確認の proposed の ADR が溜まりうる。一覧で見せる仕組み（PMSERV-223 / 237）が前提になる」としている。S1 で 223 は入るが、237（ダッシュボード）と 236（recall・prompt pack）は S3 である。その間、prompt pack は「関連 ADR を確認: ADR-NNN — title」の形で状態を出さず（prompt_pack.py:150-152）、recall の決定層も `decision_id` と記憶の本文だけを出す（recall.py:173）。ダッシュボードは status を表示するので proposed は見分けられるが（dashboard_single.html:143）、rejected は deprecated として出る。(b) では proposed の ADR が増えるので、この期間に状態の見えない参照が増える。(a) では、代わりに未確認の accepted が増える。
   - discovery / brainstorming の記録ステップも直す（§6.2）。(a) のままだと、ここで status=proposed を渡し忘れた時に ADR-053 型の記録が残る。
   - (a) の場合、origin=ai_auto だけを渡す呼び出しは `status_conflicts_with_origin` になる（§4.1）。
-  - (b) に依存する箇所は【Q1=b】の印を付け、(a) の文面を並べた（§4.1 の signature・docstring・instructions）。テストの「申告を省いた起票」と §9.3 の実地検証の期待値も、決めた既定値に合わせる。
-- (b) を選んだ場合は、公開インターフェースの既定値の変更として ADR に記録するかを確認し、PMSERV-222 の記述（「既定は accepted のまま」）を更新する。ADR-056 は既定値を決めていない（「status は proposed|accepted」とだけある）ので、ADR-056 自体の改定ではない。
+  - (b) に依存する箇所には【Q1=b】の印を付け、(a) の文面を並べていた（§4.1 の signature・docstring・instructions）。決定の後に (a) の文面と印を消した。テストの「申告を省いた起票」と §9.3 の実地検証の期待値は proposed にした。
+- (b) は公開インターフェースの既定値の変更なので ADR-059 に記録した。PMSERV-222 の記述（「既定は accepted のまま」）は親が更新する（§1.5）。ADR-056 は既定値を決めていない（「status は proposed|accepted」とだけある）ので、ADR-056 自体の改定ではない。
 
-**Q2. 既存 ADR に申告を後付けできるようにするか（PMSERV-227 の ADR-053 に要る）**
+**Q2. 既存 ADR に申告を後付けできるようにするか（PMSERV-227 の ADR-053 に要る）**（決定: 推奨どおり。ADR-059 の 2・3）
 
 - ADR-056 との関係: ADR-056 は「人間による確認を設定する引数は、どのツールにも作らない」「推測した情報は保存しない」としている。origin に human や ai_proposed_human_decided を後から入れられると、「人間が判断した」という印を AI が事後に付ける経路になり、これに当たる。D8 は引数名だけを見るので、`origin` という名前では検出できない。
 - 推奨: 後付けできる値を、origin は `ai_auto` だけ、recorded_timing は before_impl / during_impl / post_hoc に限り、どちらも値が unknown の時に 1 回だけにする。reason を必須にし、event に basis=backfill を残し、応答では `declared_later` として区別して見せる。人の関与を示す値は `declared_backfill_value_not_allowed` で拒否し、D8 (d) で固定する。decision_kind は後付けもできないようにする（ADR-056「分類の変更を設定する引数は作らない」）。docstring に「記録かユーザーの発言があるものだけを入れ、推測しない」と書く。
-- 許さない場合は、ADR-053 の経緯を note の本文だけに残し、declared は unknown のままにする。2 つの引数と D8 (d) を消す。
+- （許さない場合の案: ADR-053 の経緯を note の本文だけに残し、declared は unknown のままにする。2 つの引数と D8 (d) を消す。採らなかった。）
+- ADR-059 の 3 は、「人間が判断した」ことを残す正しい経路を、新しい ADR なら起票時の origin=human、既存の ADR ならユーザーの承認による adopted への遷移と note とし、既存の ADR の origin を human に直すのは人が lineage を手で編集する場合だけとした。
 
 **Q3.（決定済み。参考へ移動）遷移表に「戻す方向」を入れるか**
 
@@ -1100,7 +1141,7 @@ ADR-056 は「保証の範囲は MCP / CLI にその経路を作らないまで�
 
 - PMSERV-225 に「既定は警告にする」とあり、受け入れ条件は signal_type を限定していない。そのため、警告だけ・signal_type を問わない・decisions.yaml に無い ADR は info、とする。
 
-**Q5. PMSERV-227 を本番の .pm に適用する時期**
+**Q5. PMSERV-227 を本番の .pm に適用する時期**（決定: S1 の完成直後にコピーでリハーサルし、PR のマージで lineage ファイルの形式が確定してから、本番に 1 件ずつ承認を得て適用する。ADR-059 の 4）
 
 - 推奨:
   - リハーサルは、S1 が完成した直後に `.pm` のコピーで行う。
@@ -1120,7 +1161,7 @@ ADR-056 は「保証の範囲は MCP / CLI にその経路を作らないまで�
 - anchor（title の SHA-256 と date）で ADR との対応を確かめる（§2.2）。
 - Q3・Q4 は既存の決定から導いた（上）。
 
-Q1・Q2 の答えは ADR-056 の S1 の具体化に当たるので、確定したら ADR として記録するかをユーザーに確認する（v15 の「設計上の意思決定が発生した時」）。
+Q1・Q2 の答えは ADR-056 の S1 の具体化に当たるので、ユーザーの承認を得て ADR-059 として記録した（v15 の「設計上の意思決定が発生した時」）。
 
 ---
 
@@ -1195,3 +1236,51 @@ Q1・Q2 の答えは ADR-056 の S1 の具体化に当たるので、確定し�
 ### 不採用
 
 - 全面的に不採用にした指摘は無い。一部を変えて反映したものは、INV-6（上限を 1 MiB ではなく 256 KiB にした。SEC-7 と統一し、密な YAML の解析時間を抑えるため）、SEC-7（lstat ではなく fd の fstat。T6 ではなく専用のテスト）、TST-5（`replace` と `open` の扱い）、TST-6（dashboard についての記述）である。
+
+---
+
+## 12. 実装後の改訂
+
+実装（c727b6c〜7180461）と、S1 のレビュー（adversarial review。修正は 4ff9f89・561d205・6096fe9 と、この文書を改めた最後のバッチ）の後に、本文を次のように改めた。括弧の中は S1 のレビューの指摘の番号である（SEC-01 のような 2 桁の番号。§11 の SEC-1 などは草案のレビューの番号で、別のもの）。
+
+### 12.1 決定済みの論点
+
+- Q1 は (b)、Q2 は推奨どおりに決まり（ADR-059 の 1〜3）、Q5 は ADR-059 の 4 に書かれた。【Q1=b】の印、(a) の文面、「Q2 で承認された場合」の条件を消し、§10 を決定の記録にした（冒頭、§1.2、§1.5、§2.3、§2.4、§4.1、§4.3、§6.2、§7、§8.1、§8.4、§9.3、§10。SEM-06）。
+
+### 12.2 実装に合わせた記述
+
+- events の並びは §2.4 の表の順（lifecycle, link, declared, evaluation, note, status_reprojected）で、変更を当てる順とは違う。§4.3 の処理 2 と戻り値の例を直し（`events_added` の順と、例の呼び出しが実際に返す 3 つの警告と `next`）、再生する側への注意を足した（SEM-06。§2.4 と §4.3 は計画の時点から食い違っていた）。`next` の案内は supersedes だけでなく superseded_by を付けた時にも出る（§4.3）。戻り値の例は tests/test_docs_decision_lineage.py が実際の応答と突き合わせる。
+- 他に足す event の無い呼び出しは、lineage を作らずに `unchanged` を返す（§4.3 の処理 1。SEM-06）。
+- reason は 1 回の呼び出しにつき、最後の lifecycle / link / declared の event にだけ置く。note・evaluation だけの呼び出しの reason は保存しない（§2.4。DL-S1-02、CP-8）。
+- note と evaluation は 240 KiB（`MAX_APPEND_BYTES`）で止め、残り 16 KiB を lifecycle・link・declared の変更に空ける。remediation は余白を約束しない（§2.6 の 4、§5.3。DL-S1-02、PP-06、SEM-07、CP-8）。
+- 書き戻しの直列化は大きさの上限つきにし、入れ子の深さは読み手と書き手で同じ 64 段までにした（§2.6、§2.7、§4.4。SEC-05、SEC-12）。
+- add_links / remove_links の引数は 1 種類 50 件までで、ロックの前に拒否する。重複の除去は線形時間（§4.3。SEC-11、CP-1）。
+- title は YAML の読み戻しと同じ形で保存し、その形で anchor を取る。anchor の不一致の拒否は回復手順を書く（§2.2。DL-S1-01、PP-05）。
+- date キーの無い ADR は、anchor.date を null にする（計画どおり）。pm_decision_query も `date` を null で返し、info の `decision_date_not_recorded` を付ける（§2.2、§4.2、§4.4。SEM-08）。
+- str でない申告は、読み手と同じく書き手も unknown とみなし、後付けで埋められる（§2.7。DL-S1-08）。
+- redact の全パターンを線形時間にし、走査せずに伏せる `<REDACTED:unscanned>` を廃した。秘密鍵は本体があればブロックごと除く（catalog v3。pm_redact_draft と pm_memory_ingest にも効く）（§4.2。SEC-01、SEC-02、SEC-04、CP-2、CP-3、SEM-03）。
+- pm_add_decision は、decisions.yaml が読めない時に例外の型名と行・列だけを返し、`.pm/decision_lineage` がシンボリックリンクなら何も書かずに `decision_lineage_unreadable` を返す。accepted で起票すると info の `decision_created_accepted` を返す（§4.1、§5.1、§5.3。DL-S1-05、PP-01、SEC-09、SEM-06、DL-S1-03、PP-02、SEC-06、SEM-01）。
+- `decision_lifecycle_changed` は、adopted / rejected だけでなく、lifecycle のすべての遷移で返す（§4.3、§8.4。SEC-07）。
+- pm_decision_query の list は、`limit` / `offset` でページを送り、title を 200 字で切り、ページを 32,000 字で止め（`decision_list_truncated`）、行に events を作らず、origin を `declared_origin` として notice とともに返す。docstring の derived の説明を直した（§4.2。PP-07、CP-10、SEC-03、SEC-04 (b)、SEC-06、SEM-09）。
+- linked_from の走査は、この ADR 自身の supersedes / superseded_by の相手を先に、残りを番号の大きい順に読み、500 ファイルか 8 MiB で打ち切る。使えなかった lineage は注記で数える（§4.2。DL-S1-09、CP-5、CP-6、SEM-11）。
+- PMSERV-225 のガードは、lineage が adopted でも status が食い違えば採択済みと扱わない。rejected の下書きは検査せず、posted の下書きには取り下げを案内しない remediation を出す（§6.1。SEM-05、DL-S1-04、SEM-06）。
+- ワークフローのゲートは、採択の前に ADR の本文を pm_decision_query で見せ、設計が変わっていれば新しい ADR で置き換える（§6.2。SEM-10、PP-03）。
+- prompt_pack の予約ディレクトリは `.pm` の直後だけを見て、書き込みの直前に解決したプロジェクトで確かめ直す。予約名の照合は大文字小文字を区別しない（既存の 8 つの名前にも効く動作の変更）（§8.3。PP-11、SEM-06、SEM-13）。
+- §4.4 に `decision_created_accepted`・`decision_list_truncated`・`decision_date_not_recorded`・`decision_lineage_linked_from_truncated`・`decision_lineage_linked_from_unreadable`・`invalid_pagination` と、pm_add_decision の `decision_lineage_unreadable` を足した（SEM-06）。
+- ロックの保持時間についての記述（§5.2）を正確にし、正常な更新中にも一時的な食い違いが見えることを既知の限界に足した（§5.2、§5.3。CP-4、CP-7）。id の照合が経路ごとに違うことを書いた（§5.2。PP-10）。
+- §8.4 と D8 の保証の行に、引数名による検査であり、AI が渡す lifecycle=adopted・status=accepted・origin=human などは検出しないことを書いた。README と CHANGELOG も同じ限定にそろえた（§1.1、§8.1、§8.4。SEM-02）。
+- §1.5 の pm_status の漏れは PMSERV-258 で対応済みにした（SEM-06）。
+
+### 12.3 S1 のレビューで見つかり、S1 では直していないもの
+
+どれも改善候補として親に渡す。保証の範囲は変えていない。
+
+- 冪等な no-op（既にある link の add、無い link の remove）と、保存されない reason を、応答で知らせない（SEM-12）。
+- 孤立した lineage ファイル 1 つ（`ADR-999999.yaml`）で `decision_id_exhausted` が続き、メッセージが原因を示さない。decisions.yaml の id の `isdigit` の問題も残る（DL-S1-06、SEC-10。§1.5）。
+- superseded_by の循環や、採択されていない後継による置き換えを警告しない（DL-S1-07）。
+- 遷移表に deprecated → rejected と adopted → rejected が無い。採択の撤回は reverted か deprecated で行う（DL-S1-11、PP-12。仕様どおり）。
+- decisions.yaml の全件の書き直しで、date の無い手書きの ADR に今日の日付が補われることを、応答に出さない（DL-S1-10。README と design.md に既知の性質として書いてある）。
+- 正常な更新中の一時的な `decision_status_mismatch` の時間窓と、change_decision_lineage の二重の直列化（CP-7、CP-4）。
+- ルール v15・SKILL.md に採択の手順が無い（DL-S1-12、PP-04。S3 の PMSERV-241 / 247。CHANGELOG の Upgrade notes で知らせる）。
+- decisions.yaml は有界な読み取りを通らない（FIFO で止まる。S1 以前から。SEC-13）。
+- FastMCP を通る wire のテストが少ない（PP-08。任意の強化）。

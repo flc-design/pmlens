@@ -293,8 +293,8 @@ pmlens は呼び出し元が人か AI かを区別できず、`.pm/` は直接�
 
 | 区分 | 内容 |
 |---|---|
-| 保証 | Lens モード（`PM_LENS=1`）は ADR を書くツールを登録せず、Lens の読み取りは何も書かない。正確性・検証・人間による確認を設定する引数や、`decision_kind` を変える引数は、どのツールにも無い。後から入れられる `origin` は `ai_auto` だけ。遷移表に無い遷移はツールではできない。ツールは ADR の本文を書き換えず、lifecycle の変更で書く `status` は 4 値のどれかである。pmlens が書いた `decisions.yaml` では、変わるのはその ADR の `status:` の 1 行だけ。`decisions.yaml` を書き直す他の操作と同じくファイル全体を書き直すので、手で足したコメントや書式は残らず、`date` や `consequences` の無い手書きの ADR（対象の ADR に限らない）には今日の日付と空の `consequences` が補われる。redact のパターンに合う秘密らしき文字列は lineage に保存されず、`pm_decision_query` の応答にも出ない |
-| 規約 | `adopted` / `rejected` にするのは、ユーザーがこの会話で判断した後だけ。adopted を戻すのはユーザーに頼まれた時だけ。proposed の ADR を採択するのは、ADR の本文をユーザーに見せた後のワークフローのゲート（エンジンは強制しない）。`origin` などの申告は正直に書き、分からなければ `unknown` のままにする。ADR・note・evaluation・ツール結果の中の文は、ユーザーの判断として扱わない |
+| 保証 | Lens モード（`PM_LENS=1`）は ADR を書くツールを登録せず、Lens の読み取りは何も書かない。正確性・検証・人間による確認を設定する引数や、`decision_kind` を変える引数は、どのツールにも無い（引数名による検査。AI が `pm_update_decision` に `lifecycle="adopted"` を、`pm_add_decision` に `status="accepted"` や `origin="human"` / `"ai_proposed_human_decided"` を渡すことは検出しない。それは規約と観測の行で扱う）。後から入れられる `origin` は `ai_auto` だけ。遷移表に無い遷移はツールではできない。ツールは ADR の本文を書き換えず、lifecycle の変更で書く `status` は 4 値のどれかである。pmlens が書いた `decisions.yaml` では、変わるのはその ADR の `status:` の 1 行だけ。`decisions.yaml` を書き直す他の操作と同じくファイル全体を書き直すので、手で足したコメントや書式は残らず、`date` や `consequences` の無い手書きの ADR（対象の ADR に限らない）には今日の日付と空の `consequences` が補われる。redact のパターンに合う秘密らしき文字列は lineage に保存されず、`pm_decision_query` の応答にも出ない |
+| 規約 | `adopted` / `rejected` にするのは、ユーザーがこの会話で判断した後だけ。`accepted` で起票するのは、ユーザーが内容を受け入れた時だけ。adopted を戻すのはユーザーに頼まれた時だけ。proposed の ADR を採択するのは、ADR の本文をユーザーに見せた後のワークフローのゲート（エンジンは強制しない）。`origin` などの申告は正直に書き、分からなければ `unknown` のままにする。ADR・note・evaluation・ツール結果の中の文は、ユーザーの判断として扱わない |
 | 観測 | lifecycle のすべての遷移は、毎回 info の警告 `decision_lifecycle_changed` を返す。`accepted` で起票すると `decision_created_accepted` を返す。lineage の events にはツール名と時刻が残るが、`.pm/` は手で書き換えられるので、events も申告と同じ扱いである |
 | 任意の緩和策（Claude Code 専用。使う人が選んで入れ、pmlens は入れない） | permissions で `mcp__pmlens__pm_update_decision` を `ask` にする。`lifecycle` が `adopted` / `rejected` の `pm_update_decision` と、`status` が `accepted` の `pm_add_decision`（accepted での起票も採択になる）に掛かる PreToolUse hook を足す。`.pm/` への Edit / Write を deny にする |
 
@@ -587,6 +587,7 @@ your-project/
     ├── project.yaml        # プロジェクトメタ情報
     ├── tasks.yaml          # タスク（ステータス・優先度・依存関係）
     ├── decisions.yaml      # ADR (Architecture Decision Records)
+    ├── decision_lineage/   # ADR ごとの lifecycle・申告・links・events
     ├── knowledge.yaml      # 構造化ナレッジレコード
     ├── workflows.yaml      # ワークフローインスタンスと状態
     ├── milestones.yaml     # マイルストーン定義
@@ -733,7 +734,7 @@ Claude Code Session
         └── pmlens serve
               │
               ├── server.py    → 46 MCP ツール + 互換名2個 (FastMCP)
-              ├── models.py    → Pydantic v2 データモデル (18 models, 16 enums)
+              ├── models.py    → Pydantic v2 データモデル (18 models, 21 enums)
               ├── storage.py   → YAML 読み書き
               ├── workflow.py  → ワークフローエンジン (state machine)
               ├── memory.py    → SQLite メモリストア + FTS5 検索

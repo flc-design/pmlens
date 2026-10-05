@@ -187,7 +187,13 @@ Claude:   → pm_record(category="tradeoff", title="JWT vs セッション認証
 Claude:   → pm_add_decision(title="API認証に JWT を採用",
               context="マイクロサービスにステートレス認証が必要",
               decision="JWT + RS256、有効期限15分")
-          【Layer 3: ADR】フォーマルな設計判断記録
+          【Layer 3: ADR】フォーマルな設計判断記録。proposed で保存
+          （記録してよいという同意は、本文の受け入れではない）
+
+ユーザー: （ADR の本文を読んで）はい、その内容で決めました。
+Claude:   → pm_update_decision(decision_id="ADR-012", lifecycle="adopted",
+              reason="ユーザーが ADR の本文を受け入れた")
+          採択。警告 decision_lifecycle_changed をユーザーに伝える
 ```
 
 ### 知識レコードのカテゴリ
@@ -431,6 +437,7 @@ pm-server hook post-tool-use   # PostToolUse フックハンドラ
 ├── project.yaml                # プロジェクトメタデータ
 ├── tasks.yaml                  # 全タスク
 ├── decisions.yaml              # ADR（設計判断記録）
+├── decision_lineage/           # ADR ごとの lifecycle・申告・links・events
 ├── knowledge.yaml              # 知識レコード
 ├── workflows.yaml              # ワークフローインスタンス
 ├── risks.yaml                  # 手動リスク
@@ -455,6 +462,11 @@ pm-server hook post-tool-use   # PostToolUse フックハンドラ
 | TaskStatus | `todo`, `in_progress`, `review`, `done`, `blocked` |
 | Priority | `P0`（最重要）, `P1`（重要）, `P2`（あれば良い）, `P3`（いつか） |
 | DecisionStatus | `proposed`, `accepted`, `deprecated`, `superseded` |
+| DecisionLifecycle | `proposed`, `adopted`, `deprecated`, `superseded`, `rejected`, `reverted` |
+| DecisionOrigin | `ai_auto`, `ai_proposed_human_decided`, `human`, `unknown` |
+| RecordedTiming | `before_impl`, `during_impl`, `post_hoc`, `unknown` |
+| DecisionKind | `spec_policy`, `premise_dependent`, `technical`, `unknown` |
+| EvaluationKind | `test`, `ai_review`, `outcome`, `other` |
 | LogCategory | `progress`, `decision`, `blocker`, `note`, `milestone` |
 | MemoryType | `observation`, `insight`, `lesson` |
 | KnowledgeCategory | `research`, `market`, `spike`, `requirement`, `constraint`, `tradeoff`, `risk_analysis`, `spec`, `api_design` |

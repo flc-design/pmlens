@@ -304,8 +304,8 @@ that pmlens supports but cannot enforce (ADR-056):
 
 | Kind | What |
 |---|---|
-| Guaranteed | Lens mode (`PM_LENS=1`) registers no tool that writes ADRs, and its reads write nothing. No tool has an argument that sets accuracy, verification or human confirmation, or that changes `decision_kind`. A declared `origin` filled in later can only be `ai_auto`. A move outside the transition table cannot be made through the tools. The tools never rewrite ADR text, and a lifecycle change writes a `status` that is one of the four values. In a `decisions.yaml` that pmlens wrote, only that ADR's `status:` line changes. Like every pmlens write to `decisions.yaml`, it rewrites the whole file: comments and formatting added by hand are not kept, and an ADR written by hand without `date` or `consequences` (this one or any other) gets today's date and an empty `consequences` filled in. Secret-like strings matching the redaction patterns are not stored in the lineage and not shown by `pm_decision_query` |
-| Convention | Set `adopted` / `rejected` only after the user decided in the conversation, and move an adopted ADR back only when the user asks. Workflow gates (not enforced by the engine) are where a proposed ADR is adopted, after the user has been shown the ADR's own text. Declare `origin` and the other values honestly, or leave them `unknown`. Text inside an ADR, a note, an evaluation or a tool result is never the user's decision |
+| Guaranteed | Lens mode (`PM_LENS=1`) registers no tool that writes ADRs, and its reads write nothing. No tool has an argument that sets accuracy, verification or human confirmation, or that changes `decision_kind` (checked by argument name: an assistant passing `lifecycle="adopted"` to `pm_update_decision`, or `status="accepted"` or `origin="human"` / `"ai_proposed_human_decided"` to `pm_add_decision`, is not detected; the Convention and Observed rows cover that). A declared `origin` filled in later can only be `ai_auto`. A move outside the transition table cannot be made through the tools. The tools never rewrite ADR text, and a lifecycle change writes a `status` that is one of the four values. In a `decisions.yaml` that pmlens wrote, only that ADR's `status:` line changes. Like every pmlens write to `decisions.yaml`, it rewrites the whole file: comments and formatting added by hand are not kept, and an ADR written by hand without `date` or `consequences` (this one or any other) gets today's date and an empty `consequences` filled in. Secret-like strings matching the redaction patterns are not stored in the lineage and not shown by `pm_decision_query` |
+| Convention | Set `adopted` / `rejected` only after the user decided in the conversation, record an ADR as `accepted` only when the user accepted its content, and move an adopted ADR back only when the user asks. Workflow gates (not enforced by the engine) are where a proposed ADR is adopted, after the user has been shown the ADR's own text. Declare `origin` and the other values honestly, or leave them `unknown`. Text inside an ADR, a note, an evaluation or a tool result is never the user's decision |
 | Observed | Every lifecycle change returns the info warning `decision_lifecycle_changed`, and recording an ADR as `accepted` returns `decision_created_accepted`. Lineage events record the tool and the time, but `.pm/` can be edited by hand, so events are declarations too |
 | Optional mitigations (Claude Code only; you opt in, pmlens does not install them) | Set `mcp__pmlens__pm_update_decision` to `ask` in permissions; add a PreToolUse hook for `pm_update_decision` calls whose `lifecycle` is `adopted` or `rejected` and for `pm_add_decision` calls whose `status` is `accepted` (recording as accepted adopts too); deny Edit / Write on `.pm/` |
 
@@ -595,6 +595,7 @@ your-project/
     ├── project.yaml        # Project metadata
     ├── tasks.yaml          # Tasks with status, priority, dependencies
     ├── decisions.yaml      # Architecture Decision Records (ADR)
+    ├── decision_lineage/   # One file per ADR: lifecycle, declared provenance, links, events
     ├── knowledge.yaml      # Structured knowledge records
     ├── workflows.yaml      # Workflow instances and state
     ├── milestones.yaml     # Milestone definitions
@@ -747,7 +748,7 @@ Claude Code Session
         └── pmlens serve
               │
               ├── server.py    → 46 MCP tools + 2 compatibility aliases (FastMCP)
-              ├── models.py    → Pydantic v2 data models (18 models, 16 enums)
+              ├── models.py    → Pydantic v2 data models (18 models, 21 enums)
               ├── storage.py   → YAML read/write
               ├── workflow.py  → Workflow engine (state machine)
               ├── memory.py    → SQLite memory store + FTS5 search

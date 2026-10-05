@@ -89,7 +89,7 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
 <header class="hero">
   <h1>PM Lens — Architecture &amp; Behavior</h1>
   <div class="subtitle">Claude Code 用プロジェクト管理 MCP サーバーの全体機能・データフロー・状態遷移マップ</div>
-  <div class="meta">バージョン 0.16.0 (2026-08-01 時点) · 44 MCP tools · 16 RO + 2 outbox-RW + 26 full-RW · 1,530 tests · MIT</div>
+  <div class="meta">バージョン 0.16.0 (2026-08-01 時点) · 44 MCP tools · 16 RO + 2 outbox-RW + 26 full-RW（未リリースの <code>pm_decision_query</code> と <code>pm_update_decision</code> を含めると 46 tools · 17 RO + 2 outbox-RW + 27 full-RW。3 章・8 章はこちらの数）· 1,530 tests · MIT</div>
   <div class="meta">関連ドキュメント: <a href="user-guide.html">User Guide (CLI &amp; UX Tips)</a> · <a href="workflow-guide.html">Workflow Guide (作り方)</a> · <a href="cheatsheet.ja.md">Cheatsheet (ja)</a></div>
 </header>
 
@@ -606,6 +606,7 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
 ├── project.yaml        <span class="comment"># メタデータ + phases + pm_schema</span>
 ├── tasks.yaml          <span class="comment"># 全タスク (parent_id で issue 親子)</span>
 ├── decisions.yaml      <span class="comment"># ADR-NNN</span>
+├── decision_lineage/   <span class="comment"># ADR-NNN.yaml: lifecycle・申告・links・events</span>
 ├── workflows.yaml      <span class="comment"># WF-NNN 状態マシン</span>
 ├── knowledge.yaml      <span class="comment"># KR-NNN (research/spec/etc)</span>
 ├── memory.db           <span class="comment"># SQLite + FTS5 (per-project)</span>
@@ -763,7 +764,7 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
 </section>
 
 <footer style="text-align: center; color: var(--muted); font-size: 12px; margin: 24px 0;">
-  Generated 2026-06-15, counts refreshed 2026-08-06 · PM Lens v0.16.0 · Phase 2 Desktop Outbox (ADR-019) shipped · 1,530 tests · 44 MCP tools
+  Generated 2026-06-15, counts refreshed 2026-08-06 · PM Lens v0.16.0 · Phase 2 Desktop Outbox (ADR-019) shipped · 1,530 tests · 44 MCP tools (未リリースの 2 ツールを含めると 46)
 </footer>
 
 </main>
