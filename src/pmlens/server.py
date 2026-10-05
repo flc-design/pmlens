@@ -6,6 +6,7 @@ import datetime as _dt
 import fnmatch
 import json
 import os
+import re
 import uuid
 from collections import Counter
 from pathlib import Path
@@ -38,6 +39,7 @@ from .models import (
     Consequences,
     DailyLogEntry,
     Decision,
+    DecisionLifecycle,
     DecisionOrigin,
     DecisionStatus,
     IssueSeverity,
@@ -2979,6 +2981,224 @@ def _get_draft_store(project_path: str | None):
     return get_draft_store(default_draft_db_path(pm_path))
 
 
+# ─── Draft source decisions (ADR-056 S1, PMSERV-225) ───
+# A draft built on an ADR that is not adopted can present an unconfirmed
+# decision as settled. The check runs when a draft is saved, redacted and
+# listed for review, and is made at read time: the draft store's schema is
+# unchanged, and an ADR rejected after its draft was staged shows up on the
+# next review listing. It only warns; no draft is refused. Only ADRs the
+# caller declared in source_refs are checked, never ADR ids in the text.
+
+# An ADR ref in source_refs: case and zero padding do not matter, so ADR-59
+# and adr-059 both name ADR-059. decisions.yaml ids are matched the same way.
+_DRAFT_ADR_REF_RE = re.compile(r"(?i)ADR-([0-9]{1,6})")
+_DRAFT_NOT_ADOPTED_REMEDIATION = (
+    "Continue only if the user wants to write about a decision that is not adopted; "
+    "otherwise reject the draft with pm_reject_draft."
+)
+# A posted draft has left review and cannot be rejected (DraftStore.mark_rejected
+# takes only draft and redacted rows), so its warnings point at the published post.
+_DRAFT_POSTED_REMEDIATION = (
+    "The draft is marked posted, so pm_reject_draft cannot withdraw it; check the "
+    "published post by hand (pm_decision_query shows an ADR's lifecycle) and correct it "
+    "if it presents a decision that is not adopted as settled."
+)
+# How many ADR ids a warning about an ADR number held by several ADRs names.
+_DRAFT_DUPLICATE_ID_LIMIT = 5
+
+
+def _draft_adr_number(value: object) -> int | None:
+    """The ADR number named by ``value`` (``ADR-59`` / ``adr-059`` -> 59), else None."""
+    if not isinstance(value, str):
+        return None
+    match = _DRAFT_ADR_REF_RE.fullmatch(value.strip())
+    return int(match.group(1)) if match else None
+
+
+def _draft_adr_label(adr: Decision) -> str:
+    """The id of an indexed ADR as a warning shows it: without surrounding whitespace.
+
+    Only ADRs whose stripped id matched ``_DRAFT_ADR_REF_RE`` are indexed, so
+    the label is at most ten characters however much whitespace the file holds.
+    """
+    return adr.id.strip()
+
+
+class _DraftDecisionIndex:
+    """decisions.yaml indexed by ADR number, read once and only when first needed.
+
+    One index serves a whole response, so a review page of many drafts reads
+    decisions.yaml once, and a draft that cites no ADR never reads it. Lineage
+    files are read without locks (lineage.read_lineage_raw); nothing is written.
+    """
+
+    def __init__(self, pm_path: Path) -> None:
+        self._pm_path = pm_path
+        self._loaded = False
+        self._unreadable: str | None = None
+        self._by_number: dict[int, list[Decision]] = {}
+        self._lifecycles: dict[int, str | None] = {}
+
+    def _load(self) -> None:
+        if self._loaded:
+            return
+        self._loaded = True
+        try:
+            decisions = load_decisions(self._pm_path)
+        except Exception as exc:  # noqa: BLE001 - reported as unchecked, never raised
+            self._unreadable = error_summary(exc)
+            return
+        for adr in decisions:
+            number = _draft_adr_number(adr.id)
+            if number is not None:
+                self._by_number.setdefault(number, []).append(adr)
+
+    def unreadable(self) -> str | None:
+        """Why decisions.yaml could not be read (type and position only), or None."""
+        self._load()
+        return self._unreadable
+
+    def decisions_numbered(self, number: int) -> list[Decision]:
+        """The ADRs whose id names ``number``; more than one means it is ambiguous."""
+        self._load()
+        return self._by_number.get(number, [])
+
+    def lifecycle_of(self, number: int, adr: Decision) -> str | None:
+        """The effective lifecycle of the only ADR numbered ``number``.
+
+        The lineage's lifecycle when it is attributed to the ADR (a valid id, a
+        readable file for this ADR, a matching anchor), else the one derived
+        from the status; None for an unknown status without a usable lineage.
+        """
+        if number not in self._lifecycles:
+            raw = _lineage.read_lineage_raw(self._pm_path, adr.id)
+            self._lifecycles[number] = _lineage.effective_lifecycle(adr, raw)
+        return self._lifecycles[number]
+
+
+def _draft_decision_warnings(
+    pm_path: Path,
+    signal_type: str,
+    source_refs: str,
+    *,
+    draft_id: int,
+    index: _DraftDecisionIndex | None = None,
+    posted: bool = False,
+) -> list[dict]:
+    """Warn about a draft built on ADRs that are not adopted (design §6.1).
+
+    Each ADR ref in ``source_refs`` is matched by number against decisions.yaml.
+    An ADR whose effective lifecycle is adopted yields nothing. Any other
+    lifecycle, an unknown status, or a number shared by several ADRs yields
+    ``draft_source_decision_not_adopted``; a ref not in decisions.yaml yields
+    ``draft_source_decision_not_found`` (info). An unreadable decisions.yaml
+    yields ``draft_source_decision_unchecked`` without quoting the file, and an
+    ``adr`` draft without any ADR ref yields ``draft_source_decision_missing``.
+    Messages carry only the draft id, regex-checked ADR ids (stripped, and at
+    most ``_DRAFT_DUPLICATE_ID_LIMIT`` of them for one shared number), lifecycle
+    values, a redacted status label and exception types. decisions.yaml and the
+    lineage files are read from the given ``.pm`` directory, without locks.
+
+    Args:
+        signal_type: The draft's signal type (every type is checked).
+        source_refs: The stored, normalized comma-separated refs.
+        draft_id: The draft the warnings are about; each message names it.
+        index: A decisions.yaml index shared across one response's drafts.
+        posted: The draft is marked posted. It can no longer be rejected or
+            staged again, so the remediations point at the published post.
+
+    Returns:
+        ``_build_warning`` entries; empty when there is nothing to report.
+    """
+    refs: dict[int, str] = {}
+    for ref in str(source_refs or "").split(","):
+        number = _draft_adr_number(ref)
+        if number is not None:
+            refs.setdefault(number, ref.strip())
+    if not refs:
+        if signal_type != "adr":
+            return []
+        return [
+            _build_warning(
+                "warning",
+                "draft_source_decision_missing",
+                f"Draft {draft_id}: signal_type is adr, but source_refs names no ADR "
+                "(ADR-NNN), so whether the decision it is built on is adopted was not checked.",
+                remediation=(
+                    _DRAFT_POSTED_REMEDIATION
+                    if posted
+                    else (
+                        "source_refs cannot be changed on a staged draft: reject it with "
+                        "pm_reject_draft and stage it again with the ADR in source_refs."
+                    )
+                ),
+            )
+        ]
+    index = index if index is not None else _DraftDecisionIndex(pm_path)
+    unreadable = index.unreadable()
+    if unreadable is not None:
+        return [
+            _build_warning(
+                "warning",
+                "draft_source_decision_unchecked",
+                f"Draft {draft_id}: decisions.yaml could not be read ({unreadable}), so "
+                f"whether the ADRs in source_refs ({', '.join(refs.values())}) are adopted "
+                "was not checked.",
+                remediation=(
+                    "Fix decisions.yaml by hand, then check the draft again with "
+                    "pm_drafts_pending" + ("." if posted else " before it is published.")
+                ),
+            )
+        ]
+    warnings: list[dict] = []
+    for number, ref in refs.items():
+        matches = index.decisions_numbered(number)
+        if not matches:
+            warnings.append(
+                _build_warning(
+                    "info",
+                    "draft_source_decision_not_found",
+                    f"Draft {draft_id}: {ref} is not in decisions.yaml, so whether it is "
+                    "adopted was not checked.",
+                    remediation="Check that source_refs names the ADR the draft relies on.",
+                )
+            )
+            continue
+        if len(matches) > 1:
+            labels = list(dict.fromkeys(_draft_adr_label(adr) for adr in matches))
+            ids = ", ".join(labels[:_DRAFT_DUPLICATE_ID_LIMIT])
+            if len(labels) > _DRAFT_DUPLICATE_ID_LIMIT:
+                ids += f" and {len(labels) - _DRAFT_DUPLICATE_ID_LIMIT} more"
+            message = (
+                f"Draft {draft_id}: {ref} matches {len(matches)} ADRs in decisions.yaml "
+                f"({ids}), so it is not treated as adopted"
+            )
+        else:
+            adr = matches[0]
+            lifecycle = index.lifecycle_of(number, adr)
+            if lifecycle == DecisionLifecycle.ADOPTED:
+                continue
+            if lifecycle is None:
+                message = (
+                    f"Draft {draft_id}: {_draft_adr_label(adr)} has no known lifecycle "
+                    f"(status {scrub_label(adr.status)!r}), so it is not treated as adopted"
+                )
+            else:
+                message = f"Draft {draft_id}: {_draft_adr_label(adr)} is {lifecycle} (not adopted)"
+        warnings.append(
+            _build_warning(
+                "warning",
+                "draft_source_decision_not_adopted",
+                f"{message}; a draft built on it can present a decision that is not adopted "
+                "as settled.",
+                remediation=(
+                    _DRAFT_POSTED_REMEDIATION if posted else _DRAFT_NOT_ADOPTED_REMEDIATION
+                ),
+            )
+        )
+    return warnings
+
+
 @_tool()
 def pm_draft_content(
     signal_type: str,
@@ -3087,12 +3307,19 @@ def pm_draft_content(
         hashtags=",".join(hashtags) if hashtags else None,
         workflow_id=workflow_id,
     )
-    return {
+    saved: dict = {
         "status": "saved",
         "draft_id": draft_id,
         "source_refs": normalized,
         "next": "Call pm_redact_draft to scrub the draft before review.",
     }
+    # Checked against the stored refs, as the review queue checks them later.
+    warnings = _draft_decision_warnings(
+        _get_pm_path(project_path), signal_type, normalized, draft_id=draft_id
+    )
+    if warnings:
+        saved["warnings"] = warnings
+    return saved
 
 
 @_tool()
@@ -3161,7 +3388,8 @@ def pm_redact_draft(draft_id: int, project_path: str | None = None) -> dict:
     if not isinstance(body_segments, list):
         body_segments = [str(body_segments)]
 
-    config = load_redaction_config(_get_pm_path(project_path))
+    pm_path = _get_pm_path(project_path)
+    config = load_redaction_config(pm_path)
     result = redact(
         row["hook"] or "",
         body_segments,
@@ -3201,6 +3429,11 @@ def pm_redact_draft(draft_id: int, project_path: str | None = None) -> dict:
         out["config_hint"] = (
             "Tune scrubbing per-project in .pm/redaction.yaml (allow / deny / scrub_internal_ids)."
         )
+    warnings = _draft_decision_warnings(
+        pm_path, row["signal_type"], row["source_refs"], draft_id=draft_id
+    )
+    if warnings:
+        out["warnings"] = warnings
     return out
 
 
@@ -3265,7 +3498,29 @@ def pm_drafts_pending(
     except DraftStoreConflictError as exc:
         return {"status": "error", "code": "draft_store_conflict", "message": str(exc)}
     page = store.pending(filter_status=filter_status, limit=limit, offset=offset)
-    return {"status": "ok", **page}
+    result: dict = {"status": "ok", **page}
+    # Judged now, not when the draft was staged, so an ADR rejected since then
+    # is reported here. A rejected draft will not be published and is not
+    # checked; a posted one is, since its post may present the ADR as settled.
+    pm_path = _get_pm_path(project_path)
+    index = _DraftDecisionIndex(pm_path)
+    warnings: list[dict] = []
+    for item in page["items"]:
+        if item.get("status") == "rejected":
+            continue
+        warnings.extend(
+            _draft_decision_warnings(
+                pm_path,
+                item["signal_type"],
+                item["source_refs"],
+                draft_id=item["id"],
+                index=index,
+                posted=item.get("status") == "posted",
+            )
+        )
+    if warnings:
+        result["warnings"] = warnings
+    return result
 
 
 @_tool()

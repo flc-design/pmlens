@@ -74,3 +74,15 @@ def test_content_pipeline_starts(tmp_path: Path) -> None:
     assert res["status"] == "started"
     assert res["current_step"]["id"] == "extract"
     assert res["current_step"]["tool_hint"] == "pm_recall"
+
+
+def test_extract_step_asks_for_adopted_adrs_listed_in_source_refs() -> None:
+    """PMSERV-225: the draft guard checks only the ADRs declared in source_refs,
+    so the extract step asks for adopted ADRs and for every ADR to be listed."""
+    data = yaml.safe_load(_TEMPLATE.read_text(encoding="utf-8"))
+    extract = next(s for s in data["steps"] if s["id"] == "extract")
+    text = " ".join(extract["description"].split())
+    assert "lifecycle is adopted" in text
+    assert "pm_decision_query" in text
+    assert "pm_decision_query" in srv.REGISTERED_TOOLS
+    assert "list every ADR the draft relies on in source_refs" in text
