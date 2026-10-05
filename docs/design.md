@@ -364,6 +364,10 @@ deprecated、superseded → superseded、未知の値 → なし）。この時�
   `decision_lineage/` がシンボリックリンクなら、decisions.yaml も書かずに拒否する。
   採番は decisions.yaml の id と lineage のファイル名（`ADR-*.yaml` のうち id の正規表現に
   合うもの）の最大値 + 1 で、999,999 を超えるなら書く前に `decision_id_exhausted`。
+  起票の経路は pm_add_decision で、status は proposed（既定、ADR-059）か accepted だけを
+  受け取り、lifecycle はそれぞれ proposed / adopted で始まる。models.py の
+  `Decision.status` の既定値（accepted）は status キーを持たない既存レコードの読み方で、
+  ツールの既定値とは別物なので変えない。
 - 更新: 同じ順にロックを取り、lineage → decisions.yaml の status の順に書く。遷移表
   （`lineage.allowed_to`）と不変条件を、ロックの中で現在の状態に対して検査する。
   呼び出しの前から status と lineage が食い違っている時は、lifecycle を明示した呼び出しだけが
@@ -644,8 +648,26 @@ def pm_log(entry: str, category: str = "progress",
 def pm_add_decision(title: str, context: str, decision: str,
                     consequences_positive: list[str] | None = None,
                     consequences_negative: list[str] | None = None,
+                    status: str = "proposed",
+                    origin: str = "unknown",
+                    recorded_timing: str = "unknown",
+                    decision_kind: str = "unknown",
                     project_path: str | None = None) -> dict:
-    """ADR（Architecture Decision Record）を追加。IDは自動採番。"""
+    """ADR（Architecture Decision Record）を追加。IDは自動採番。
+    status: proposed（既定、ADR-059）| accepted。accepted はユーザーが内容
+    そのものを受け入れた時だけ（記録への同意は受け入れではない）。
+    origin / recorded_timing / decision_kind: 申告。既定は unknown で、
+    サーバーは検証しない。decision_kind は後から変えられない。
+    accepted と origin=ai_auto の組は status_conflicts_with_origin で拒否する
+    （申告どうしの矛盾の検出であり、採択を強制する仕組みではない）。
+    ADR と lineage（§3.3 の decision_lineage/ADR-NNN.yaml）を、decisions →
+    decision_lineage のロックの中で書く。lineage を書けなかった時は
+    "lineage": "missing" と警告（decision_lineage_not_written /
+    decision_lineage_preexisting）を返し、ADR は保存したままにする。
+    lineage の有無の確認で OSError（検索権限の無いディレクトリなど）が出た時も
+    not_written として返し、例外にはしない。その時の lifecycle は読み取りが
+    表示する値で、既存のファイルが ADR に帰属すればその lifecycle、
+    そうでなければ status から導いた値になる。"""
 
 # ─── 分析 ───
 

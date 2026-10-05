@@ -572,12 +572,17 @@ class DecisionWrite:
     Attributes:
         decision: The appended ADR, or ``None`` when ``error`` is set.
         error: ``decision_id_exhausted`` (nothing written), else ``None``.
-        lineage_state: ``written``; ``not_written`` (writing the lineage failed
-            with an OS error — the ADR is saved without a lineage); or
-            ``preexisting`` (a file was already there and was left untouched).
+        lineage_state: ``written``; ``not_written`` (checking for or writing
+            the lineage failed with an OS error — the ADR is saved without a
+            lineage); or ``preexisting`` (a file was already there and was
+            left untouched).
         recorded_at: The timestamp stored in the new lineage (``None`` unless
             it was written).
-        lifecycle: The lifecycle the ADR starts with.
+        lifecycle: The lifecycle readers show for the ADR after the call: the
+            new lineage's when written, otherwise what
+            :func:`lineage.effective_lifecycle` finds (derived from the status,
+            or a preexisting file's own lifecycle when that file is attributed
+            to the ADR).
     """
 
     decision: Decision | None
@@ -622,11 +627,12 @@ def add_decision_with_lineage(
     Locks are taken decisions → ``decision_lineage-ADR-NNN``, and the lineage
     lock is taken before anything is written, so a lineage-lock timeout leaves
     both files untouched. Writes go decisions.yaml first, lineage second: if
-    the process dies between them, or the lineage write fails with an OS error
-    (``lineage_state="not_written"``), the ADR exists without a lineage and
-    readers derive its lifecycle from the status. An existing lineage file is
-    never overwritten (``lineage_state="preexisting"``), and a symlinked
-    lineage directory refuses the call before anything is written.
+    the process dies between them, or checking for or writing the lineage
+    fails with an OS error (``lineage_state="not_written"``), the ADR exists
+    without a lineage and readers derive its lifecycle from the status. An
+    existing lineage file is never overwritten (``lineage_state="preexisting"``),
+    and a symlinked lineage directory refuses the call before anything is
+    written.
 
     ``build`` runs under the decisions lock and must only construct the record
     (see :func:`add_task_with_next_id`); the lineage is written outside it.
@@ -674,18 +680,29 @@ def add_decision_with_lineage(
             decisions.append(decision)
             _save_decisions(pm_path, decisions)
             state = "written"
-            if path.exists() or path.is_symlink():
-                state = "preexisting"
-            else:
-                try:
+            lifecycle = doc["lifecycle"]
+            # The existence check is inside the try: Path.exists() raises on
+            # EACCES (an unsearchable lineage directory), and decisions.yaml is
+            # already saved, so any OS error here means "nothing written".
+            try:
+                if path.exists() or path.is_symlink():
+                    state = "preexisting"
+                else:
                     _save_yaml(path, doc, _lineage.lineage_header_name(decision.id))
-                except OSError:
-                    state = "not_written"
+            except OSError:
+                state = "not_written"
+            if state != "written":
+                # Report what a reader shows for this ADR now. A preexisting
+                # file without an anchor is attributed to the new ADR, so its
+                # lifecycle (not the one this call started with) is shown.
+                lifecycle = _lineage.effective_lifecycle(
+                    decision, _lineage.read_lineage_raw(pm_path, decision.id)
+                )
     return DecisionWrite(
         decision=decision,
         lineage_state=state,
         recorded_at=now if state == "written" else None,
-        lifecycle=doc["lifecycle"],
+        lifecycle=lifecycle,
     )
 
 

@@ -12,6 +12,7 @@ from pathlib import Path
 from fastmcp import FastMCP
 
 from . import __version__
+from . import lineage as _lineage
 from . import storage as _storage
 from .auto_memory import (
     _MAX_INGEST_BYTES,
@@ -36,6 +37,8 @@ from .models import (
     Consequences,
     DailyLogEntry,
     Decision,
+    DecisionOrigin,
+    DecisionStatus,
     IssueSeverity,
     KnowledgeCategory,
     KnowledgeRecord,
@@ -68,7 +71,7 @@ from .storage import (
     _save_tasks,
     _yaml_transaction,
     add_daily_log,
-    add_decision_with_next_id,
+    add_decision_with_lineage,
     add_knowledge_with_next_id,
     add_task_with_next_id,
     get_builtin_templates_dir_status,
@@ -153,7 +156,12 @@ def build_server_instructions(*, lens: bool, desktop_write: bool) -> str:
             "it is complete, and add a pm_log entry for the finished work. Save a settled "
             "finding with pm_remember, one finding per entry with its reason, and keep "
             "project facts here rather than duplicating them in the host's own memory. "
-            "Record an ADR with pm_add_decision after the user agrees. Workflow gates "
+            # Design §4.1 【Q1=b】 (ADR-059). The design's sentence goes on to name
+            # pm_update_decision ("..., and becomes adopted with pm_update_decision
+            # once the user accepts its content."); that clause is added together
+            # with the tool (PMSERV-224), because every name here must be registered.
+            "Record an ADR with pm_add_decision after the user agrees to record it; it "
+            "is saved as proposed until the user accepts its content. Workflow gates "
             "(gate: user_approval) are not enforced by the engine, so wait for the "
             "user's go-ahead before advancing past one. For drafts made by pmlens's "
             "content pipeline (not ordinary text such as PR descriptions or emails), "
@@ -163,17 +171,17 @@ def build_server_instructions(*, lens: bool, desktop_write: bool) -> str:
         )
     if desktop_write:
         return (
-            "pmlens (Lens mode) shows this project's status, tasks, memory and "
-            "workflows from .pm/ without changing them. Notes and log entries written "
+            "pmlens (Lens mode) shows this project's status, tasks, decisions, memory "
+            "and workflows from .pm/ without changing them. Notes and log entries written "
             "with pm_outbox_remember and pm_outbox_log go to a Desktop outbox, not to "
             "the project: pm_outbox_pending lists them, and they reach the project "
             f"only after they are reviewed and merged from {_FULL_MODE_HOST}. Tell "
             "the user about each warnings[] entry a tool returns."
         )
     return (
-        "pmlens (Lens mode, read-only) shows this project's status, tasks, memory and "
-        "workflows from .pm/; pm_status and pm_recall are the place to start. Tools "
-        "that change tasks, logs or memory are not "
+        "pmlens (Lens mode, read-only) shows this project's status, tasks, decisions, "
+        "memory and workflows from .pm/; pm_status and pm_recall are the place to "
+        "start. Tools that change tasks, logs or memory are not "
         "available in this mode; when the user wants to record something, tell them "
         f"to use {_FULL_MODE_HOST}. Tell the user about each warnings[] entry a tool "
         "returns."
@@ -3276,6 +3284,60 @@ def pm_x_drafts_pending(
     )
 
 
+# The two statuses an ADR may be recorded with (ADR-056 S1). The lifecycle words
+# (adopted, rejected, ...) are refused here: they are reached through
+# pm_update_decision once the ADR exists.
+_ADD_DECISION_STATUSES: tuple[str, ...] = (
+    DecisionStatus.PROPOSED.value,
+    DecisionStatus.ACCEPTED.value,
+)
+
+
+def _add_decision_error(
+    status: str, origin: str, recorded_timing: str, decision_kind: str
+) -> dict | None:
+    """Validate pm_add_decision's status and declared values before any lock.
+
+    Returns:
+        An error dict (``invalid_status``, ``invalid_origin``,
+        ``invalid_recorded_timing``, ``invalid_decision_kind`` or
+        ``status_conflicts_with_origin``), or ``None`` when the call may go on.
+    """
+    if status not in _ADD_DECISION_STATUSES:
+        return {
+            "status": "error",
+            "code": "invalid_status",
+            "message": (
+                f"status must be one of {', '.join(_ADD_DECISION_STATUSES)}, got "
+                f"{_lineage.scrub_label(status)!r}. Record an ADR whose content the user has "
+                "accepted with status=accepted (not adopted); other states are set after it "
+                "is recorded."
+            ),
+        }
+    declared = {
+        "origin": origin,
+        "recorded_timing": recorded_timing,
+        "decision_kind": decision_kind,
+    }
+    problem = _lineage.declared_error(declared)
+    if problem is not None:
+        return problem
+    # Two declarations that contradict each other (design §4.1): ai_auto says
+    # the assistant decided without asking, accepted says the user accepted the
+    # content. Not a guarantee — leaving origin out passes.
+    if status == DecisionStatus.ACCEPTED.value and origin == DecisionOrigin.AI_AUTO.value:
+        return {
+            "status": "error",
+            "code": "status_conflicts_with_origin",
+            "message": (
+                "status=accepted says the user accepted the content, but origin=ai_auto says "
+                "the decision was made without asking. Record it with status=proposed, or "
+                "declare the origin that actually applies."
+            ),
+        }
+    return None
+
+
 @_tool()
 def pm_add_decision(
     title: str,
@@ -3283,26 +3345,118 @@ def pm_add_decision(
     decision: str,
     consequences_positive: list[str] | None = None,
     consequences_negative: list[str] | None = None,
+    status: str = "proposed",
+    origin: str = "unknown",
+    recorded_timing: str = "unknown",
+    decision_kind: str = "unknown",
     project_path: str | None = None,
 ) -> dict:
-    """Record an Architecture Decision Record (ADR). ID is auto-generated."""
-    pm_path = _get_pm_path(project_path)
+    """Record an architecture decision (ADR); the id is assigned automatically.
 
-    # PMSERV-219: number inside the decisions.yaml lock, not before it.
+    Use it for decisions someone may later ask "why was it done this way?" about:
+    architecture, public interfaces, data formats, dependencies, security or
+    operating policy, or a change to an existing ADR. Do not use it for naming,
+    small refactors or equivalent implementation choices; note those in the daily
+    log (category=decision) instead.
+
+    status: proposed (default) | accepted. Use accepted only when the user has
+    reviewed and accepted the content itself; agreeing that it may be recorded is
+    not acceptance. A proposed ADR is adopted later with pm_update_decision.
+    origin: who made the decision, as you declare it — ai_auto (you decided
+    without asking) | ai_proposed_human_decided | human | unknown (default).
+    recorded_timing: before_impl | during_impl | post_hoc | unknown (default).
+    decision_kind: spec_policy | premise_dependent | technical | unknown (default);
+    it cannot be changed later.
+    Declared values are stored as given and shown as declared, not verified;
+    leave a value unknown rather than guess it.
+    To record that it amends or supersedes another ADR, call pm_update_decision next.
+    """
+    problem = _add_decision_error(status, origin, recorded_timing, decision_kind)
+    if problem is not None:
+        return problem
+    pm_path = _get_pm_path(project_path)
+    adr_status = DecisionStatus(status)
+
+    # PMSERV-219: number inside the decisions.yaml lock, not before it. The
+    # closure calls the module-level generate_decision_id so the lock probe in
+    # tests/test_id_allocation.py stays on the id path.
     def build(number: int) -> Decision:
         return Decision(
             id=generate_decision_id(number),
             title=title,
             context=context,
             decision=decision,
+            status=adr_status,
             consequences=Consequences(
                 positive=consequences_positive or [],
                 negative=consequences_negative or [],
             ),
         )
 
-    adr = add_decision_with_next_id(pm_path, build)
-    return {"status": "recorded", "decision_id": adr.id, "title": title}
+    declared = {
+        "origin": origin,
+        "recorded_timing": recorded_timing,
+        "decision_kind": decision_kind,
+    }
+    try:
+        written = add_decision_with_lineage(pm_path, build, declared=declared)
+    except _lineage.LineageWriteRefused as refused:
+        # Checked before anything is written (a symlinked lineage directory).
+        return {"status": "error", "code": refused.code, "message": str(refused)}
+    if written.error is not None or written.decision is None:
+        return {
+            "status": "error",
+            "code": written.error or "decision_id_exhausted",
+            "message": (
+                f"ADR numbers are used up to ADR-{_lineage.MAX_DECISION_NUMBER}; "
+                "nothing was recorded."
+            ),
+        }
+    adr = written.decision
+    result: dict = {
+        "status": "recorded",
+        "decision_id": adr.id,
+        "title": title,
+        "decision_status": adr_status.value,
+        # What reads show for the ADR now: a preexisting lineage file may carry
+        # a lifecycle other than the one this call would have started with.
+        "lifecycle": written.lifecycle,
+        "recorded_at": written.recorded_at,
+    }
+    if written.lineage_state == "not_written":
+        result["lineage"] = "missing"
+        result["warnings"] = [
+            _build_warning(
+                "warning",
+                "decision_lineage_not_written",
+                f"{adr.id} was recorded, but its lineage file could not be written (an OS "
+                "error), so the declared values and the recording time were not kept. Its "
+                "lifecycle is shown as derived from the status.",
+                remediation=(
+                    f"Check that .pm/{_lineage.LINEAGE_DIR} is writable. Calling "
+                    f"pm_update_decision on {adr.id} later starts its lineage, with the "
+                    "recording time and declared values left unrecorded."
+                ),
+            )
+        ]
+    elif written.lineage_state == "preexisting":
+        result["lineage"] = "missing"
+        result["warnings"] = [
+            _build_warning(
+                "warning",
+                "decision_lineage_preexisting",
+                f"{adr.id} was recorded, but .pm/{_lineage.LINEAGE_DIR}/{adr.id}.yaml already "
+                "existed and was left untouched; the declared values and the recording time "
+                "of this call were not kept. Until that file is moved, reads may show its "
+                f"lifecycle and history for {adr.id}; the lifecycle returned here is what "
+                "they show now.",
+                remediation=(
+                    "Inspect that file. If it belongs to another ADR, move it out of "
+                    f".pm/{_lineage.LINEAGE_DIR} by hand."
+                ),
+            )
+        ]
+    return result
 
 
 # ─── Analysis ────────────────────────────────────────

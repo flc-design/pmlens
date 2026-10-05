@@ -89,7 +89,7 @@ use the legacy names. See the [migration guide](content-tool-migration.md).
 | Tool | Description | Key Params |
 |------|-------------|------------|
 | `pm_log` | Add daily log entry (auto-links to active task) | `entry`, `category="progress"` |
-| `pm_add_decision` | Record an ADR (ID auto-generated) | `title`, `context`, `decision` |
+| `pm_add_decision` | Record an ADR (ID auto-generated). Saved as proposed; `accepted` only when the user accepted the content | `title`, `context`, `decision`, `status="proposed"`, `origin?`, `recorded_timing?`, `decision_kind?` |
 | `pm_velocity` | Velocity and trend analysis | `weeks=4` |
 | `pm_risks` | Auto-detected + manual risks | `project_path?` |
 

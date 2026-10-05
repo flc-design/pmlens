@@ -1,9 +1,18 @@
 """Tests for MCP server tools."""
 
+import datetime as _dt
+import os
+import threading
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+import yaml
 
+from pmlens import lineage as _lineage
+from pmlens import storage as _storage
+from pmlens.lineage import LineageChange, lineage_view, read_lineage_raw
+from pmlens.models import Decision, PmServerError
 from pmlens.server import (
     pm_add_decision,
     pm_add_issue,
@@ -170,6 +179,389 @@ class TestPmAddDecision:
         )
         assert result["status"] == "recorded"
         assert result["decision_id"] == "ADR-001"
+
+
+# ─── pm_add_decision with a decision lineage (ADR-056 S1, PMSERV-222) ─────
+#
+# docs/issues/DESIGN_decision-lineage-s1.md §4.1 / §5.1 / §9.1 row 2, with the
+# status default decided as proposed (ADR-059, Q1=b).
+
+_LINEAGE_NOW = "2026-10-05T03:12:00Z"
+
+
+@pytest.fixture
+def fixed_lineage_clock(monkeypatch):
+    monkeypatch.setattr(_lineage, "_utc_now", lambda: _LINEAGE_NOW)
+    return _LINEAGE_NOW
+
+
+def _pm(project: Path) -> Path:
+    return project / ".pm"
+
+
+def _lineage_file(project: Path, adr_id: str = "ADR-001") -> Path:
+    return _pm(project) / "decision_lineage" / f"{adr_id}.yaml"
+
+
+def _decisions_on_disk(project: Path) -> list[dict]:
+    path = _pm(project) / "decisions.yaml"
+    if not path.exists():
+        return []
+    return yaml.safe_load(path.read_text(encoding="utf-8"))["decisions"]
+
+
+def _ledger_bytes(project: Path) -> dict[str, bytes | None]:
+    """decisions.yaml and every lineage file, by path (None when absent)."""
+    pm = _pm(project)
+    snapshot: dict[str, bytes | None] = {}
+    decisions = pm / "decisions.yaml"
+    snapshot["decisions.yaml"] = decisions.read_bytes() if decisions.exists() else None
+    lineage_dir = pm / "decision_lineage"
+    if lineage_dir.exists():
+        for path in sorted(lineage_dir.iterdir()):
+            snapshot[f"decision_lineage/{path.name}"] = path.read_bytes()
+    return snapshot
+
+
+def _seed_adr(project: Path, adr_id: str, *, title: str = "seeded") -> None:
+    _storage._save_decisions(
+        _pm(project),
+        [Decision(id=adr_id, title=title, date=_dt.date(2026, 10, 1), context="c", decision="d")],
+    )
+
+
+def _add(project: Path, **kwargs) -> dict:
+    args = {"title": "Use SQLite", "context": "c", "decision": "d"}
+    args.update(kwargs)
+    return pm_add_decision(project_path=str(project), **args)
+
+
+def _codes(result: dict) -> list[str]:
+    return [warning["code"] for warning in result.get("warnings", [])]
+
+
+class TestPmAddDecisionLineage:
+    def test_the_default_records_a_proposed_adr_and_its_lineage(
+        self, initialized_project, fixed_lineage_clock
+    ):
+        result = _add(
+            initialized_project,
+            origin="ai_auto",
+            recorded_timing="before_impl",
+            decision_kind="technical",
+        )
+
+        # The old keys stay; the new ones are added (no lineage / warnings keys
+        # when everything was written).
+        assert result == {
+            "status": "recorded",
+            "decision_id": "ADR-001",
+            "title": "Use SQLite",
+            "decision_status": "proposed",
+            "lifecycle": "proposed",
+            "recorded_at": _LINEAGE_NOW,
+        }
+        [stored] = _decisions_on_disk(initialized_project)
+        assert stored["id"] == "ADR-001" and stored["status"] == "proposed"
+
+        path = _lineage_file(initialized_project)
+        text = path.read_text(encoding="utf-8")
+        assert text.startswith("# PM Lens - decision_lineage/ADR-001.yaml\n")
+        doc = yaml.safe_load(text)
+        assert doc["schema"] == 1 and doc["decision_id"] == "ADR-001"
+        assert doc["lifecycle"] == "proposed"
+        assert doc["recorded_at"] == _LINEAGE_NOW
+        assert doc["declared"] == {
+            "origin": "ai_auto",
+            "recorded_timing": "before_impl",
+            "decision_kind": "technical",
+        }
+        assert doc["links"] == {"supersedes": [], "superseded_by": [], "amends": []}
+        assert doc["events"] == [
+            {
+                "at": _LINEAGE_NOW,
+                "kind": "created",
+                "lifecycle": "proposed",
+                "status": "proposed",
+                "via": "pm_add_decision",
+            }
+        ]
+        assert doc["anchor"] == {
+            "date": stored["date"],
+            "title_sha256": _lineage.title_sha256("Use SQLite"),
+        }
+
+    def test_accepted_starts_the_lineage_as_adopted(self, initialized_project, fixed_lineage_clock):
+        result = _add(initialized_project, status="accepted", origin="human")
+
+        assert result["decision_status"] == "accepted"
+        assert result["lifecycle"] == "adopted"
+        [stored] = _decisions_on_disk(initialized_project)
+        assert stored["status"] == "accepted"
+        doc = yaml.safe_load(_lineage_file(initialized_project).read_text(encoding="utf-8"))
+        assert doc["lifecycle"] == "adopted"
+        assert doc["declared"]["origin"] == "human"
+        assert doc["events"][0]["status"] == "accepted"
+
+    def test_accepted_without_an_origin_passes(self, initialized_project):
+        # status_conflicts_with_origin catches two contradicting declarations
+        # only; it does not force acceptance through anything (design §8.4).
+        result = _add(initialized_project, status="accepted")
+        assert result["status"] == "recorded" and result["lifecycle"] == "adopted"
+
+    def test_proposed_with_ai_auto_passes(self, initialized_project):
+        result = _add(initialized_project, origin="ai_auto")
+        assert result["status"] == "recorded" and result["decision_status"] == "proposed"
+
+    def test_omitted_declarations_are_unknown_and_shown_as_not_recorded(
+        self, initialized_project, fixed_lineage_clock
+    ):
+        _add(initialized_project)
+
+        doc = yaml.safe_load(_lineage_file(initialized_project).read_text(encoding="utf-8"))
+        assert doc["declared"] == {
+            "origin": "unknown",
+            "recorded_timing": "unknown",
+            "decision_kind": "unknown",
+        }
+        # What a reader shows (the view pm_decision_query is built on).
+        pm = _pm(initialized_project)
+        [adr] = _storage.load_decisions(pm)
+        view = lineage_view(adr, read_lineage_raw(pm, "ADR-001"))
+        assert view.derived is False
+        assert view.recorded_at == _LINEAGE_NOW
+        assert view.not_recorded == ["origin", "recorded_timing", "decision_kind"]
+
+    @pytest.mark.parametrize(
+        ("kwargs", "code"),
+        [
+            ({"status": "adopted"}, "invalid_status"),
+            ({"status": "deprecated"}, "invalid_status"),
+            ({"status": "superseded"}, "invalid_status"),
+            ({"status": "Accepted"}, "invalid_status"),
+            ({"status": ""}, "invalid_status"),
+            ({"origin": "robot"}, "invalid_origin"),
+            ({"recorded_timing": "later"}, "invalid_recorded_timing"),
+            ({"decision_kind": "misc"}, "invalid_decision_kind"),
+            ({"status": "accepted", "origin": "ai_auto"}, "status_conflicts_with_origin"),
+        ],
+        ids=[
+            "lifecycle-word",
+            "deprecated",
+            "superseded",
+            "wrong-case",
+            "empty",
+            "origin",
+            "recorded_timing",
+            "decision_kind",
+            "accepted+ai_auto",
+        ],
+    )
+    def test_refusals_write_nothing(self, initialized_project, kwargs, code):
+        _seed_adr(initialized_project, "ADR-001")
+        before = _ledger_bytes(initialized_project)
+
+        result = _add(initialized_project, **kwargs)
+
+        assert result["status"] == "error"
+        assert result["code"] == code
+        assert result["message"]
+        assert _ledger_bytes(initialized_project) == before
+        assert not (_pm(initialized_project) / "decision_lineage").exists()
+
+    def test_a_lifecycle_word_is_pointed_at_accepted(self, initialized_project):
+        result = _add(initialized_project, status="adopted")
+        assert "status=accepted" in result["message"]
+
+    def test_a_refused_status_is_redacted_in_the_message(self, initialized_project):
+        secret = "AKIA" + "Q" * 16
+        result = _add(initialized_project, status=secret)
+        assert result["code"] == "invalid_status"
+        assert secret not in result["message"]
+
+    @pytest.mark.parametrize("where", ["decisions.yaml", "lineage"])
+    def test_exhausted_numbers_write_nothing(self, initialized_project, where):
+        if where == "decisions.yaml":
+            _seed_adr(initialized_project, "ADR-999999")
+        else:
+            path = _lineage_file(initialized_project, "ADR-999999")
+            path.parent.mkdir(parents=True)
+            path.write_text("decision_id: ADR-999999\n", encoding="utf-8")
+        before = _ledger_bytes(initialized_project)
+
+        result = _add(initialized_project)
+
+        assert result["status"] == "error"
+        assert result["code"] == "decision_id_exhausted"
+        assert _ledger_bytes(initialized_project) == before
+
+    def test_a_symlinked_lineage_directory_is_refused_before_anything_is_written(
+        self, initialized_project, tmp_path
+    ):
+        _seed_adr(initialized_project, "ADR-001")
+        outside = tmp_path / "elsewhere"
+        outside.mkdir()
+        (_pm(initialized_project) / "decision_lineage").symlink_to(
+            outside, target_is_directory=True
+        )
+        before = _ledger_bytes(initialized_project)
+
+        result = _add(initialized_project)
+
+        assert result["status"] == "error"
+        assert result["code"] == "decision_lineage_unreadable"
+        assert list(outside.iterdir()) == []
+        assert _ledger_bytes(initialized_project) == before
+        assert [d["id"] for d in _decisions_on_disk(initialized_project)] == ["ADR-001"]
+
+    # ── The three failure paths of design §9.1 row 2 ──
+
+    def test_a_held_lineage_lock_times_out_and_writes_nothing(
+        self, initialized_project, monkeypatch
+    ):
+        """(a) The lineage lock is taken before anything is written."""
+        _seed_adr(initialized_project, "ADR-001")
+        pm = _pm(initialized_project)
+        before = _ledger_bytes(initialized_project)
+        holding = threading.Event()
+        release = threading.Event()
+
+        def hold() -> None:
+            with _storage._yaml_transaction(pm, "decision_lineage-ADR-002", timeout=5):
+                holding.set()
+                release.wait(10)
+
+        holder = threading.Thread(target=hold)
+        holder.start()
+        try:
+            assert holding.wait(5)
+            monkeypatch.setenv("PM_LOCK_TIMEOUT_S", "0.2")
+            with pytest.raises(PmServerError, match="decision_lineage-ADR-002"):
+                _add(initialized_project)
+        finally:
+            release.set()
+            holder.join(10)
+
+        assert _ledger_bytes(initialized_project) == before
+        assert [d["id"] for d in _decisions_on_disk(initialized_project)] == ["ADR-001"]
+
+    def test_an_os_error_on_the_lineage_keeps_the_adr_and_says_so(
+        self, initialized_project, monkeypatch, fixed_lineage_clock
+    ):
+        """(b) decisions.yaml is saved; the lineage is reported missing."""
+        real_save = _storage._save_yaml
+
+        def failing(path, data, header_name):
+            if Path(path).parent.name == "decision_lineage":
+                raise OSError(28, "No space left on device")
+            return real_save(path, data, header_name)
+
+        monkeypatch.setattr(_storage, "_save_yaml", failing)
+        result = _add(initialized_project, origin="human", decision_kind="technical")
+
+        assert result["status"] == "recorded" and result["decision_id"] == "ADR-001"
+        assert result["lineage"] == "missing"
+        assert result["recorded_at"] is None
+        assert result["decision_status"] == "proposed" and result["lifecycle"] == "proposed"
+        assert _codes(result) == ["decision_lineage_not_written"]
+        assert result["warnings"][0]["level"] == "warning"
+        assert "No space left" not in str(result)
+        [stored] = _decisions_on_disk(initialized_project)
+        assert stored["id"] == "ADR-001" and stored["status"] == "proposed"
+        assert not _lineage_file(initialized_project).exists()
+
+        # A reader derives the lifecycle from the status meanwhile.
+        pm = _pm(initialized_project)
+        [adr] = _storage.load_decisions(pm)
+        view = lineage_view(adr, read_lineage_raw(pm, "ADR-001"))
+        assert view.derived is True and view.effective_lifecycle == "proposed"
+
+        # The next lineage change starts the lineage (pm_update_decision goes
+        # through this function); nothing after the fact is invented.
+        monkeypatch.setattr(_storage, "_save_yaml", real_save)
+        changed = _storage.change_decision_lineage(pm, "ADR-001", LineageChange(note="later"))
+        assert changed.status == "updated"
+        assert changed.events_added == ["lineage_started", "note"]
+        doc = yaml.safe_load(_lineage_file(initialized_project).read_text(encoding="utf-8"))
+        assert doc["recorded_at"] is None
+        assert doc["declared"]["origin"] == "unknown"
+        assert doc["lifecycle"] == "proposed"
+
+    def test_a_preexisting_lineage_is_left_untouched(self, initialized_project, monkeypatch):
+        """(c) A file already at the new id's path is never overwritten."""
+        path = _lineage_file(initialized_project, "ADR-001")
+        path.parent.mkdir(parents=True)
+        path.write_text(
+            "# placed by hand\ndecision_id: ADR-001\nlifecycle: rejected\n", encoding="utf-8"
+        )
+        before = path.read_bytes()
+        # Numbering normally skips lineage files (design §5.1); line it up with
+        # the existing file, as a writer that ignored the lock order would.
+        monkeypatch.setattr(_storage, "_lineage_stems", lambda _pm_path: [])
+
+        result = _add(initialized_project, origin="human")
+
+        assert result["status"] == "recorded" and result["decision_id"] == "ADR-001"
+        assert result["lineage"] == "missing"
+        assert result["recorded_at"] is None
+        assert _codes(result) == ["decision_lineage_preexisting"]
+        assert "reads may show its lifecycle" in result["warnings"][0]["message"]
+        assert path.read_bytes() == before
+        assert [d["id"] for d in _decisions_on_disk(initialized_project)] == ["ADR-001"]
+
+        # The file has no anchor, so readers attribute it to the new ADR; the
+        # response reports that lifecycle, not the proposed one it started with.
+        pm = _pm(initialized_project)
+        [adr] = _storage.load_decisions(pm)
+        view = lineage_view(adr, read_lineage_raw(pm, "ADR-001"))
+        assert view.derived is False and view.effective_lifecycle == "rejected"
+        assert result["decision_status"] == "proposed"
+        assert result["lifecycle"] == view.effective_lifecycle
+
+    def test_a_preexisting_lineage_of_another_adr_reports_the_derived_lifecycle(
+        self, initialized_project, monkeypatch
+    ):
+        """(c) An anchored file for another title is not attributed to the new ADR."""
+        path = _lineage_file(initialized_project, "ADR-001")
+        path.parent.mkdir(parents=True)
+        other = {"date": "2026-01-01", "title_sha256": _lineage.title_sha256("other")}
+        path.write_text(
+            yaml.safe_dump({"decision_id": "ADR-001", "anchor": other, "lifecycle": "rejected"}),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(_storage, "_lineage_stems", lambda _pm_path: [])
+
+        result = _add(initialized_project, status="accepted")
+
+        assert _codes(result) == ["decision_lineage_preexisting"]
+        pm = _pm(initialized_project)
+        [adr] = _storage.load_decisions(pm)
+        view = lineage_view(adr, read_lineage_raw(pm, "ADR-001"))
+        assert view.derived is True and view.effective_lifecycle == "adopted"
+        assert result["lifecycle"] == view.effective_lifecycle
+
+    @pytest.mark.skipif(
+        not hasattr(os, "geteuid") or os.geteuid() == 0,
+        reason="root ignores directory permissions",
+    )
+    def test_an_unsearchable_lineage_directory_keeps_the_adr_and_says_so(self, initialized_project):
+        """(b) Path.exists() raising EACCES is reported, not raised."""
+        lineage_dir = _pm(initialized_project) / "decision_lineage"
+        lineage_dir.mkdir()
+        lineage_dir.chmod(0)
+        try:
+            result = _add(initialized_project)
+        finally:
+            lineage_dir.chmod(0o755)
+
+        assert result["status"] == "recorded" and result["decision_id"] == "ADR-001"
+        assert result["lineage"] == "missing"
+        assert result["recorded_at"] is None
+        assert result["lifecycle"] == "proposed"
+        assert _codes(result) == ["decision_lineage_not_written"]
+        assert str(lineage_dir) not in str(result)
+        assert [d["id"] for d in _decisions_on_disk(initialized_project)] == ["ADR-001"]
+        assert list(lineage_dir.iterdir()) == []
 
 
 class TestPmList:

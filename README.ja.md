@@ -282,7 +282,7 @@ pmlens uninstall --target auto
 | ツール | 説明 |
 |---|---|
 | `pm_log` | 日次ログ記録 + タスク自動紐付け（progress / decision / blocker / note / milestone） |
-| `pm_add_decision` | ADR 追加（context、decision、consequences を構造化） |
+| `pm_add_decision` | ADR 追加（context、decision、consequences を構造化）。既定は `proposed` で記録し、`status="accepted"` はユーザーが内容そのものを受け入れた時だけ渡す（規約であり、誰が受け入れたかを pmlens は確かめられない）。申告（`origin`・`recorded_timing`・`decision_kind`、既定は `unknown`）と記録時刻は `.pm/decision_lineage/ADR-NNN.yaml` に申告のまま保存し、検証はしない |
 
 ### 分析
 

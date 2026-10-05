@@ -831,6 +831,8 @@ class TestCreate:
         view = lineage_view(result.decision, read_lineage_raw(tmp_pm_path, "ADR-002"))
         assert view.derived is False  # no anchor in that file: used unchecked, but noted
         assert "decision_lineage_anchor_missing" in _codes(view)
+        # The result reports what readers show, i.e. the file's lifecycle.
+        assert result.lifecycle == view.effective_lifecycle == "rejected"
 
     def test_a_symlink_at_the_lineage_path_is_not_written_through(
         self, tmp_pm_path: Path, tmp_path: Path
@@ -847,6 +849,8 @@ class TestCreate:
         result = add_decision_with_lineage(tmp_pm_path, build)
 
         assert result.lineage_state == "preexisting"
+        # Readers refuse the symlink and derive the lifecycle from the status.
+        assert result.lifecycle == "proposed"
         assert outside.read_text() == "keep\n" and path.is_symlink()
         # Numbering counts the symlink as a lineage, so the next ADR goes past it.
         assert add_decision_with_lineage(tmp_pm_path, _build()).decision.id == "ADR-002"
@@ -884,6 +888,27 @@ class TestCreate:
         doc = _read_doc(tmp_pm_path)
         assert doc["anchor"]["date"] == stored.date.isoformat()
         assert lineage.anchor_state(doc, stored) == "match"
+
+    @pytest.mark.skipif(
+        not hasattr(os, "geteuid") or os.geteuid() == 0,
+        reason="root ignores directory permissions",
+    )
+    def test_an_unsearchable_lineage_directory_is_not_written_not_raised(self, tmp_pm_path: Path):
+        # Path.exists() raises PermissionError (EACCES) instead of returning
+        # False; decisions.yaml is already saved by then, so it must come back
+        # as not_written rather than an exception that invites a duplicate retry.
+        directory = tmp_pm_path / "decision_lineage"
+        directory.mkdir()
+        directory.chmod(0)
+        try:
+            result = add_decision_with_lineage(tmp_pm_path, _build(DecisionStatus.ACCEPTED))
+        finally:
+            directory.chmod(0o755)
+
+        assert result.lineage_state == "not_written" and result.recorded_at is None
+        assert result.lifecycle == "adopted"  # derived from accepted
+        assert [d.id for d in load_decisions(tmp_pm_path)] == ["ADR-001"]
+        assert list(directory.iterdir()) == []
 
     def test_os_error_on_the_lineage_keeps_the_adr_and_a_later_change_starts_one(
         self, tmp_pm_path: Path, monkeypatch: pytest.MonkeyPatch

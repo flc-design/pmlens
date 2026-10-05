@@ -271,3 +271,35 @@ def test_tool_allocates_its_id_inside_the_ledger_lock(
 
     assert seen, f"{attr} was never called — the probe is not on the id path"
     assert not any(seen), f"{attr} ran while {lock_name} was NOT locked"
+
+
+def test_pm_add_decision_writes_the_lineage_while_the_decisions_lock_is_held(
+    tool_project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Decision Lineage (ADR-056 S1): the lineage is written inside the ledger lock.
+
+    pm_add_decision creates ADR-NNN's lineage file in the same transaction as
+    the ADR: at the moment the lineage is saved, decisions.yaml's lock (and the
+    ADR's own lineage lock) must shut another thread out, or a concurrent
+    writer could number or rewrite between the two files.
+    """
+    import pmlens.storage as storage
+
+    pm_path = tool_project / ".pm"
+    seen: dict[str, list[bool]] = {"decisions.yaml": [], "decision_lineage-ADR-001": []}
+    real_save = storage._save_yaml
+
+    def probed_save(path: Path, data, header_name: str) -> None:
+        if Path(path).parent.name == "decision_lineage":
+            for lock_name, results in seen.items():
+                _lock_probe(pm_path, lock_name, results)(lambda: None)()
+        real_save(path, data, header_name)
+
+    monkeypatch.setattr(storage, "_save_yaml", probed_save)
+
+    _call_add_decision(tool_project)
+
+    assert (pm_path / "decision_lineage" / "ADR-001.yaml").exists()
+    for lock_name, results in seen.items():
+        assert results, f"the lineage was never saved through _save_yaml ({lock_name})"
+        assert not any(results), f"the lineage was written while {lock_name} was NOT locked"

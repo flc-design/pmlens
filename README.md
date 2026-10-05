@@ -292,7 +292,7 @@ dataclasses, atomic-write helpers).
 | Tool | Description |
 |---|---|
 | `pm_log` | Daily log entry with auto task linking (progress / decision / blocker / note / milestone) |
-| `pm_add_decision` | Add ADR with context, decision, and consequences |
+| `pm_add_decision` | Add ADR with context, decision, and consequences. Saved as `proposed` by default; pass `status="accepted"` only when the user has accepted the content itself (a convention: pmlens cannot verify who accepted it). Declared provenance (`origin`, `recorded_timing`, `decision_kind`, default `unknown`) and the recording time go to `.pm/decision_lineage/ADR-NNN.yaml`, stored as declared, not verified |
 
 ### Analysis
 

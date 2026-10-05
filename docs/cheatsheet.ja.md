@@ -89,7 +89,7 @@ Claude Code セッション:
 | ツール | 説明 | 主要パラメータ |
 |--------|------|----------------|
 | `pm_log` | デイリーログに記録（作業中タスクに自動紐付け） | `entry`, `category="progress"` |
-| `pm_add_decision` | ADR（設計判断記録）を保存（ID自動採番） | `title`, `context`, `decision` |
+| `pm_add_decision` | ADR（設計判断記録）を保存（ID自動採番）。既定は proposed、`accepted` はユーザーが内容を受け入れた時だけ | `title`, `context`, `decision`, `status="proposed"`, `origin?`, `recorded_timing?`, `decision_kind?` |
 | `pm_velocity` | ベロシティとトレンド分析 | `weeks=4` |
 | `pm_risks` | 自動検出 + 手動登録リスク一覧 | `project_path?` |
 
