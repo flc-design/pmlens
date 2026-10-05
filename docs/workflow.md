@@ -196,12 +196,23 @@ MYAPP-001 完了        → pm_update_task
 ダッシュボード         → pm_dashboard
 全プロジェクト状態     → pm_dashboard(project_path=None)
 ブロッカー確認         → pm_blockers
-設計決定を記録         → pm_add_decision
+設計決定を記録         → pm_add_decision（proposed で記録し、ゲートで採択）
 ベロシティ確認         → pm_velocity
 リスク検知            → pm_risks
 CLAUDE.md ルール更新   → pm_update_claudemd
 プロジェクト一覧       → pm_list
 ```
+
+組み込みのワークフロー（development / discovery / brainstorming）は、ADR を
+`status=proposed` で記録し、ユーザーがゲートで承認した時に `pm_update_decision` で
+adopted にするよう案内する（ゲートはエンジンが強制しないので、承認を待つのはモデルの規約）。
+この案内には次の限界がある。
+
+- 開始済みのワークフローには反映されない（開始時にテンプレートのステップを複製するため）。
+- `.pm/workflow_templates/` のカスタムテンプレートにも反映されない。
+- 開始したワークフローは新しい案内を `.pm/workflows.yaml` に複製する。旧版の pmlens は
+  `status` 引数も `pm_update_decision` も持たないので、同じ `.pm` を使うホストをすべて
+  上げてからワークフローを開始する。
 
 ---
 

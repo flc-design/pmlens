@@ -170,6 +170,8 @@ steps:
         readers will need)
       The Knowledge Records (requirements + spec) and the ADR together
       form the handoff package for the development workflow.
+      Record the ADR with status=proposed. When the user approves at this gate, set
+      it to adopted with pm_update_decision, giving the approval as the reason.
     tool_hint: pm_add_decision
     gate: user_approval
     required_artifacts:

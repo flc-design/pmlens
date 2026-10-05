@@ -66,6 +66,8 @@ steps:
     name: Confirm Direction
     description: >
       Finalize the direction. Record the decision as an ADR if significant.
+      Record the ADR with status=proposed. When the user approves at this gate, set
+      it to adopted with pm_update_decision, giving the approval as the reason.
       Prepare to chain into the development workflow.
     tool_hint: pm_add_decision
     gate: user_approval
