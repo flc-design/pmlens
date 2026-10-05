@@ -195,6 +195,14 @@ def test_lens_includes_pm_knowledge_query(lens_server):
     assert "pm_knowledge_query" in lens_server.REGISTERED_TOOLS
 
 
+def test_lens_shows_decisions_but_cannot_record_them(lens_server):
+    """Decision Lineage S1 (D9): ADR を読む pm_decision_query は Lens に出て、
+    ADR を書くツールは出ない."""
+    assert "pm_decision_query" in lens_server.REGISTERED_TOOLS
+    assert "pm_add_decision" not in lens_server.REGISTERED_TOOLS
+    assert "pm_update_decision" not in lens_server.REGISTERED_TOOLS
+
+
 def test_pm_knowledge_query_rejects_update(normal_server, tmp_path):
     """pm_knowledge_query は action=update を拒否する (read-only 契約)."""
     # tmp_path に最小の .pm を作って読み込み可能にする

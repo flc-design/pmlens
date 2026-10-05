@@ -36,7 +36,7 @@ Track tasks, visualize progress, record decisions — through natural language i
 ## Features
 
 - **🔌 Multi-host first** — registers in **Claude Code, Codex CLI, Cursor and Grok Build** with one command (`pmlens install --target=auto`). Project rules sync to `CLAUDE.md` and `AGENTS.md` automatically (ADR-008). Switch hosts mid-project without losing context — same `.pm/` data, same workflows
-- **44 MCP tools + 2 compatibility aliases** — task CRUD, child issues, status, blockers, velocity, dashboard, prompt packs, ADR, session memory, workflows, knowledge records, multi-host rules injection, cross-host outbox bridge, content pipeline (recorded knowledge → redacted drafts), and more
+- **45 MCP tools + 2 compatibility aliases** — task CRUD, child issues, status, blockers, velocity, dashboard, prompt packs, ADR, session memory, workflows, knowledge records, multi-host rules injection, cross-host outbox bridge, content pipeline (recorded knowledge → redacted drafts), and more
 - **Workflow engine** — template-based development workflows with loops, user gates, and chaining (Discovery → Development)
 - **Knowledge records** — structured findings between casual memory and formal ADR (research, tradeoff, spec, etc.)
 - **Super Research skill** — 3 parallel agents (Domain Expert, Critical Analyst, Lateral Thinker) + Depth Check (6 dimensions) + Fact Check + Cross-Check
@@ -272,7 +272,7 @@ dataclasses, atomic-write helpers).
 
 ---
 
-## MCP Tools (44 tools + 2 compatibility aliases)
+## MCP Tools (45 tools + 2 compatibility aliases)
 
 ### Project Management
 
@@ -293,6 +293,7 @@ dataclasses, atomic-write helpers).
 |---|---|
 | `pm_log` | Daily log entry with auto task linking (progress / decision / blocker / note / milestone) |
 | `pm_add_decision` | Add ADR with context, decision, and consequences. Saved as `proposed` by default; pass `status="accepted"` only when the user has accepted the content itself (a convention: pmlens cannot verify who accepted it). Declared provenance (`origin`, `recorded_timing`, `decision_kind`, default `unknown`) and the recording time go to `.pm/decision_lineage/ADR-NNN.yaml`, stored as declared, not verified |
+| `pm_decision_query` | Read ADRs and their lineage without changing anything (read-only, also available in Lens mode). `action="list"` lists every ADR with its status and lifecycle (`lifecycle="proposed"` lists the ones still waiting for the user's review); `action="get"` returns the ADR text, declared provenance, links in both directions and recent events. An ADR without a lineage is shown as `derived` from its status, and `not_recorded` names what was never recorded. Declared values and events are shown as recorded, not verified; unknown keys come back by name only, and secret-like strings are redacted in the response |
 
 ### Analysis
 
@@ -469,6 +470,7 @@ also write to its own outbox database. The table below reflects the actual
 | Tool | Claude Code (default) | Lens viewer (`PM_LENS=1`) | Desktop outbox host (`PM_LENS=1` + `PM_DESKTOP_WRITE=1`) |
 |---|---|---|---|
 | `pm_recall` / `pm_status` / other reads | yes | yes (main `.pm/memory.db` stays read-only) | yes |
+| `pm_decision_query` | yes | yes (reads `decisions.yaml` and `.pm/decision_lineage/` without writing) | yes |
 | `pm_outbox_pending` | yes | yes | yes |
 | `pm_outbox_remember` / `pm_outbox_log` | yes | no | yes |
 | `pm_outbox_merge` / `pm_outbox_reject` | yes | no | no |
@@ -730,7 +732,7 @@ Claude Code Session
   └── MCP Server (stdio)
         └── pmlens serve
               │
-              ├── server.py    → 44 MCP tools + 2 compatibility aliases (FastMCP)
+              ├── server.py    → 45 MCP tools + 2 compatibility aliases (FastMCP)
               ├── models.py    → Pydantic v2 data models (18 models, 16 enums)
               ├── storage.py   → YAML read/write
               ├── workflow.py  → Workflow engine (state machine)

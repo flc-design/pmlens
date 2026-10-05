@@ -7,9 +7,11 @@ decisions.yaml keeps the four-value ``status`` that already-shipped readers
 understand; it is a projection of the lifecycle (:func:`project_status`).
 
 This module never writes and never locks. It reads one lineage file at a time
-through a bounded reader (:func:`read_lineage_raw`) and otherwise only builds
-values: views for readers (:func:`lineage_view`) and new documents for the
-writers in ``storage`` (:func:`new_lineage_doc`, :func:`apply_change`).
+through a bounded reader (:func:`read_lineage_raw`), lists the lineage
+directory only to find links pointing at an ADR (:func:`scan_linked_from`),
+and otherwise only builds values: views for readers (:func:`lineage_view`) and
+new documents for the writers in ``storage`` (:func:`new_lineage_doc`,
+:func:`apply_change`).
 ``storage`` imports this module and owns every lock and write; this module does
 not import ``storage`` (tests/test_lineage.py pins both with an AST check).
 
@@ -66,6 +68,13 @@ MAX_LABEL_CHARS = 100
 RECENT_EVENTS = 20
 MAX_UNKNOWN_KEYS = 50
 MAX_UNKNOWN_FIELDS = 10
+# The exit pass of a read (scrub_view) withholds, unscanned, any run longer
+# than this without whitespace: some redaction patterns take time quadratic in
+# such a run (65,536 letters take seconds), and ADR text from decisions.yaml
+# has no length cap. At least MAX_TEXT_CHARS, so the pass never withholds a
+# value a lineage view already let through.
+MAX_SCAN_RUN_CHARS = 4_096
+UNSCANNED_PLACEHOLDER = "<REDACTED:unscanned>"
 
 UNKNOWN = "unknown"
 LINK_TYPES: tuple[str, ...] = ("supersedes", "superseded_by", "amends")
@@ -264,21 +273,64 @@ def _scrub_clip(text: str, limit: int) -> tuple[str, bool, int]:
     return out, cut or len(text) > len(pre), count
 
 
+def scrub_label_counted(value: object, limit: int = MAX_LABEL_CHARS) -> tuple[str, int]:
+    """:func:`scrub_label`, also returning how many redactions were made.
+
+    For a reader that reports the redactions of a response
+    (``decision_text_secrets_redacted``): a label redacted before the exit
+    pass reaches :func:`scrub_view` already clean, so its count must be
+    carried separately or it is lost.
+    """
+    text, cut, count = _scrub_clip(str(value), limit)
+    return (text + "…" if cut else text), count
+
+
 def scrub_label(value: object, limit: int = MAX_LABEL_CHARS) -> str:
     """A short, redacted rendering of an untrusted value for a message.
 
     ``str(value)`` is redacted and cut to ``limit`` characters; "…" marks a cut.
     """
-    text, cut, _ = _scrub_clip(str(value), limit)
-    return text + "…" if cut else text
+    return scrub_label_counted(value, limit)[0]
+
+
+# A whitespace-free run longer than MAX_SCAN_RUN_CHARS. The lookbehind lets
+# only the first character of a run start a match, so finding the runs takes
+# time linear in the text (a bare ``\S{n,}`` would retry inside every run).
+_LONG_RUN_RE = re.compile(rf"(?<!\S)\S{{{MAX_SCAN_RUN_CHARS + 1},}}")
+
+
+def _scrub_any_length(text: str) -> tuple[str, int]:
+    """:func:`scrub_text` for a string of any length, in time linear in it.
+
+    The patterns whose cost grows with the square of a run's length only
+    match runs without whitespace, so each such run longer than
+    MAX_SCAN_RUN_CHARS is first replaced, whole and unscanned, by
+    UNSCANNED_PLACEHOLDER. Whole runs: a run cut into pieces could leave a
+    secret split so that no piece matches its pattern. The rest of the text is
+    kept as is, so the patterns that span whitespace (``Bearer <token>``,
+    ``password = <value>``) still see their context.
+
+    Returns:
+        The scrubbed text and the count of replacements, each withheld run
+        counting as one.
+    """
+    withheld = 0
+    if len(text) > MAX_SCAN_RUN_CHARS:
+        text, withheld = _LONG_RUN_RE.subn(UNSCANNED_PLACEHOLDER, text)
+    scrubbed, count = scrub_text(text)
+    return scrubbed, count + withheld
 
 
 def scrub_view(value: object) -> tuple[object, int]:
     """Redact every string in a response built from plain dicts and lists.
 
-    Meant for the exit of a read tool: one pass over the whole bounded response
-    so no field is missed. Dict keys are left alone (responses use fixed key
-    names; untrusted key names travel as list values). Nothing is mutated.
+    Meant for the exit of a read tool: one pass over the whole response so no
+    field is missed. The response's shape is bounded by its allow-list, but
+    not every string in it is (ADR text from decisions.yaml has no length
+    cap), so a whitespace-free run longer than MAX_SCAN_RUN_CHARS is withheld
+    unscanned and counted (:func:`_scrub_any_length`); the pass then takes
+    time linear in the response. Dict keys are left alone (responses use fixed
+    key names; untrusted key names travel as list values). Nothing is mutated.
 
     Returns:
         A redacted copy and the total number of replacements.
@@ -288,7 +340,7 @@ def scrub_view(value: object) -> tuple[object, int]:
     def walk(node: object) -> object:
         nonlocal total
         if isinstance(node, str):
-            text, count = scrub_text(node)
+            text, count = _scrub_any_length(node)
             total += count
             return text
         if isinstance(node, dict):
@@ -792,6 +844,54 @@ def _view_events(raw: object, notes: _ViewNotes) -> tuple[list[dict], int, list[
     return shown, len(raw), declared_later
 
 
+def _attributed_doc(
+    decision: Decision, raw: RawLineage, *, duplicate: bool = False
+) -> tuple[dict | None, str | None]:
+    """The lineage document to attribute to ``decision``, or why there is none.
+
+    A lineage belongs to the ADR only when the ADR id is valid and unique, the
+    file was read, it is a mapping whose ``decision_id`` names this ADR and its
+    anchor (when present) matches. :func:`lineage_view` and
+    :func:`attributed_links` share this rule, so a reader never attributes a
+    lineage the view would not.
+
+    Returns:
+        ``(doc, None)`` when attributed; ``(None, code)`` with the note code
+        that says why not; ``(None, None)`` when the ADR simply has no file.
+    """
+    if not is_decision_id(decision.id):
+        return None, DECISION_ID_INVALID
+    if duplicate:
+        return None, DECISION_ID_DUPLICATE
+    if raw.decision_id != decision.id and (raw.exists or raw.error):
+        return None, LINEAGE_UNREADABLE
+    if raw.error:
+        return None, raw.error
+    if not raw.exists:
+        return None, None
+    doc = raw.data
+    if not isinstance(doc, dict) or doc.get("decision_id") != decision.id:
+        return None, LINEAGE_UNREADABLE
+    if anchor_state(doc, decision) == "mismatch":
+        return None, LINEAGE_ANCHOR_MISMATCH
+    return doc, None
+
+
+def attributed_links(
+    decision: Decision, raw: RawLineage, *, duplicate: bool = False
+) -> dict[str, list[str]] | None:
+    """The links of the lineage attributed to ``decision``, or ``None``.
+
+    The same attribution rule as :func:`lineage_view` and the same filtering
+    of link values (ADR ids only, deduplicated, at most MAX_LINKS_PER_TYPE),
+    without building the rest of the view. Pure; no I/O.
+    """
+    doc, _ = _attributed_doc(decision, raw, duplicate=duplicate)
+    if doc is None:
+        return None
+    return _view_links(doc.get("links"), _ViewNotes())
+
+
 def lineage_view(decision: Decision, raw: RawLineage, *, duplicate: bool = False) -> LineageView:
     """Build what readers show for one ADR; pure, no I/O (design §2.7).
 
@@ -826,29 +926,12 @@ def lineage_view(decision: Decision, raw: RawLineage, *, duplicate: bool = False
             redactions=notes.redactions,
         )
 
-    if not is_decision_id(decision.id):
-        notes.add(DECISION_ID_INVALID)
+    doc, why_not = _attributed_doc(decision, raw, duplicate=duplicate)
+    if doc is None:
+        if why_not is not None:
+            notes.add(why_not)
         return derived()
-    if duplicate:
-        notes.add(DECISION_ID_DUPLICATE)
-        return derived()
-    if raw.decision_id != decision.id and (raw.exists or raw.error):
-        notes.add(LINEAGE_UNREADABLE)
-        return derived()
-    if raw.error:
-        notes.add(raw.error)
-        return derived()
-    if not raw.exists:
-        return derived()
-    doc = raw.data
-    if not isinstance(doc, dict) or doc.get("decision_id") != decision.id:
-        notes.add(LINEAGE_UNREADABLE)
-        return derived()
-    anchor = anchor_state(doc, decision)
-    if anchor == "mismatch":
-        notes.add(LINEAGE_ANCHOR_MISMATCH)
-        return derived()
-    if anchor == "missing":
+    if anchor_state(doc, decision) == "missing":
         notes.add(LINEAGE_ANCHOR_MISSING)
 
     schema: int | None = None
@@ -923,6 +1006,105 @@ def effective_lifecycle(
     usable lineage).
     """
     return lineage_view(decision, raw, duplicate=duplicate).effective_lifecycle
+
+
+def key_labels(keys: Iterable[object], limit: int = MAX_UNKNOWN_KEYS) -> tuple[list[str], int]:
+    """Untrusted key names for a response: ``str()``, redacted, cut, at most ``limit``.
+
+    Used for the unknown keys of a decisions.yaml record: only the names are
+    shown, never the values, which may be bytes, aliases or secrets.
+
+    Returns:
+        The names (each at most MAX_LABEL_CHARS) and how many redactions were made.
+    """
+    notes = _ViewNotes()
+    return _key_names(keys, limit, notes), notes.redactions
+
+
+@dataclass
+class LinkedFrom:
+    """Other ADRs whose attributed lineage links to one ADR (design §4.2).
+
+    Attributes:
+        supersedes: ADRs that list it under ``supersedes``.
+        amends: ADRs that list it under ``amends``.
+        superseded_by: ADRs that list it under ``superseded_by`` (not shown as
+            ``linked_from``; used to find one-sided links).
+        truncated: How many lineage files were left unread because of the
+            scan limit.
+    """
+
+    supersedes: list[str] = field(default_factory=list)
+    amends: list[str] = field(default_factory=list)
+    superseded_by: list[str] = field(default_factory=list)
+    truncated: int = 0
+
+
+def _decision_order(decision_id: str) -> tuple[int, str]:
+    """Sort key for DECISION_ID_RE ids: by number, then by text (ADR-010 vs ADR-0010).
+
+    The digits are ASCII only (DECISION_ID_RE), so ``int`` cannot fail.
+    """
+    return int(decision_id[4:]), decision_id
+
+
+def scan_linked_from(
+    pm_path: Path,
+    decision_id: str,
+    decisions: Mapping[str, Decision],
+    *,
+    limit: int | None = None,
+) -> LinkedFrom:
+    """Collect the ADRs whose lineage links to ``decision_id``, without writing.
+
+    The lineage directory is globbed for ``ADR-*.yaml``; only stems matching
+    DECISION_ID_RE are read, through the bounded reader, in number order and
+    at most ``limit`` of them (LINKED_FROM_SCAN_LIMIT by default). A file
+    counts only when its lineage is attributed to an ADR of ``decisions``
+    (:func:`attributed_links`), so an orphaned lineage or one written for an
+    older ADR with the same number links nothing.
+
+    Args:
+        pm_path: The project's ``.pm`` directory.
+        decision_id: The ADR the links should point to.
+        decisions: The ADRs of decisions.yaml whose id is valid and unique.
+        limit: How many lineage files to read at most.
+
+    Returns:
+        The linking ADR ids per link type, and how many files were not read.
+    """
+    found = LinkedFrom()
+    if not is_decision_id(decision_id):
+        return found
+    directory = pm_path / LINEAGE_DIR
+    if directory.is_symlink():  # read_lineage_raw refuses it as well
+        return found
+    try:
+        stems = [entry.stem for entry in directory.glob("ADR-*.yaml")]
+    except OSError:
+        return found
+    stems = sorted(
+        (stem for stem in stems if is_decision_id(stem) and stem != decision_id),
+        key=_decision_order,
+    )
+    cap = LINKED_FROM_SCAN_LIMIT if limit is None else limit
+    if len(stems) > cap:
+        found.truncated = len(stems) - cap
+        stems = stems[:cap]
+    for stem in stems:
+        source = decisions.get(stem)
+        if source is None:
+            continue
+        links = attributed_links(source, read_lineage_raw(pm_path, stem))
+        if links is None:
+            continue
+        if decision_id in links["supersedes"]:
+            found.supersedes.append(stem)
+        if decision_id in links["amends"]:
+            found.amends.append(stem)
+        if decision_id in links["superseded_by"]:
+            found.superseded_by.append(stem)
+    return found
 
 
 # ─── Write-side builders (pure; storage writes) ──────

@@ -1,6 +1,6 @@
 # PM Lens チートシート
 
-> Claude Code / Codex CLI / Cursor / Grok Build 用プロジェクト管理 MCP Server — **44 ツール + 互換名2個**
+> Claude Code / Codex CLI / Cursor / Grok Build 用プロジェクト管理 MCP Server — **45 ツール + 互換名2個**
 > Version 0.16.0 | Python 3.11+ | PyPI: `pmlens`
 
 ---
@@ -90,6 +90,7 @@ Claude Code セッション:
 |--------|------|----------------|
 | `pm_log` | デイリーログに記録（作業中タスクに自動紐付け） | `entry`, `category="progress"` |
 | `pm_add_decision` | ADR（設計判断記録）を保存（ID自動採番）。既定は proposed、`accepted` はユーザーが内容を受け入れた時だけ | `title`, `context`, `decision`, `status="proposed"`, `origin?`, `recorded_timing?`, `decision_kind?` |
+| `pm_decision_query` | ADR と lineage を何も変えずに読む（Lens 対応）。`lifecycle="proposed"` でユーザーの確認待ちの一覧 | `action="list"`, `decision_id?`（get）, `lifecycle?` |
 | `pm_velocity` | ベロシティとトレンド分析 | `weeks=4` |
 | `pm_risks` | 自動検出 + 手動登録リスク一覧 | `project_path?` |
 

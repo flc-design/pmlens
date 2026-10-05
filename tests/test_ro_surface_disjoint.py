@@ -469,9 +469,26 @@ class TestWidenedSurfaces:
         assert not reader_closure & _GRAPH.ledger_writers
         assert not reader_closure & _GRAPH.shell_out_fns
         assert {"error_summary", "scrub_label"} <= _RO_CLOSURE
+        # pm_decision_query sits on the Lens surface: its readers must be in the
+        # RO closure, or the disjointness checks below would pass without
+        # ever looking at them.
+        assert "pm_decision_query" in _RO_SEED
+        assert {
+            "read_lineage_raw",
+            "load_decisions",
+            "lineage_view",
+            "scan_linked_from",
+            "attributed_links",
+            "scrub_view",
+        } <= _RO_CLOSURE
         assert _OUTBOX_WRITE_SEED <= _GRAPH.defined
         assert _ALL_TOOLS > _RO_SEED | _OUTBOX_WRITE_SEED
-        assert {"pm_add_task", "pm_add_decision", "pm_update_rules"} <= _ALL_TOOLS
+        assert {
+            "pm_add_task",
+            "pm_add_decision",
+            "pm_decision_query",
+            "pm_update_rules",
+        } <= _ALL_TOOLS
 
     def test_ro_surface_never_writes_a_ledger(self):
         leaked = _RO_CLOSURE & _GRAPH.ledger_writers

@@ -257,12 +257,13 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
 
 <section class="card" id="tools">
   <h2>3. MCP Tool Catalog</h2>
-  <p class="muted">未リリースの変更: <code>pm_draft_content</code> /
-     <code>pm_drafts_pending</code> を標準名として追加し、旧名も互換名として維持する。
-     Full は44機能・46登録名、Lens は16登録名（Desktop outbox有効時18）のまま。
-     既存の下書きDBを共有する。<a href="content-tool-migration.md">移行ガイド</a>参照。
-     以下のカタログと集計は公開済みバージョンを示す。</p>
-  <p>44 個の MCP ツールがカテゴリ別に提供される。配布モードによって登録される ツール集合が異なる:
+  <p class="muted">未リリースの変更: (1) <code>pm_draft_content</code> /
+     <code>pm_drafts_pending</code> を標準名として追加し、旧名も互換名として維持する
+     （既存の下書きDBを共有する。<a href="content-tool-migration.md">移行ガイド</a>参照）。
+     (2) ADR と lineage を読む読み取り専用の <code>pm_decision_query</code> を追加し、Lens にも登録する。
+     合わせて Full は45機能・47登録名、Lens は17登録名（Desktop outbox有効時19）になる。
+     以下のカタログと集計は公開済みバージョンに (2) を加えたもの。</p>
+  <p>45 個の MCP ツールがカテゴリ別に提供される。配布モードによって登録される ツール集合が異なる:
      <span class="badge badge-ro">RO</span> は Lens モード (<code>PM_LENS=1</code>) で利用可能、
      <span class="badge" style="background:#ede9fe;color:#6d28d9">OUTBOX</span> は Lens + <code>PM_DESKTOP_WRITE=1</code> で追加開放される Desktop Outbox 書込み tool、
      <span class="badge badge-rw">RW</span> は full PM Lens (Claude Code / Codex 配布) のみ。</p>
@@ -313,8 +314,9 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
     <tr><td><code>pm_outbox_merge</code></td><td>pending entries を target project の memory.db / daily log へ promote</td><td><span class="badge badge-rw">RW</span></td></tr>
     <tr><td><code>pm_outbox_reject</code></td><td>pending entries を reason 付きで reject (append-only 保持)</td><td><span class="badge badge-rw">RW</span></td></tr>
 
-    <tr><td rowspan="1">Decisions (ADR)</td>
+    <tr><td rowspan="2">Decisions (ADR)</td>
       <td><code>pm_add_decision</code></td><td>Architecture Decision Record の登録</td><td><span class="badge badge-rw">RW</span></td></tr>
+    <tr><td><code>pm_decision_query</code></td><td>ADR と lineage の読み取り (list/get。書き込みなし、未リリース)</td><td><span class="badge badge-ro">RO</span></td></tr>
 
     <tr><td rowspan="3">Knowledge records</td>
       <td><code>pm_record</code></td><td>research/spec/tradeoff/risk_analysis を構造化記録</td><td><span class="badge badge-rw">RW</span></td></tr>
@@ -329,7 +331,7 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
     <tr><td><code>pm_workflow_list</code></td><td>active/completed/paused/abandoned 一覧</td><td><span class="badge badge-ro">RO</span></td></tr>
     <tr><td><code>pm_workflow_templates</code></td><td>builtin + custom テンプレート一覧</td><td><span class="badge badge-ro">RO</span></td></tr>
   </table>
-  <p class="muted">16 RO + 2 OUTBOX-RW + 26 Full-RW = 44 ツール (2026-08-01, v0.16.0)。Lens 配布では RO_ALLOWLIST 外の
+  <p class="muted">17 RO + 2 OUTBOX-RW + 26 Full-RW = 45 ツール。未リリースの <code>pm_decision_query</code> を除くと 44 ツール (2026-08-01, v0.16.0)。Lens 配布では RO_ALLOWLIST 外の
      ツールが FastMCP に未登録 = 構造的不変条件 (ADR-015/017/018)。OUTBOX 2 ツールは <code>PM_DESKTOP_WRITE=1</code>
      が追加で立った時のみ登録され、main <code>.pm/memory.db</code> は touch しない (ADR-019)。</p>
 </section>
@@ -394,7 +396,7 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
 
     <!-- Outcomes: RO registered + RW excluded -->
     <rect x="100" y="210" width="320" height="60" rx="6" fill="#dcfce7" stroke="#16a34a" stroke-width="1.5"/>
-    <text x="260" y="232" text-anchor="middle" font-weight="700">FastMCP に登録 (16 tools)</text>
+    <text x="260" y="232" text-anchor="middle" font-weight="700">FastMCP に登録 (17 tools)</text>
     <text x="260" y="250" text-anchor="middle" fill="#666" font-size="10">pm_status, pm_next, pm_tasks, pm_blockers, pm_recall,</text>
     <text x="260" y="264" text-anchor="middle" fill="#666" font-size="10">pm_memory_search, pm_dashboard, pm_workflow_status …</text>
 
@@ -405,7 +407,7 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
 
     <!-- Result -->
     <rect x="280" y="300" width="320" height="40" rx="6" fill="#fff" stroke="#888"/>
-    <text x="440" y="324" text-anchor="middle" font-weight="700">MCP クライアントは RO 16 tools のみ確認 (+OUTBOX-RW 2 if PM_DESKTOP_WRITE=1)</text>
+    <text x="440" y="324" text-anchor="middle" font-weight="700">MCP クライアントは RO 17 tools のみ確認 (+OUTBOX-RW 2 if PM_DESKTOP_WRITE=1)</text>
 
     <line x1="260" y1="270" x2="400" y2="300" stroke="#888" stroke-width="1" marker-end="url(#arrow2)"/>
     <line x1="620" y1="270" x2="480" y2="300" stroke="#dc2626" stroke-width="1" marker-end="url(#redarrow)"/>
@@ -639,7 +641,7 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
     <tr><th></th><th>PyPI <code>pmlens</code></th><th>.mcpb bundle (Lens)</th><th>.mcpb + PM_DESKTOP_WRITE</th></tr>
     <tr><td><strong>対象 host</strong></td><td>Claude Code (CLI) / Codex CLI</td><td>Claude Cowork / その他 viewer</td><td>Claude Desktop (Phase 2 bridge)</td></tr>
     <tr><td><strong>インストール</strong></td><td><code>pipx install pmlens</code> &rarr; <code>pmlens install</code></td><td>.mcpb ファイルを host に drag &amp; drop</td><td>.mcpb + manifest が <code>PM_DESKTOP_WRITE=1</code> を auto-propagate (PMSERV-100)</td></tr>
-    <tr><td><strong>登録 tools</strong></td><td>Full RW (44 tools)</td><td>Lens RO (16 tools)</td><td>RO 16 + OUTBOX-RW 2 = 18 tools</td></tr>
+    <tr><td><strong>登録 tools</strong></td><td>Full RW (45 tools)</td><td>Lens RO (17 tools)</td><td>RO 17 + OUTBOX-RW 2 = 19 tools</td></tr>
     <tr><td><strong>環境変数</strong></td><td>未設定</td><td><code>PM_LENS=1</code></td><td><code>PM_LENS=1, PM_DESKTOP_WRITE=1</code></td></tr>
     <tr><td><strong>SQLite モード</strong></td><td>RW main + outbox</td><td><code>?mode=ro&amp;immutable=1</code> main / outbox 不触</td><td>main は RO 不変、outbox <code>~/.pm/desktop/desktop.db</code> は append-only RW</td></tr>
     <tr><td><strong>同一バイナリ?</strong></td><td>はい — 配布物は 1 種類、env で role gating</td><td colspan="2" style="text-align:center">←</td></tr>

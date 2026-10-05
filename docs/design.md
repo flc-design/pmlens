@@ -669,6 +669,37 @@ def pm_add_decision(title: str, context: str, decision: str,
     表示する値で、既存のファイルが ADR に帰属すればその lifecycle、
     そうでなければ status から導いた値になる。"""
 
+@mcp.tool()
+def pm_decision_query(action: str = "list", decision_id: str | None = None,
+                      lifecycle: str | None = None,
+                      project_path: str | None = None) -> dict:
+    """ADR と lineage を読む（読み取り専用。RO_ALLOWLIST に属し Lens にも出る）。
+    action=list: 全 ADR の id / title / date / status / lifecycle / derived /
+    origin。lifecycle を渡すと effective lifecycle（lineage が帰属すればその値、
+    無ければ status から導いた値）で絞る。lifecycle=proposed が未確認の一覧。
+    action=get（decision_id 必須）: ADR を decision キーで包み（操作結果の
+    status と衝突させない）、lineage（申告・declared_later・not_recorded・
+    links・linked_from・末尾 20 件の events）、notice、warnings を返す。
+    linked_from は lineage ディレクトリを ADR-*.yaml で glob し（stem が
+    DECISION_ID_RE に合うものだけ、番号順に最大 500 件。超えたら
+    decision_lineage_linked_from_truncated の注記）、他の ADR の帰属する
+    lineage の supersedes / amends から導く。
+    読み取りは decisions.yaml をロックなしで読み、lineage は有界な読み取り
+    （lineage.read_lineage_raw）と純関数の view だけを使い、何も作らない。
+    decisions.yaml・consequences・lineage の未知キーは名前だけ（PMSERV-253）。
+    入れ子の値は kind ごとの許可リストだけ。応答の全文字列を出口で
+    lineage.scrub_view() でなめ、件数を decision_text_secrets_redacted の
+    警告 1 件で返す（ファイルは変えない）。出口より前に伏せた不正な id や
+    未知の status のラベルの件数も足す。ADR の本文には長さの上限が無く、
+    redact の一部のパターンは空白の無い連続の長さの 2 乗の時間がかかるので、
+    出口では空白の無い 4,096 字（MAX_SCAN_RUN_CHARS）超の連続を走査せずに
+    <REDACTED:unscanned> に置き換えて 1 件と数える（時間は文字数に比例）。
+    食い違い・読めない lineage・
+    未知の status・重複 id・不正 id・anchor の不一致・片側だけの関係は、
+    list では code ごとに 1 件の警告にまとめ、get では対象の ADR について返す。
+    エラーの dict（invalid_action / decision_id_required / invalid_lifecycle /
+    decisions_yaml_unreadable / decision_not_found）に例外の本文は入れない。"""
+
 # ─── 分析 ───
 
 @mcp.tool()
@@ -815,6 +846,7 @@ if __name__ == "__main__":
 | ツール | Code | Lens viewer (`PM_LENS=1`) | Desktop outbox host (`PM_LENS=1` + `PM_DESKTOP_WRITE=1`) |
 |---|---|---|---|
 | `pm_recall` / `pm_status` 等の read | ✅ | ✅ (本体 `.pm/memory.db` は read-only のまま) | ✅ |
+| `pm_decision_query`（ADR と lineage の読み取り。書き込みなし） | ✅ | ✅ | ✅ |
 | `pm_outbox_pending` | ✅ | ✅ | ✅ |
 | `pm_outbox_remember` / `pm_outbox_log` | ✅ | ❌ | ✅ |
 | `pm_outbox_merge` / `pm_outbox_reject` | ✅ | ❌ | ❌ |
@@ -1495,7 +1527,7 @@ pmlens/                            # ← pm-agent から改名
 │   └── pmlens/                    # ← pm_agent から改名
 │       ├── __init__.py
 │       ├── __main__.py            # CLI (click)
-│       ├── server.py              # FastMCP Server (44ツール)
+│       ├── server.py              # FastMCP Server (45ツール + 互換名2個)
 │       ├── models.py              # Pydantic v2 (18モデル, 15 Enum)
 │       ├── storage.py             # YAML CRUD
 │       ├── installer.py           # claude mcp add ラッパー + migrate
@@ -1607,7 +1639,7 @@ Memory Layer 基盤、セッション継続、横断検索・自動化、運用�
 
 ### 現在の規模
 
-- **44 MCP ツール** (server.py)
+- **45 MCP ツール + 互換名2個** (server.py)
 - **18 Pydantic モデル + 15 Enum** (models.py)
 - **1,380+ テスト** (pytest)
 - **5 ワークフローテンプレート** (discovery / development / super-research / brainstorming / content-pipeline)

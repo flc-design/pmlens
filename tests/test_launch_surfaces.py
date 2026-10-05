@@ -364,6 +364,65 @@ def test_content_aliases_are_absent_from_lens_wire_surface(desktop_write: bool) 
 
 
 @pytest.mark.smoke
+@pytest.mark.parametrize("desktop_write", [False, True], ids=["lens", "desktop"])
+def test_lens_wire_surface_reads_decisions_but_cannot_write_them(desktop_write: bool) -> None:
+    """Decision Lineage S1 (D9): the ADR reader is on the Lens wire, its writers are not."""
+    tools = set(_mcp_session(lens=True, desktop_write=desktop_write).tools)
+    assert "pm_decision_query" in tools
+    assert not {"pm_add_decision", "pm_update_decision"} & tools
+
+
+@pytest.mark.smoke
+def test_decisions_round_trip_over_stdio(tmp_project: Path) -> None:
+    """pm_add_decision then pm_decision_query (list, filtered list, get) over the wire.
+
+    Proves the tool's argument schema and that its responses serialize as JSON
+    through a real host path, not just as Python dicts.
+    """
+    project = str(tmp_project)
+    session = _mcp_session(
+        lens=False,
+        calls=[
+            {
+                "name": "pm_add_decision",
+                "arguments": {
+                    "title": "Use SQLite",
+                    "context": "c",
+                    "decision": "d",
+                    "origin": "ai_auto",
+                    "project_path": project,
+                },
+            },
+            {"name": "pm_decision_query", "arguments": {"project_path": project}},
+            {
+                "name": "pm_decision_query",
+                "arguments": {"action": "list", "lifecycle": "adopted", "project_path": project},
+            },
+            {
+                "name": "pm_decision_query",
+                "arguments": {"action": "get", "decision_id": "ADR-001", "project_path": project},
+            },
+        ],
+    )
+    schema = session.tool_definitions["pm_decision_query"]["inputSchema"]
+    assert set(schema["properties"]) == {"action", "decision_id", "lifecycle", "project_path"}
+    assert not schema.get("required")
+
+    added, listed, adopted, got = (
+        json.loads(response["content"][0]["text"]) for response in session.responses
+    )
+    assert added["status"] == "recorded" and added["decision_id"] == "ADR-001"
+    assert [(row["id"], row["lifecycle"], row["origin"]) for row in listed["decisions"]] == [
+        ("ADR-001", "proposed", "ai_auto")
+    ]
+    assert adopted["count"] == 0 and adopted["total"] == 1
+    assert got["decision"]["status"] == "proposed"
+    assert got["lineage"]["derived"] is False
+    assert got["lineage"]["declared"]["origin"] == "ai_auto"
+    assert got["lineage"]["events"][0]["kind"] == "created"
+
+
+@pytest.mark.smoke
 def test_handshake_reports_a_protocol_version(record_property):
     """Record which MCP revision we negotiate — deliberately without pinning it.
 

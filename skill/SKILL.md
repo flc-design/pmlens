@@ -30,6 +30,7 @@ PM Lens は Claude Code のプロジェクト管理を自動化する MCP Server
 ### 記録
 - `pm_log` — 日次ログ記録
 - `pm_add_decision` — ADR（Architecture Decision Record）追加
+- `pm_decision_query` — ADR と lineage を読む（読み取り専用。`lifecycle="proposed"` でユーザーの確認待ちの一覧）
 
 ### 分析
 - `pm_velocity` — ベロシティ計算（週次トレンド付き）

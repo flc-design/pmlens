@@ -406,6 +406,76 @@ def _seed_full_stores(fake_home: Path, project_root: Path) -> None:
     )
     add_knowledge(pm_dir, KnowledgeRecord(id="KR-001", category=KnowledgeCategory.SPEC, title="k"))
     add_workflow(pm_dir, Workflow(id="WF-001", name="n", feature="f", template="development"))
+    _seed_decisions(pm_dir)
+
+
+# A credential-shaped value seeded into decisions.yaml (ADR-005). Built from
+# pieces so the literal never sits in the source as one token.
+_T6_SECRET = "AKIA" + "T" * 16
+
+
+def _seed_decisions(pm_dir: Path) -> None:
+    """Five ADRs for pm_decision_query (Decision Lineage S1, design §8.2).
+
+    ADR-001 accepted without a lineage; ADR-002 proposed by the assistant with
+    a lineage; ADR-003 whose lineage says adopted while decisions.yaml says
+    proposed; ADR-004 with a lineage that is not valid YAML; ADR-005 with
+    unknown keys holding a secret-like string and a ``!!binary`` value, and a
+    lineage event carrying ``caused_by: !!binary``. No FIFO, symlink or
+    oversized file: a reader that blocks would time the sweep out instead of
+    failing it (those live in tests/test_decision_query.py).
+    """
+    import datetime as dt
+
+    from pmlens.lineage import dump_lineage, new_lineage_doc
+    from pmlens.models import Decision, DecisionStatus
+
+    titles = {
+        "ADR-001": "accepted without lineage",
+        "ADR-002": "proposed by the assistant",
+        "ADR-003": "status edited by hand",
+        "ADR-004": "broken lineage",
+        "ADR-005": "unknown keys",
+    }
+    statuses = {"ADR-002": "proposed", "ADR-003": "proposed"}
+    lines = ["# PM Lens - decisions.yaml", "decisions:"]
+    for adr_id, title in titles.items():
+        lines += [
+            f"- id: {adr_id}",
+            f"  title: {title}",
+            "  date: 2026-10-01",
+            f"  status: {statuses.get(adr_id, 'accepted')}",
+            "  context: c",
+            "  decision: d",
+        ]
+    lines += [f"  review_note: token {_T6_SECRET}", "  blob: !!binary aGVsbG8gd29ybGQ="]
+    (pm_dir / "decisions.yaml").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    def adr(adr_id: str, status: DecisionStatus) -> Decision:
+        return Decision(id=adr_id, title=titles[adr_id], date=dt.date(2026, 10, 1), status=status)
+
+    now = "2026-10-05T03:12:00Z"
+    docs = {
+        "ADR-002": new_lineage_doc(
+            adr("ADR-002", DecisionStatus.PROPOSED), {"origin": "ai_auto"}, now
+        ),
+        "ADR-003": new_lineage_doc(adr("ADR-003", DecisionStatus.ACCEPTED), {}, now),
+        "ADR-005": new_lineage_doc(adr("ADR-005", DecisionStatus.ACCEPTED), {}, now),
+    }
+    docs["ADR-005"]["events"].append(
+        {
+            "at": now,
+            "kind": "note",
+            "text": "n",
+            "caused_by": b"\x00\x01",
+            "via": "pm_update_decision",
+        }
+    )
+    lineage_dir = pm_dir / "decision_lineage"
+    lineage_dir.mkdir()
+    for adr_id, doc in docs.items():
+        (lineage_dir / f"{adr_id}.yaml").write_text(dump_lineage(doc, adr_id), encoding="utf-8")
+    (lineage_dir / "ADR-004.yaml").write_text("lifecycle: [unclosed\n", encoding="utf-8")
 
 
 # PMSERV-217: a zero-arg call never exercised a tool with a required argument
@@ -437,14 +507,35 @@ _T6_ARG_SETS: dict[str, list[dict]] = {
     "pm_tasks": [{"status": "todo"}],
     "pm_workflow_status": [{"workflow_id": "WF-001"}],
     "pm_outbox_pending": [{"filter_status": "all"}],
+    # Decision Lineage S1 (design §8.2): every branch of the read, including
+    # the derived, mismatched, unreadable, unknown-key, not-found and
+    # missing-id cases seeded by _seed_decisions.
+    "pm_decision_query": [
+        {"action": "list"},
+        {"action": "list", "lifecycle": "proposed"},
+        {"action": "get", "decision_id": "ADR-001"},
+        {"action": "get", "decision_id": "ADR-002"},
+        {"action": "get", "decision_id": "ADR-003"},
+        {"action": "get", "decision_id": "ADR-004"},
+        {"action": "get", "decision_id": "ADR-005"},
+        {"action": "get", "decision_id": "ADR-999"},
+        {"action": "get"},
+    ],
 }
 
 # What the seeded stores must yield through each branch (see _seed_full_stores).
+# The subprocess computes the same keys in _T6_SWEEP_SCRIPT; change both together.
 _EXPECTED_REACH = {
     "recall_query_hits": 1,
     "recall_track_matched": True,
     "recall_auto_memory_entries": 1,
     "search_cross_project_hits": 1,
+    "decision_list_total": 5,
+    "decision_proposed_ids": ["ADR-002"],
+    "decision_get_derived": True,
+    "decision_mismatch_warned": True,
+    "decision_unreadable_noted": True,
+    "decision_unknown_keys_only_names": True,
 }
 
 # Runs inside the subprocess: import pmlens.server fresh (so PM_LENS /
@@ -503,6 +594,30 @@ _T6_SWEEP_SCRIPT = textwrap.dedent("""
         if "pm_memory_search" in tool_names:
             hits = srv.pm_memory_search(query="lens", cross_project=True).get("results") or []
             reach["search_cross_project_hits"] = len(hits)
+        if "pm_decision_query" in tool_names:
+            query = srv.pm_decision_query
+            reach["decision_list_total"] = query().get("total")
+            proposed = query(lifecycle="proposed").get("decisions") or []
+            reach["decision_proposed_ids"] = [row["id"] for row in proposed]
+            derived = query(action="get", decision_id="ADR-001")
+            reach["decision_get_derived"] = derived["lineage"]["derived"]
+            mismatch = query(action="get", decision_id="ADR-003")
+            reach["decision_mismatch_warned"] = "decision_status_mismatch" in [
+                w["code"] for w in mismatch.get("warnings", [])
+            ]
+            broken = query(action="get", decision_id="ADR-004")
+            reach["decision_unreadable_noted"] = "decision_lineage_unreadable" in [
+                n["code"] for n in broken["lineage"]["notes"]
+            ]
+            unknown = query(action="get", decision_id="ADR-005")
+            dumped = json.dumps(unknown)  # raises if a bytes value leaked
+            secret = "AKIA" + "T" * 16
+            reach["decision_unknown_keys_only_names"] = (
+                secret not in dumped
+                and "aGVsbG8" not in dumped
+                and unknown["decision"]["unknown_keys"] == ["review_note", "blob"]
+                and unknown["lineage"]["events"][-1].get("unknown_fields") == ["caused_by"]
+            )
     except Exception as e:  # noqa: BLE001 - reported and asserted by the test
         reach["error"] = f"{type(e).__name__}: {e}"
 

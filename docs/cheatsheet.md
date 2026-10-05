@@ -1,6 +1,6 @@
 # PM Lens Cheatsheet
 
-> **44 MCP tools + 2 compatibility aliases** for Claude Code, Codex CLI, Cursor and Grok Build.
+> **45 MCP tools + 2 compatibility aliases** for Claude Code, Codex CLI, Cursor and Grok Build.
 > Version 0.16.0 | Python 3.11+ | PyPI: `pmlens`
 
 ---
@@ -90,6 +90,7 @@ use the legacy names. See the [migration guide](content-tool-migration.md).
 |------|-------------|------------|
 | `pm_log` | Add daily log entry (auto-links to active task) | `entry`, `category="progress"` |
 | `pm_add_decision` | Record an ADR (ID auto-generated). Saved as proposed; `accepted` only when the user accepted the content | `title`, `context`, `decision`, `status="proposed"`, `origin?`, `recorded_timing?`, `decision_kind?` |
+| `pm_decision_query` | Read ADRs and their lineage, changing nothing (Lens-safe). `lifecycle="proposed"` lists ADRs awaiting the user's review | `action="list"`, `decision_id?` (get), `lifecycle?` |
 | `pm_velocity` | Velocity and trend analysis | `weeks=4` |
 | `pm_risks` | Auto-detected + manual risks | `project_path?` |
 

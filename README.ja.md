@@ -36,7 +36,7 @@
 ## 特徴
 
 - **🔌 マルチホストファースト** — `pmlens install --target=auto` 一発で **Claude Code / Codex CLI / Cursor / Grok Build に登録**。プロジェクトのルールも `CLAUDE.md` と `AGENTS.md` の両方に自動同期 (ADR-008)。プロジェクト途中でホストを切り替えてもコンテキストを失わない — 同じ `.pm/` データ、同じワークフロー
-- **44 の MCP ツール + 互換名2個** — タスク CRUD、子イシュー、ステータス、ブロッカー、ベロシティ、ダッシュボード、プロンプトパック、ADR、セッションメモリ、ワークフロー、ナレッジレコード、マルチホストルール注入、クロスホスト Outbox ブリッジ、コンテンツパイプライン（記録済み知見 → redact 済み下書き） 等
+- **45 の MCP ツール + 互換名2個** — タスク CRUD、子イシュー、ステータス、ブロッカー、ベロシティ、ダッシュボード、プロンプトパック、ADR、セッションメモリ、ワークフロー、ナレッジレコード、マルチホストルール注入、クロスホスト Outbox ブリッジ、コンテンツパイプライン（記録済み知見 → redact 済み下書き） 等
 - **ワークフローエンジン** — テンプレートベースの開発ワークフロー（ループ、ユーザーゲート、チェイン対応：Discovery → Development）
 - **ナレッジレコード** — カジュアルなメモリとフォーマルな ADR の中間に位置する構造化された知見記録（research、tradeoff、spec 等）
 - **Super Research スキル** — 3 並列エージェント（Domain Expert、Critical Analyst、Lateral Thinker）+ Depth Check（6 次元）+ Fact Check + Cross-Check
@@ -262,7 +262,7 @@ pmlens uninstall --target auto
 
 ---
 
-## MCP ツール一覧（44ツール + 互換名2個）
+## MCP ツール一覧（45ツール + 互換名2個）
 
 ### プロジェクト管理
 
@@ -283,6 +283,7 @@ pmlens uninstall --target auto
 |---|---|
 | `pm_log` | 日次ログ記録 + タスク自動紐付け（progress / decision / blocker / note / milestone） |
 | `pm_add_decision` | ADR 追加（context、decision、consequences を構造化）。既定は `proposed` で記録し、`status="accepted"` はユーザーが内容そのものを受け入れた時だけ渡す（規約であり、誰が受け入れたかを pmlens は確かめられない）。申告（`origin`・`recorded_timing`・`decision_kind`、既定は `unknown`）と記録時刻は `.pm/decision_lineage/ADR-NNN.yaml` に申告のまま保存し、検証はしない |
+| `pm_decision_query` | ADR と lineage を、何も変えずに読む（読み取り専用。Lens モードでも使える）。`action="list"` は全 ADR を status と lifecycle 付きで返す（`lifecycle="proposed"` でユーザーの確認待ちの一覧）。`action="get"` は ADR の本文、申告、双方向の関係、最近の events を返す。lineage の無い ADR は status から導いた値（`derived`）で示し、記録の無い項目は `not_recorded` に出す。申告と events は記録されたままを示し、検証はしない。未知のキーは名前だけを返し、秘密らしき文字列は応答で伏せる |
 
 ### 分析
 
@@ -427,6 +428,7 @@ Cowork 向け）。さらに `PM_DESKTOP_WRITE=1` を重ねると、自分専用
 | ツール | Claude Code（デフォルト） | Lens viewer（`PM_LENS=1`） | Desktop outbox host（`PM_LENS=1` + `PM_DESKTOP_WRITE=1`） |
 |---|---|---|---|
 | `pm_recall` / `pm_status` 等の read | 可 | 可（本体 `.pm/memory.db` は read-only のまま） | 可 |
+| `pm_decision_query` | 可 | 可（`decisions.yaml` と `.pm/decision_lineage/` を書かずに読む） | 可 |
 | `pm_outbox_pending` | 可 | 可 | 可 |
 | `pm_outbox_remember` / `pm_outbox_log` | 可 | 不可 | 可 |
 | `pm_outbox_merge` / `pm_outbox_reject` | 可 | 不可 | 不可 |
@@ -717,7 +719,7 @@ Claude Code Session
   └── MCP Server (stdio)
         └── pmlens serve
               │
-              ├── server.py    → 44 MCP ツール + 互換名2個 (FastMCP)
+              ├── server.py    → 45 MCP ツール + 互換名2個 (FastMCP)
               ├── models.py    → Pydantic v2 データモデル (18 models, 16 enums)
               ├── storage.py   → YAML 読み書き
               ├── workflow.py  → ワークフローエンジン (state machine)

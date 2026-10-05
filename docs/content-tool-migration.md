@@ -20,9 +20,9 @@ descriptions identify the preferred name.
 
 Both names remain registered throughout this compatibility stage. There is no
 scheduled removal version: removing the legacy names requires a separately
-announced breaking change and migration instructions. Full mode exposes 46 MCP
-tool names for 44 operations, including the two legacy aliases. Lens mode still
-exposes 16 names, or 18 with Desktop outbox writes enabled; neither name of these
+announced breaking change and migration instructions. Full mode exposes 47 MCP
+tool names for 45 operations, including the two legacy aliases. Lens mode
+exposes 17 names, or 19 with Desktop outbox writes enabled; neither name of these
 content tools is registered in either Lens configuration.
 
 Existing host permissions referring to `mcp__pmlens__pm_draft_x` or
