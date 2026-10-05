@@ -452,6 +452,23 @@ class TestWidenedSurfaces:
     def test_new_detectors_are_populated(self):
         """Vacuity guards for the new sinks and seeds."""
         assert {"_save_yaml", "add_task", "add_decision_with_next_id"} <= _GRAPH.ledger_writers
+        # Decision Lineage (ADR-056 S1): its two composite writers are seen as
+        # ledger writers, while its readers and scrubbers are not — so they can
+        # sit on the Lens surface (pm_status already reaches error_summary).
+        assert {"add_decision_with_lineage", "change_decision_lineage"} <= _GRAPH.ledger_writers
+        lineage_readers = {
+            "read_lineage_raw",
+            "lineage_view",
+            "effective_lifecycle",
+            "scrub_view",
+            "scrub_label",
+            "error_summary",
+        }
+        assert lineage_readers <= _GRAPH.defined
+        reader_closure = _GRAPH.reachable(lineage_readers)
+        assert not reader_closure & _GRAPH.ledger_writers
+        assert not reader_closure & _GRAPH.shell_out_fns
+        assert {"error_summary", "scrub_label"} <= _RO_CLOSURE
         assert _OUTBOX_WRITE_SEED <= _GRAPH.defined
         assert _ALL_TOOLS > _RO_SEED | _OUTBOX_WRITE_SEED
         assert {"pm_add_task", "pm_add_decision", "pm_update_rules"} <= _ALL_TOOLS

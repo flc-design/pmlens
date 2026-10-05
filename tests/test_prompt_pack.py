@@ -42,6 +42,7 @@ from pmlens.prompt_pack import (
     render_task_card,
     run_prompt_pack,
     task_node,
+    validate_prompt_pack_args,
 )
 from pmlens.storage import (
     _save_decisions,
@@ -346,6 +347,68 @@ class TestPmPromptPackTool:
         assert "reserved" in res["message"]
         # tasks.yaml untouched.
         assert (pm_path / "tasks.yaml").read_bytes() == tasks_before
+
+    def test_out_path_rejects_the_reserved_lineage_directory(self, tmp_path):
+        # Decision Lineage (ADR-056 S1): the basename check above cannot see a
+        # directory, so ".pm/decision_lineage/ADR-001.yaml" used to pass it and
+        # the pack would have overwritten an ADR's lineage (its source of truth).
+        pm_path = _seed(tmp_path, [_task(id="P-1", tags=["x"])])
+        lineage_dir = pm_path / "decision_lineage"
+        lineage_dir.mkdir()
+        target = lineage_dir / "ADR-001.yaml"
+        target.write_text("schema: 1\n", encoding="utf-8")
+        alias = tmp_path / "packs"
+        alias.symlink_to(lineage_dir, target_is_directory=True)
+
+        for out_path in (
+            target,
+            lineage_dir / "pack.md",
+            pm_path / "daily" / ".." / "decision_lineage" / "pack.md",
+            alias / "pack.md",
+        ):
+            res = srv.pm_prompt_pack(
+                filter_tag="x", out_path=str(out_path), project_path=str(tmp_path)
+            )
+            assert res["status"] == "error", out_path
+            assert "reserved" in res["message"]
+
+        assert target.read_text(encoding="utf-8") == "schema: 1\n"
+        assert sorted(p.name for p in lineage_dir.iterdir()) == ["ADR-001.yaml"]
+
+    def test_reserved_names_are_matched_whatever_their_case(self, tmp_path):
+        # macOS (APFS) and Windows are case-insensitive by default: there,
+        # ".pm/DECISION_LINEAGE/ADR-001.yaml" and ".pm/TASKS.yaml" are the very
+        # files the exact-case checks protect, and resolve() keeps the case given.
+        pm_path = _seed(tmp_path, [_task(id="P-1", tags=["x"])])
+        lineage_dir = pm_path / "decision_lineage"
+        lineage_dir.mkdir()
+        target = lineage_dir / "ADR-001.yaml"
+        target.write_text("schema: 1\n", encoding="utf-8")
+        tasks_before = (pm_path / "tasks.yaml").read_bytes()
+
+        for out_path in (
+            pm_path / "DECISION_LINEAGE" / "ADR-001.yaml",
+            pm_path / "Decision_Lineage" / "pack.md",
+            pm_path / "TASKS.yaml",
+            pm_path / "Decisions.YAML",
+        ):
+            res = srv.pm_prompt_pack(
+                filter_tag="x", out_path=str(out_path), project_path=str(tmp_path)
+            )
+            assert res["status"] == "error", out_path
+            assert "reserved" in res["message"]
+
+        assert target.read_text(encoding="utf-8") == "schema: 1\n"
+        assert (pm_path / "tasks.yaml").read_bytes() == tasks_before
+        assert sorted(p.name for p in lineage_dir.iterdir()) == ["ADR-001.yaml"]
+
+    def test_reserved_directory_check_leaves_other_paths_alone(self, tmp_path):
+        assert validate_prompt_pack_args("md", "none", str(tmp_path / "decision_notes.md")) is None
+        assert validate_prompt_pack_args("md", "none", str(tmp_path / "x" / "pack.md")) is None
+        res = validate_prompt_pack_args(
+            "md", "none", str(tmp_path / ".pm" / "decision_lineage" / "ADR-001.yaml")
+        )
+        assert res is not None and "decision_lineage" in res["message"]
 
     def test_missing_task_ids_warns(self, tmp_path):
         _seed(tmp_path, [_task(id="P-1", tags=["x"])])

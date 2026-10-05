@@ -29,6 +29,7 @@ from .draft_store import (
     get_draft_store,
     normalize_source_refs,
 )
+from .lineage import error_summary, scrub_label
 from .memory import MemoryStore, SearchDiagnostics, _has_pm_server_schema
 from .models import (
     ConfidenceLevel,
@@ -1027,6 +1028,10 @@ def pm_blockers(project_path: str | None = None) -> list:
     ]
 
 
+# How many unknown ADR statuses pm_status names before it only counts the rest.
+_UNKNOWN_STATUS_LIST_LIMIT = 50
+
+
 def _decision_ledger_warnings(pm_path: Path) -> list[dict]:
     """Report ADR statuses outside the known set, or an unreadable decisions.yaml.
 
@@ -1034,6 +1039,11 @@ def _decision_ledger_warnings(pm_path: Path) -> list[dict]:
     but already-shipped readers (an older pmlens, the Desktop extension) still
     reject the entire decisions.yaml over it, so the user needs to hear about
     it. Read-only: this never repairs the file.
+
+    Nothing from the file is quoted verbatim (PMSERV-258): a parse failure is
+    described by exception type and YAML line/column only (``str(exc)`` quotes
+    the offending line or pydantic's ``input_value``), and each listed id and
+    status is cut to 100 characters and passed through ``redact_secrets``.
     """
     try:
         unknown = unknown_decision_statuses(load_decisions(pm_path))
@@ -1042,7 +1052,7 @@ def _decision_ledger_warnings(pm_path: Path) -> list[dict]:
             _build_warning(
                 level="warning",
                 code="decisions_yaml_unreadable",
-                message=f"decisions.yaml could not be read: {type(exc).__name__}: {exc}",
+                message=f"decisions.yaml could not be read: {error_summary(exc)}",
                 remediation=(
                     "Fix the file by hand; ADR tools cannot read or add decisions until then."
                 ),
@@ -1050,7 +1060,10 @@ def _decision_ledger_warnings(pm_path: Path) -> list[dict]:
         ]
     if not unknown:
         return []
-    listed = ", ".join(f"{u['id']}={u['status']!r}" for u in unknown)
+    shown = unknown[:_UNKNOWN_STATUS_LIST_LIMIT]
+    listed = ", ".join(f"{scrub_label(u['id'])}={scrub_label(u['status'])!r}" for u in shown)
+    if len(unknown) > len(shown):
+        listed += f" and {len(unknown) - len(shown)} more"
     return [
         _build_warning(
             level="warning",

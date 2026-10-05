@@ -200,9 +200,12 @@ def resolve_project_path(project_path: str | None = None) -> Path:
 .pm/
 ├── project.yaml        # プロジェクトメタ情報
 ├── tasks.yaml          # タスク一覧・状態
-├── decisions.yaml      # ADR (Architecture Decision Records)
+├── decisions.yaml      # ADR (Architecture Decision Records)。status は lifecycle の射影
+├── decision_lineage/   # ADR ごとの lifecycle・申告・links・events（ADR-056 S1）
+│   └── ADR-001.yaml
 ├── milestones.yaml     # マイルストーン定義
 ├── risks.yaml          # リスク・ブロッカー
+├── .locks/             # filelock のロックファイル（自己 ignore の .gitignore 付き。§6.7）
 └── daily/
     └── 2026-04-08.yaml # 日次ログ（自動生成）
 ```
@@ -266,7 +269,7 @@ decisions:
   - id: ADR-001
     title: "認証方式に JWT を採用"
     date: 2026-04-08
-    status: accepted  # proposed | accepted | deprecated | superseded
+    status: accepted  # proposed | accepted | deprecated | superseded（lifecycle の射影。下記）
     context: |
       セッションベース認証と JWT 認証を比較検討。
       マイクロサービス化を見据えてステートレスな方式が望ましい。
@@ -281,6 +284,92 @@ decisions:
       mitigations:
         - 短い有効期限（15分）+ リフレッシュトークンで緩和
 ```
+
+status の値は上の 4 値に固定する（旧版の pmlens と Desktop 拡張は 4 値以外を含む
+decisions.yaml 全体を読めなくなるため。tests/test_ledger_forward_compat.py が固定）。
+4 値で表せない状態は、次の lineage に持たせる。
+
+#### decision_lineage/ADR-NNN.yaml（Decision Lineage S1 / ADR-056・057・058）
+
+ADR 1 件につき 1 ファイル。ADR の本文は decisions.yaml だけにあり、lineage は本文を
+写さない。lineage の `lifecycle` が正で、decisions.yaml の `status` はその射影である。
+読み書きの実装は `lineage.py`（読み取りと純関数。書き込みもロックもしない）と
+`storage.py` の 2 つの複合関数（`add_decision_with_lineage` /
+`change_decision_lineage`）に分かれる。
+
+```yaml
+# PM Lens - decision_lineage/ADR-059.yaml
+schema: 1
+decision_id: ADR-059
+anchor:                       # どの ADR の lineage かを確かめる指紋（本文は写さない）
+  date: '2026-10-05'          # 作成時の ADR の date
+  title_sha256: 3f1c…         # 作成時の ADR の title の SHA-256（UTF-8）
+recorded_at: '2026-10-05T03:12:00Z'   # サーバーが刻む UTC。後から作った lineage では null
+declared:                     # 呼び出し元の申告。サーバーは検証しない
+  origin: ai_auto             # ai_auto | ai_proposed_human_decided | human | unknown
+  recorded_timing: before_impl  # before_impl | during_impl | post_hoc | unknown
+  decision_kind: technical    # spec_policy | premise_dependent | technical | unknown
+lifecycle: proposed           # proposed | adopted | deprecated | superseded | rejected | reverted
+links:                        # この ADR から出る関係（superseded_by だけは逆向きの例外）
+  supersedes: []
+  superseded_by: []
+  amends: []
+events:                       # 追記だけ。1 回の呼び出しの event は同じ at を持つ
+- at: '2026-10-05T03:12:00Z'
+  kind: created               # created | lineage_started | lifecycle | link | declared |
+  lifecycle: proposed         #   evaluation | note | status_reprojected
+  status: proposed
+  via: pm_add_decision
+# 予約（S1 は書かないが、あれば値ごと保持する）: fact_core / explanations / feedback
+```
+
+**射影（lifecycle → decisions.yaml の status）**
+
+| lifecycle | status | 補足 |
+|---|---|---|
+| proposed | proposed | |
+| adopted | accepted | |
+| deprecated | deprecated | |
+| superseded | superseded | superseded に入る時は superseded_by が必須 |
+| rejected | deprecated | 旧版の画面で有効な指針に見せない |
+| reverted | superseded_by があれば superseded、無ければ deprecated | |
+
+`lineage.project_status` は全関数で、どの入力にも 4 値のどれかを返す。lineage の無い
+ADR は status から逆に導く（proposed → proposed、accepted → adopted、deprecated →
+deprecated、superseded → superseded、未知の値 → なし）。この時は `derived` として
+示し、`recorded_at` と申告は「記録なし」（`not_recorded`）として扱う。読み取りで
+ファイルを書き換えて移行することはしない。
+
+**読み取り**（`lineage.read_lineage_raw` と純関数 `lineage_view`。ロックを取らず、何も作らない）
+
+- `os.open(O_RDONLY | O_NOFOLLOW | O_NONBLOCK)` で開いた fd に `fstat` を掛け、通常の
+  ファイルで 256 KiB（`MAX_LINEAGE_BYTES`）以下の時だけ読む。シンボリックリンク・FIFO・
+  ディレクトリ・巨大なファイル・壊れた YAML は、例外にせず `decision_lineage_unreadable`
+  の注記を付けて derived で返す。
+- lineage を ADR に帰属させるのは、id が `re.fullmatch(r"ADR-[0-9]{1,6}")` に合い、
+  decisions.yaml で重複せず、`decision_id` が一致し、anchor が（あれば）一致する時だけ。
+  anchor の不一致は、旧版が孤立した lineage の番号を新しい ADR に使い回した場合などで、
+  lineage の値を出さない。手で title や date を直した時は、lineage から `anchor` を
+  消すと次の書き込みが付け直す。
+  decisions.yaml に `date` キーの無い ADR では、モデルの既定値（今日）が日ごとに変わり、
+  書き直しで別の日付に固定されるので、`anchor.date` を null にして title だけを照合する。
+- 表示は許可リストのフィールドの str だけで組み立てる。未知のキーは名前だけを返し、
+  注記とメッセージに例外の本文（`str(exc)`）を入れない（型名と YAML の行・列だけ。
+  `lineage.error_summary`）。
+
+**書き込み**（`storage.py`。読み込んだ dict を直接変え、未知のキーをどの深さでも保つ）
+
+- 起票: decisions → `decision_lineage-ADR-NNN` の順にロックを取り、decisions.yaml →
+  lineage の順に書く。既にあるファイル（シンボリックリンクを含む）は上書きしない。
+  `decision_lineage/` がシンボリックリンクなら、decisions.yaml も書かずに拒否する。
+  採番は decisions.yaml の id と lineage のファイル名（`ADR-*.yaml` のうち id の正規表現に
+  合うもの）の最大値 + 1 で、999,999 を超えるなら書く前に `decision_id_exhausted`。
+- 更新: 同じ順にロックを取り、lineage → decisions.yaml の status の順に書く。遷移表
+  （`lineage.allowed_to`）と不変条件を、ロックの中で現在の状態に対して検査する。
+  呼び出しの前から status と lineage が食い違っている時は、lifecycle を明示した呼び出しだけが
+  status を書き直す。書き込みを拒否する形（mapping でない、id 違い、未知の schema・
+  lifecycle、型の違う links / events / declared、anchor の不一致）と、変更後に 256 KiB を
+  超える場合は、何も書かずにエラーを返す。
 
 ---
 
@@ -1173,6 +1262,18 @@ context manager を追加し、12 mutator (`add_*` / `update_*` 系) の read-mo
 を自動生成して commit 漏れを防ぐ。`workflow.advance_step` / `pm_init` の
 project 初期保存 / `pm_cleanup` の registry mutation など mutator を介さない
 直接書き込みも同じ transaction で wrap している。
+
+Decision Lineage（ADR-056 S1）の lineage のロックは、ADR ごとに
+`.pm/.locks/decision_lineage-ADR-NNN.lock` へ平らに置く（daily の
+`daily-YYYY-MM-DD.lock` と同じ形。`decision_lineage/` にはデータファイルしか置かない）。
+2 つの台帳のロックを入れ子にするのはここが初めてなので、順序を
+decisions → decision_lineage-ADR-NNN の 1 通りに限り、`_yaml_transaction` が
+スレッドごとの保持中ロックのスタックで実行時に検査する。lineage のロックを持ったまま
+decisions のロックを取る呼び出しと、lineage のロックを 2 つ同時に取る呼び出しは、
+待たずに `PmServerError`（lock order violation）になる。順位を持たない label
+（tasks / knowledge / registry / daily-… など）は検査しない。S2 の書き手は lineage の
+ロックだけを取り、その中で decisions のロックを取らない。ロックファイルは削除しないので、
+ADR 1 件につき 1 個残る（daily と同じ扱い）。
 
 ```python
 def _atomic_write_text(path: Path, content: str, *, encoding: str = "utf-8") -> None:

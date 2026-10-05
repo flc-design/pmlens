@@ -411,6 +411,15 @@ _PROMPT_PACK_RESERVED_NAMES: frozenset[str] = frozenset(
         "memory.db",
     }
 )
+# Directories a prompt-pack export must never write into, matched against
+# every component of the resolved out_path (the filename check above only sees
+# the basename, so ".pm/decision_lineage/ADR-001.yaml" would pass it).
+_PROMPT_PACK_RESERVED_DIRS: frozenset[str] = frozenset({"decision_lineage"})
+# Both sets are compared case-insensitively (``str.casefold`` on the candidate;
+# the entries are lower-case ASCII). macOS (APFS) and Windows file systems are
+# case-insensitive by default, so ".pm/TASKS.yaml" or ".pm/DECISION_LINEAGE/x"
+# names the very same file, and ``Path.resolve`` does not normalise case. On a
+# case-sensitive file system this refuses a few harmless names too.
 
 
 def _prompt_pack_slug(label: str) -> str:
@@ -456,7 +465,7 @@ def validate_prompt_pack_args(format: str, group_by: str, out_path: str | None) 
             "status": "error",
             "message": f"group_by={group_by!r} is not supported (use 'none', 'phase', or 'track')",
         }
-    if out_path and Path(out_path).name in _PROMPT_PACK_RESERVED_NAMES:
+    if out_path and Path(out_path).name.casefold() in _PROMPT_PACK_RESERVED_NAMES:
         return {
             "status": "error",
             "message": (
@@ -464,6 +473,35 @@ def validate_prompt_pack_args(format: str, group_by: str, out_path: str | None) 
                 f"{Path(out_path).name!r}; choose a different out_path"
             ),
         }
+    if out_path:
+        reserved_dir = _reserved_dir_in(out_path)
+        if reserved_dir is not None:
+            return {
+                "status": "error",
+                "message": (
+                    f"refusing to write a prompt pack inside the reserved directory "
+                    f"{reserved_dir!r}; choose a different out_path"
+                ),
+            }
+    return None
+
+
+def _reserved_dir_in(out_path: str) -> str | None:
+    """The reserved directory ``out_path`` would land in, if any.
+
+    The path is expanded and resolved first, so ``..`` segments and symlinked
+    parents cannot route around the check, and each component is compared
+    case-insensitively, so a different spelling of the same directory on a
+    case-insensitive file system cannot either.
+    """
+    path = Path(out_path)
+    try:
+        parts = path.expanduser().resolve().parts
+    except (OSError, RuntimeError):
+        parts = path.parts
+    for part in parts:
+        if part.casefold() in _PROMPT_PACK_RESERVED_DIRS:
+            return part.casefold()
     return None
 
 

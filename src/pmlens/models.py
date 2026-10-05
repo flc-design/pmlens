@@ -97,6 +97,60 @@ class DecisionStatus(StrEnum):
     SUPERSEDED = "superseded"
 
 
+# Decision Lineage vocabularies (ADR-056 S1). They live in the per-ADR lineage
+# file (.pm/decision_lineage/ADR-NNN.yaml), never in decisions.yaml, whose
+# status keeps the four DecisionStatus values above. Writers validate against
+# these enums; readers keep whatever string the file holds (ADR-056: lenient
+# reads), so a value a newer pmlens adds does not break this one.
+
+
+class DecisionLifecycle(StrEnum):
+    """Where an ADR stands. Projected onto DecisionStatus for older readers."""
+
+    PROPOSED = "proposed"
+    ADOPTED = "adopted"
+    DEPRECATED = "deprecated"
+    SUPERSEDED = "superseded"
+    REJECTED = "rejected"
+    REVERTED = "reverted"
+
+
+class DecisionOrigin(StrEnum):
+    """Who made the decision, as the caller declared it (never verified)."""
+
+    AI_AUTO = "ai_auto"
+    AI_PROPOSED_HUMAN_DECIDED = "ai_proposed_human_decided"
+    HUMAN = "human"
+    UNKNOWN = "unknown"
+
+
+class RecordedTiming(StrEnum):
+    """When the ADR was recorded relative to the implementation (declared)."""
+
+    BEFORE_IMPL = "before_impl"
+    DURING_IMPL = "during_impl"
+    POST_HOC = "post_hoc"
+    UNKNOWN = "unknown"
+
+
+class DecisionKind(StrEnum):
+    """What kind of decision the ADR is (declared once, never changed)."""
+
+    SPEC_POLICY = "spec_policy"
+    PREMISE_DEPENDENT = "premise_dependent"
+    TECHNICAL = "technical"
+    UNKNOWN = "unknown"
+
+
+class EvaluationKind(StrEnum):
+    """Source of an evaluation event. ``ai_review`` is never a human review."""
+
+    TEST = "test"
+    AI_REVIEW = "ai_review"
+    OUTCOME = "outcome"
+    OTHER = "other"
+
+
 class LogCategory(StrEnum):
     """Daily log entry category."""
 

@@ -217,6 +217,65 @@ class TestWriteSideAndSurfacing:
 
         assert "decisions_yaml_unreadable" in codes
 
+    # PMSERV-258: the warnings used to embed ``str(exc)`` and the raw status
+    # values, which quote file content — a pasted credential among it. Lens's
+    # pm_status reaches this code, so the text would also leave via Desktop.
+    _SECRET = "AKIA" + "Q" * 16
+
+    def _warnings_text(self, tmp_path: Path) -> tuple[str, dict]:
+        import json
+
+        from pmlens.server import pm_status
+
+        warnings = pm_status(project_path=str(tmp_path))["warnings"]
+        return json.dumps(warnings), {w["code"]: w for w in warnings}
+
+    def test_unreadable_yaml_names_the_position_not_the_line(self, tmp_path: Path, sample_project):
+        pm_path = self._project(tmp_path, sample_project)
+        (pm_path / "decisions.yaml").write_text(
+            "decisions:\n- id: ADR-001\n  title: t\n"
+            f'  context: "{self._SECRET} never closed\n  status: accepted\n',
+            encoding="utf-8",
+        )
+
+        text, codes = self._warnings_text(tmp_path)
+
+        assert self._SECRET not in text
+        message = codes["decisions_yaml_unreadable"]["message"]
+        assert "Error at line " in message and ", column " in message
+
+    def test_validation_error_does_not_echo_the_input(self, tmp_path: Path, sample_project):
+        pm_path = self._project(tmp_path, sample_project)
+        _write(pm_path / "decisions.yaml", {"decisions": [_adr("ADR-001", title=[self._SECRET])]})
+
+        text, codes = self._warnings_text(tmp_path)
+
+        assert self._SECRET not in text
+        assert codes["decisions_yaml_unreadable"]["message"].endswith(": ValidationError")
+
+    def test_unknown_status_is_cut_and_redacted(self, tmp_path: Path, sample_project):
+        pm_path = self._project(tmp_path, sample_project)
+        status = f"{self._SECRET} " + "x" * 500
+        _write(pm_path / "decisions.yaml", {"decisions": [_adr("ADR-001", status=status)]})
+
+        text, codes = self._warnings_text(tmp_path)
+
+        assert self._SECRET not in text
+        message = codes["decision_status_unknown"]["message"]
+        assert "ADR-001=" in message and "<REDACTED:secret>" in message
+        assert "x" * 101 not in message
+
+    def test_a_long_list_of_unknown_statuses_is_capped(self, tmp_path: Path, sample_project):
+        pm_path = self._project(tmp_path, sample_project)
+        adrs = [_adr(f"ADR-{i:03d}", status="adopted") for i in range(1, 61)]
+        _write(pm_path / "decisions.yaml", {"decisions": adrs})
+
+        _, codes = self._warnings_text(tmp_path)
+
+        message = codes["decision_status_unknown"]["message"]
+        assert "ADR-050=" in message and "ADR-051=" not in message
+        assert "and 10 more" in message
+
     def test_pm_status_is_quiet_for_a_healthy_ledger(self, tmp_path: Path, sample_project):
         from pmlens.server import pm_status
 
