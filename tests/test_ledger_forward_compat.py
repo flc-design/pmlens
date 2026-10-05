@@ -312,8 +312,10 @@ class TestUnknownValuesAreWrittenBackVerbatim:
             lines.append(f"a{i}: &a{i} [" + ", ".join([f"*a{i - 1}"] * width) + "]")
         return "\n".join(lines) + "\n"
 
-    def test_alias_bomb_in_an_unknown_key_is_not_expanded(self, tmp_pm_path: Path):
+    def test_alias_bomb_in_an_unknown_key_is_refused_unchanged(self, tmp_pm_path: Path):
         import time
+
+        from pmlens.models import PmServerError
 
         path = tmp_pm_path / "decisions.yaml"
         path.write_text(
@@ -322,13 +324,60 @@ class TestUnknownValuesAreWrittenBackVerbatim:
             + "  consequences: {positive: [p], y: *a7}\n",
             encoding="utf-8",
         )
+        before = path.read_bytes()
 
         started = time.monotonic()
-        add_decision(tmp_pm_path, Decision(id="ADR-002", title="new"))
+        with pytest.raises(PmServerError, match="YAML aliases"):
+            add_decision(tmp_pm_path, Decision(id="ADR-002", title="new"))
 
         # 9**8 leaves fully expanded would be ~117 MB and ~25 s (measured).
         assert time.monotonic() - started < 5
-        assert path.stat().st_size < 20_000
+        assert path.read_bytes() == before
+
+    def test_a_string_alias_repeated_in_an_unknown_key_is_refused(self, tmp_pm_path: Path):
+        # S0 regression: PyYAML never anchors strings, so 500 references to one
+        # 50 KB string were written out in full (a 50 KB file became 25 MB).
+        from pmlens.models import PmServerError
+
+        refs = ", ".join(["*s"] * 500)
+        path = tmp_pm_path / "decisions.yaml"
+        path.write_text(
+            f'decisions:\n- id: ADR-001\n  title: t\n  big: &s "{"z" * 50_000}"\n'
+            f"  copies: [{refs}]\n",
+            encoding="utf-8",
+        )
+        before = path.read_bytes()
+
+        with pytest.raises(PmServerError, match="YAML aliases"):
+            add_decision(tmp_pm_path, Decision(id="ADR-002", title="new"))
+        assert path.read_bytes() == before
+
+    def test_a_few_aliases_still_load_and_survive(self, tmp_pm_path: Path):
+        path = tmp_pm_path / "decisions.yaml"
+        path.write_text(
+            "decisions:\n- id: ADR-001\n  title: t\n  tags: &t [a, b]\n  more: *t\n",
+            encoding="utf-8",
+        )
+
+        add_decision(tmp_pm_path, Decision(id="ADR-002", title="new"))
+
+        first = _read(path)["decisions"][0]
+        assert first["tags"] == ["a", "b"]
+        assert first["more"] == ["a", "b"]
+
+    def test_a_parse_error_names_the_position_not_the_text(self, tmp_pm_path: Path):
+        from pmlens.models import PmServerError
+        from pmlens.storage import load_tasks
+
+        secret = "AKIA" + "Q" * 16
+        (tmp_pm_path / "tasks.yaml").write_text(
+            f'tasks:\n- id: T-1\n  title: "{secret}\n', encoding="utf-8"
+        )
+
+        with pytest.raises(PmServerError) as err:
+            load_tasks(tmp_pm_path)
+        assert secret not in str(err.value)
+        assert "line" in str(err.value)
 
     def test_yaml_typed_values_keep_their_type(self, tmp_pm_path: Path):
         import datetime as dt

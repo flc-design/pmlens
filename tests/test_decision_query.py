@@ -362,28 +362,44 @@ class TestList:
         assert _ids(_query(tmp_project, limit=10, offset=3)) == ["ADR-004"]
 
     def test_long_titles_a_yaml_alias_repeats_stay_small(self, tmp_project: Path):
-        # 1,000 ADRs sharing one 20,000-character title through an alias: a
-        # 113 KB decisions.yaml listed as a 20 MB response.
+        # 100 ADRs sharing one 20,000-character title through an alias (2 MB once
+        # expanded, inside the loader's expansion limit): titles are cut in the list.
         lines = ["decisions:"]
-        for n in range(1, 1001):
+        for n in range(1, 101):
             title = f'&t "{"x" * 20_000}"' if n == 1 else "*t"
             lines.append(
                 f"- id: ADR-{n:03d}\n  title: {title}\n  date: 2026-10-01\n"
                 "  status: accepted\n  context: c\n  decision: d"
             )
         (_pm(tmp_project) / "decisions.yaml").write_text("\n".join(lines) + "\n", "utf-8")
-        listed = _query(tmp_project, limit=1000)
+        listed = _query(tmp_project, limit=100)
         assert len(json.dumps(listed, ensure_ascii=False)) < 40_000
         assert listed["decisions"][0]["title"] == "x" * 200 + "…"
-        assert listed["has_more"] is True and listed["matched"] == 1000
-        codes = _codes(listed)
-        assert codes.count("decision_list_truncated") == 1
+        assert listed["matched"] == 100
         assert (
             "title(s) longer than 200 characters"
             in _warning(listed, "decision_list_truncated")["message"]
         )
         # get still shows the whole title.
         assert _get(tmp_project, "ADR-001")["decision"]["title"] == "x" * 20_000
+
+    def test_an_alias_bomb_in_titles_is_refused_not_listed(self, tmp_project: Path):
+        # 1,000 references to one 20,000-character title: a 113 KB file that
+        # expands to 20 MB. The loader refuses it before anything is built.
+        lines = ["decisions:"]
+        for n in range(1, 1001):
+            title = f'&t "{"x" * 20_000}"' if n == 1 else "*t"
+            lines.append(f"- id: ADR-{n:03d}\n  title: {title}\n  status: accepted")
+        path = _pm(tmp_project) / "decisions.yaml"
+        path.write_text("\n".join(lines) + "\n", "utf-8")
+        before = path.read_bytes()
+        started = time.perf_counter()
+        listed = _query(tmp_project, limit=1000)
+        assert time.perf_counter() - started < 1.5
+        assert listed["status"] == "error"
+        assert listed["code"] == "decisions_yaml_unreadable"
+        assert "x" * 50 not in json.dumps(listed)
+        assert path.read_bytes() == before
 
     def test_more_than_fifty_ids_end_with_a_count(self, tmp_project: Path):
         _seed(tmp_project, *(_adr(f"ADR-{n:03d}", "draft") for n in range(1, 54)))
@@ -1506,20 +1522,20 @@ def test_a_label_a_yaml_alias_repeats_is_scanned_once_per_response(
         assert scans == []
 
 
-def test_a_long_aliased_status_is_listed_quickly(tmp_project: Path):
-    # 100 ADRs sharing one 1 MiB status took list about 8 s and pm_status
-    # about 4 s; each now scans it once.
+def test_a_long_aliased_status_is_refused_quickly(tmp_project: Path):
+    # 100 ADRs sharing one 1 MiB status (100 MiB once expanded) took list about
+    # 8 s and pm_status about 4 s; the loader now refuses the file up front.
     (_pm(tmp_project) / "decisions.yaml").write_text(
         _aliased_decisions_yaml(100, 1024 * 1024, "status"), encoding="utf-8"
     )
     started = time.perf_counter()
     listed = _query(tmp_project, limit=100)
     assert time.perf_counter() - started < 1.5
-    assert listed["count"] == 100
-    assert listed["decisions"][0]["status"] == "a" * lineage.MAX_LABEL_CHARS + "…"
+    assert listed["code"] == "decisions_yaml_unreadable"
     started = time.perf_counter()
-    pm_status(project_path=str(tmp_project))
+    status = pm_status(project_path=str(tmp_project))
     assert time.perf_counter() - started < 1.5
+    assert "decisions_yaml_unreadable" in {w["code"] for w in status["warnings"]}
 
 
 # ─── An ADR without a date ───────────────────────────

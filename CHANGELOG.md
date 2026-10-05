@@ -11,7 +11,7 @@ as accepted, like every lifecycle change, returns a warning to pass on to the
 user.
 
 MCP tool count: 48 names for 46 operations in full mode (the two content tool
-aliases); Lens 17, or 19 with Desktop outbox writes. Test suite: 2,486 passing.
+aliases); Lens 17, or 19 with Desktop outbox writes. Test suite: 2,493 passing.
 
 **Upgrade notes.**
 
@@ -132,6 +132,17 @@ aliases); Lens 17, or 19 with Desktop outbox writes. Test suite: 2,486 passing.
   redacted text. A BEGIN line named in prose is still removed alone. Redaction
   reports carry `catalog_version: 3`. Drafts and memories redacted before this
   release need a look: see the upgrade notes.
+- **Ledgers no longer echo their contents in parse errors**: a YAML syntax
+  error in any `.pm` ledger (tasks, decisions, knowledge, …) is reported as
+  the error type and its line and column, not the offending text, which could
+  quote a secret — including through Lens read tools such as `pm_tasks` and
+  `pm_dashboard`.
+- **Ledgers that YAML aliases inflate are refused**: a ledger whose aliases
+  (`*name`) would expand it past four times its size (at least 4 MiB) is not
+  read. A few hundred bytes of nested aliases used to grow into tens of
+  megabytes on the next rewrite (strings are never re-emitted as anchors) and
+  into oversized tool responses. Ledgers pmlens writes contain no aliases; all
+  792 ledger files of the maintainer's registered projects load unchanged.
 
 ### Fixed
 

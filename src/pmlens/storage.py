@@ -94,14 +94,86 @@ def _yaml_header(filename: str) -> str:
     return f"# PM Lens - {filename}\n"
 
 
+# How far YAML aliases may inflate a ledger past its own size (see
+# _expanded_size). A ledger pmlens wrote has no aliases at all, so the factor
+# only matters for hand-edited or planted files.
+_EXPANSION_FLOOR = 4 * 1024 * 1024
+_EXPANSION_FACTOR = 4
+
+
+class _ExpansionLimitError(Exception):
+    """Raised by :func:`_expanded_size` once the running total passes its limit."""
+
+
+def _expanded_size(root: object, limit: int) -> int:
+    """Size of ``root`` once every YAML alias is written out in full.
+
+    safe_load shares one object for every ``*alias``. PyYAML re-emits shared
+    lists and dicts as anchors, but never strings, and pydantic copies the
+    lists of declared fields, so a rewrite or a JSON response expands each
+    reference: a few hundred bytes of nested aliases became ~20 MB and seconds
+    under the ledger lock. Each container is sized once (memoised by id) and
+    added once per reference, so this runs in linear time; a cycle counts as
+    one node. Strings and bytes count their length, other scalars 1.
+
+    Raises:
+        _ExpansionLimitError: as soon as the size passes ``limit``.
+    """
+    memo: dict[int, int] = {}
+    active: set[int] = set()
+
+    def leaf(value: object) -> int:
+        return len(value) if isinstance(value, (str, bytes)) else 1
+
+    def children(node: object) -> Iterable[object]:
+        if isinstance(node, dict):
+            return chain.from_iterable(node.items())
+        return node  # list / tuple / set
+
+    containers = (dict, list, tuple, set)
+    if not isinstance(root, containers):
+        return leaf(root)
+    stack: list[tuple[object, bool]] = [(root, False)]
+    while stack:
+        node, expanded = stack.pop()
+        nid = id(node)
+        if expanded:
+            size = 1
+            for child in children(node):
+                size += memo.get(id(child), 1) if isinstance(child, containers) else leaf(child)
+                if size > limit:
+                    raise _ExpansionLimitError
+            memo[nid] = size
+            active.discard(nid)
+            continue
+        if nid in memo or nid in active:
+            continue
+        active.add(nid)
+        stack.append((node, True))
+        for child in children(node):
+            if isinstance(child, containers) and id(child) not in memo and id(child) not in active:
+                stack.append((child, False))
+    return memo[id(root)]
+
+
 def _load_yaml(path: Path) -> dict | list | None:
     if not path.exists():
         return None
     text = path.read_text(encoding="utf-8")
     try:
-        return yaml.safe_load(text)
+        data = yaml.safe_load(text)
     except yaml.YAMLError as e:
-        raise PmServerError(f"Failed to parse {path.name}: {e}") from e
+        # Position only: str(e) quotes the offending line, which can be a secret.
+        raise PmServerError(f"Failed to parse {path.name}: {_lineage.error_summary(e)}") from e
+    limit = max(_EXPANSION_FLOOR, _EXPANSION_FACTOR * len(text))
+    try:
+        _expanded_size(data, limit)
+    except _ExpansionLimitError:
+        raise PmServerError(
+            f"{path.name} grows past {limit} characters once its YAML aliases (*name) "
+            "are expanded; replace the aliases with plain values"
+        ) from None
+    return data
 
 
 def _save_yaml(path: Path, data: dict | list, header_name: str) -> None:
