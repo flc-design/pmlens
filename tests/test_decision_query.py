@@ -1162,12 +1162,13 @@ class TestExitRedaction:
     def test_a_long_run_is_scanned_whole_in_linear_time(self, tmp_project: Path):
         # Some redaction patterns once took time quadratic in a run without
         # whitespace (about 15 s for this one); now the whole text is scanned.
+        # The budget leaves room for CI runners ten times slower than a laptop.
         run = "a" * (128 * 1024)
         context = f"see {run} and Bearer {'t' * 5_000} then {SECRET}"
         _seed(tmp_project, _adr("ADR-001", title=run, context=context))
         started = time.perf_counter()
         got, listed = _get(tmp_project, "ADR-001"), _query(tmp_project)
-        assert time.perf_counter() - started < 2
+        assert time.perf_counter() - started < 5
         assert got["decision"]["title"] == run
         assert got["decision"]["context"] == (
             f"see {run} and <REDACTED:secret> then <REDACTED:secret>"
@@ -1432,34 +1433,47 @@ def test_the_description_says_when_to_use_it_and_what_derived_means():
     assert "Declared values and events are as recorded, not verified" in doc
 
 
+def _seconds(read) -> float:
+    started = time.perf_counter()
+    read()
+    return time.perf_counter() - started
+
+
 def test_lineages_built_to_be_slow_to_redact_are_read_quickly(tmp_project: Path):
     # Runs of these units once took some redaction patterns quadratic time:
     # about 3.5 s per ADR for list and get alike, for files within the
     # 256 KiB limit. The aliased note would be scanned once per event shown.
-    adrs = [_adr(f"ADR-00{n}") for n in range(1, 5)]
+    # A CI runner can be ten times slower than a laptop, so every read is
+    # held to the get of a same-size lineage of plain words (ADR-005):
+    # linear redaction keeps them alike, quadratic made them 25 times dearer.
+    adrs = [_adr(f"ADR-00{n}") for n in range(1, 6)]
     _seed(tmp_project, *adrs)
     for adr, unit in zip(adrs, ("a", "a1", "eyJ"), strict=False):
         _put_lineage(tmp_project, adr.id, _slow_lineage(adr, unit))
     _put_lineage(tmp_project, "ADR-004", _aliased_lineage(adrs[3]))
+    _put_lineage(tmp_project, "ADR-005", _slow_lineage(adrs[4], "a "))
     for adr in adrs:
         size = _lineage_path(tmp_project, adr.id).stat().st_size
         assert 220_000 < size <= lineage.MAX_LINEAGE_BYTES
+    budget = 4 * _seconds(lambda: _get(tmp_project, "ADR-005")) + 0.25
 
-    started = time.perf_counter()
-    listed = _query(tmp_project)
-    assert time.perf_counter() - started < 0.5 * len(adrs)
-    assert listed["count"] == 4 and listed["warnings"] == []
-    for adr in adrs:
-        started = time.perf_counter()
-        got = _get(tmp_project, adr.id)
-        assert time.perf_counter() - started < 1.0, adr.id
+    listed: dict = {}
+    assert _seconds(lambda: listed.update(_query(tmp_project))) < budget
+    assert listed["count"] == 5 and listed["warnings"] == []
+    for adr in adrs[:4]:
+        got: dict = {}
+        assert _seconds(lambda adr=adr, got=got: got.update(_get(tmp_project, adr.id))) < budget
         events = got["lineage"]["events"]
         assert events and events[-1]["truncated"] is True
         assert len(events[-1]["text"]) == lineage.MAX_TEXT_CHARS
-    started = time.perf_counter()
-    raw = lineage.read_lineage_raw(_pm(tmp_project), "ADR-001")
-    assert lineage.effective_lifecycle(adrs[0], raw) == "adopted"  # the draft guard's path
-    assert time.perf_counter() - started < 0.5
+    lifecycle: list[str] = []
+
+    def guard_path() -> None:  # the draft guard's path
+        raw = lineage.read_lineage_raw(_pm(tmp_project), "ADR-001")
+        lifecycle.append(lineage.effective_lifecycle(adrs[0], raw))
+
+    assert _seconds(guard_path) < budget
+    assert lifecycle == ["adopted"]
 
 
 # ─── read cost: one long id or status that a YAML alias repeats ──
@@ -1525,16 +1539,17 @@ def test_a_label_a_yaml_alias_repeats_is_scanned_once_per_response(
 def test_a_long_aliased_status_is_refused_quickly(tmp_project: Path):
     # 100 ADRs sharing one 1 MiB status (100 MiB once expanded) took list about
     # 8 s and pm_status about 4 s; the loader now refuses the file up front.
+    # Each refusal takes about 0.15 s here; 3 s leaves room for slow runners.
     (_pm(tmp_project) / "decisions.yaml").write_text(
         _aliased_decisions_yaml(100, 1024 * 1024, "status"), encoding="utf-8"
     )
     started = time.perf_counter()
     listed = _query(tmp_project, limit=100)
-    assert time.perf_counter() - started < 1.5
+    assert time.perf_counter() - started < 3
     assert listed["code"] == "decisions_yaml_unreadable"
     started = time.perf_counter()
     status = pm_status(project_path=str(tmp_project))
-    assert time.perf_counter() - started < 1.5
+    assert time.perf_counter() - started < 3
     assert "decisions_yaml_unreadable" in {w["code"] for w in status["warnings"]}
 
 
