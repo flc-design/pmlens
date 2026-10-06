@@ -119,6 +119,41 @@ def pytest_configure(config):
     os.environ["USERPROFILE"] = str(sandbox)
     config._pmlens_session_home = sandbox
     config._pmlens_session_fingerprint = _host_config_fingerprint()
+    _pin_subprocess_imports_to_tested_tree()
+
+
+def _pin_subprocess_imports_to_tested_tree() -> None:
+    """Make ``sys.executable -c "import pmlens"`` children import THIS tree.
+
+    ``pythonpath = ["src"]`` only reaches the pytest process itself. Children
+    (the Lens T6 sweep, smoke and launch-surface tests) resolve ``pmlens``
+    through the interpreter's editable install instead — which, in a git
+    worktree sharing the main checkout's venv, is ANOTHER branch's code, so the
+    Lens guards would pass green against the wrong tree. Children copy
+    ``os.environ``, so prepending the tested ``src`` here reaches all of them;
+    the check below fails the session loudly if that ever stops being true.
+    """
+    import subprocess
+    import sys
+    import tempfile
+
+    import pmlens
+
+    src = Path(pmlens.__file__).resolve().parents[1]
+    existing = os.environ.get("PYTHONPATH", "")
+    os.environ["PYTHONPATH"] = os.pathsep.join(p for p in (str(src), existing) if p)
+    probe = subprocess.run(
+        [sys.executable, "-c", "import pmlens; print(pmlens.__file__)"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        cwd=tempfile.gettempdir(),
+    )
+    child = Path(probe.stdout.strip()).resolve().parents[1] if probe.returncode == 0 else None
+    if child != src:
+        raise pytest.UsageError(
+            f"subprocess tests would import pmlens from {child}, not the tested tree {src}"
+        )
 
 
 def pytest_sessionfinish(session, exitstatus):

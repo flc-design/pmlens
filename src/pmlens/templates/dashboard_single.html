@@ -140,7 +140,7 @@
 {% if decisions %}
 <h2>Architecture Decisions</h2>
 {% for d in decisions %}
-<div class="adr"><span class="adr-id">{{ d.id }}</span> {{ d.title }} <span style="color:var(--text-dim)">({{ d.status.value }})</span></div>
+<div class="adr"><span class="adr-id">{{ d.id }}</span> {{ d.title }} <span style="color:var(--text-dim)">({{ d.status }})</span></div>
 {% endfor %}
 {% endif %}
 

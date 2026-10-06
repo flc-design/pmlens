@@ -12,18 +12,18 @@ read-only surface never shells out (``subprocess``). The suite already has two
 * ``test_recall_with_track_never_invokes_git_detection`` — ``pm_recall``, run
   once, does not touch a monkeypatched ``read_git_branch`` (one dynamic path).
 
-This module strengthens both into a **complete static reachability proof**: it
+This module strengthens both into a **static reachability check**: it
 builds a call graph over the *entire* ``pm_server`` package and asserts that the
 forward closure from EVERY ``RO_ALLOWLIST`` tool is disjoint from (a) the
 functions that call ``read_git_branch`` and (b) the functions that touch
 ``subprocess`` — across all branches/inputs of every reachable function, not
 just the one path an example invocation happens to take.
 
-Soundness (no false negatives). If any RO tool could transitively reach a sink,
-the function that physically performs the sink call is itself reachable (hence
-in the closure) AND is recorded as a sink caller — so the closure and the
-sink-caller set intersect and the assertion fires. Two design choices keep this
-sound:
+Soundness, within stated limits. If any RO tool reaches a sink through ordinary
+calls, the function that physically performs the sink call is itself reachable
+(hence in the closure) AND is recorded as a sink caller — so the closure and
+the sink-caller set intersect and the assertion fires. Two design choices keep
+this sound for direct calls:
 
 * **Bare-name call edges.** Calls are matched on their unqualified name, which
   over-approximates the graph (only ever ADDS edges, never drops a real one) —
@@ -35,6 +35,38 @@ sound:
   and ``import subprocess as sp; sp.run()`` are caught too — a bare-name match
   alone would miss the renamed form, which is the obvious way a refactor (or an
   adversary) could otherwise slip a sink onto the RO surface.
+
+PMSERV-216 (ADR-056 S0) widens the proof in three ways:
+
+* **More sinks.** Process execution through ``os`` (``os.system`` / ``os.popen``
+  / ``os.exec*`` / ``os.spawn*`` / ``os.posix_spawn*``) and ``pty.spawn`` count
+  as shell-out alongside ``subprocess``; and pmlens's own ledger-write helpers
+  (``_save_yaml`` / ``_atomic_write_text`` / ``_yaml_transaction`` /
+  ``_ensure_locks_dir``) are a write sink the RO surface must not reach.
+* **More seeds, each with its own sinks.** ``OUTBOX_WRITE_ALLOWLIST`` registers
+  under PM_LENS=1 + PM_DESKTOP_WRITE=1. It may write the Desktop outbox
+  (SQLite), so the YAML-ledger sink does not apply to it, but shell-out and git
+  detection still do.
+* **The full-mode surface.** PM Lens never shells out to git on any path
+  (ADR-028, README), so the closure of EVERY ``@_tool()`` function — read and
+  write alike — must stay clear of shell-out.
+
+Limits — what this check does NOT see (so a green run is not a proof):
+
+* **Indirect calls.** A function passed as a value and called elsewhere
+  (callbacks, ``executor.submit(fn)``, ``getattr(mod, name)()``,
+  ``importlib`` / ``__import__``) has no edge. Nested defs are folded into
+  their enclosing function, which covers the ``build`` callbacks handed to
+  ``storage.add_*_with_next_id`` but not callbacks defined elsewhere.
+* **Sinks outside the list.** Only ``subprocess``, the ``os`` / ``pty`` /
+  ``asyncio`` process starters and the four ledger-write helpers count. Plain
+  ``Path.write_text`` / ``open(..., "w")`` writes are not sinks here: they are
+  too common to separate statically from legitimate reads of other kinds.
+* **Runtime gates.** ``pm_status`` reaches ``install_hooks`` (which writes
+  ``~/.claude/settings.json``) — that edge IS in the RO closure, but the call
+  only runs when ``PM_LENS`` is off (PMSERV-144), which a static graph cannot
+  tell. Writes like this are covered by the dynamic HOME-snapshot sweep in
+  ``test_lens_invariant.py`` instead.
 """
 
 from __future__ import annotations
@@ -52,6 +84,39 @@ _PKG_DIR = Path(pmlens.__file__).parent
 _GIT_DETECT_FN = "read_git_branch"  # reads .git/HEAD — write-path only
 _WRITE_PATH_FN = "pm_session_summary"  # the sole legitimate read_git_branch caller
 _SUBPROCESS = "subprocess"
+# Process execution outside the subprocess module (PMSERV-216).
+_OS_EXEC = "os-exec"
+_OS_EXEC_ATTRS = frozenset(
+    {
+        "system",
+        "popen",
+        "execl",
+        "execle",
+        "execlp",
+        "execlpe",
+        "execv",
+        "execve",
+        "execvp",
+        "execvpe",
+        "spawnl",
+        "spawnle",
+        "spawnlp",
+        "spawnlpe",
+        "spawnv",
+        "spawnve",
+        "spawnvp",
+        "spawnvpe",
+        "posix_spawn",
+        "posix_spawnp",
+        "startfile",
+    }
+)
+_ASYNCIO_EXEC_ATTRS = frozenset({"create_subprocess_exec", "create_subprocess_shell"})
+# pmlens's own ledger-write helpers (storage / utils). Reaching one of these
+# means writing (or locking) a .pm/ or ~/.pm YAML ledger.
+_LEDGER_WRITE_HELPERS = frozenset(
+    {"_save_yaml", "_atomic_write_text", "_yaml_transaction", "_ensure_locks_dir"}
+)
 
 
 def _callee_bare_name(call: ast.Call) -> str | None:
@@ -90,34 +155,65 @@ def _sink_alias_map(tree: ast.Module) -> dict[str, str]:
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for a in node.names:
-                if a.name.split(".")[0] == _SUBPROCESS:
-                    aliases[(a.asname or a.name).split(".")[0]] = _SUBPROCESS
+                top = a.name.split(".")[0]
+                local = (a.asname or a.name).split(".")[0]
+                if top == _SUBPROCESS:
+                    aliases[local] = _SUBPROCESS
+                elif top in ("os", "pty", "asyncio"):
+                    aliases[local] = f"module:{top}"
         elif isinstance(node, ast.ImportFrom):
             mod_top = (node.module or "").split(".")[0]
             for a in node.names:
                 local = a.asname or a.name
                 if mod_top == _SUBPROCESS:
                     aliases[local] = _SUBPROCESS
+                elif mod_top == "os" and a.name in _OS_EXEC_ATTRS:
+                    aliases[local] = _OS_EXEC
+                elif mod_top == "pty" and a.name == "spawn":
+                    aliases[local] = _OS_EXEC
+                elif mod_top == "asyncio" and a.name in _ASYNCIO_EXEC_ATTRS:
+                    aliases[local] = _OS_EXEC
                 elif a.name == _GIT_DETECT_FN:
                     aliases[local] = _GIT_DETECT_FN
     return aliases
 
 
-def _scan_function(fn: ast.AST, aliases: dict[str, str]) -> tuple[set[str], bool, bool]:
-    """Analyse one function body. Returns ``(calls, calls_git, uses_subprocess)``.
+def _is_exec_call(call: ast.Call, aliases: dict[str, str]) -> bool:
+    """True for ``os.system(...)``-style calls and their aliased forms."""
+    func = call.func
+    if isinstance(func, ast.Name):
+        return aliases.get(func.id) == _OS_EXEC
+    if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+        module = aliases.get(func.value.id)
+        if module == "module:os":
+            return func.attr in _OS_EXEC_ATTRS
+        if module == "module:pty":
+            return func.attr == "spawn"
+        if module == "module:asyncio":
+            return func.attr in _ASYNCIO_EXEC_ATTRS
+    return False
 
-    ``calls`` is the set of callee bare names, with import aliases resolved to
-    their canonical sink token (so an aliased ``read_git_branch`` edge is still
-    labelled ``read_git_branch``). ``uses_subprocess`` is True when the body
-    imports or names ``subprocess`` under any alias.
+
+def _scan_function(fn: ast.AST, aliases: dict[str, str]) -> tuple[set[str], bool, bool, bool]:
+    """Analyse one function body.
+
+    Returns ``(calls, calls_git, uses_subprocess, uses_exec)``. ``calls`` is the
+    set of callee bare names, with import aliases resolved to their canonical
+    sink token (so an aliased ``read_git_branch`` edge is still labelled
+    ``read_git_branch``). ``uses_subprocess`` is True when the body imports or
+    names ``subprocess`` under any alias; ``uses_exec`` when it calls an ``os``
+    / ``pty`` process-execution function under any alias.
     """
     calls: set[str] = set()
     uses_subprocess = False
+    uses_exec = False
     for node in ast.walk(fn):
         if isinstance(node, ast.Call):
             name = _callee_bare_name(node)
             if name is not None:
                 calls.add(aliases.get(name, name))
+            if _is_exec_call(node, aliases):
+                uses_exec = True
         elif isinstance(node, ast.Name):
             if aliases.get(node.id) == _SUBPROCESS:
                 uses_subprocess = True
@@ -127,7 +223,7 @@ def _scan_function(fn: ast.AST, aliases: dict[str, str]) -> tuple[set[str], bool
         elif isinstance(node, ast.ImportFrom):
             if (node.module or "").split(".")[0] == _SUBPROCESS:
                 uses_subprocess = True
-    return calls, (_GIT_DETECT_FN in calls), uses_subprocess
+    return calls, (_GIT_DETECT_FN in calls), uses_subprocess, uses_exec
 
 
 class _CallGraph:
@@ -139,15 +235,20 @@ class _CallGraph:
             over-approximation).
         subprocess_fns: bare names of defs that reference ``subprocess`` (the
             shell-out sink owners), alias-resolved.
+        exec_fns: bare names of defs that call an ``os`` / ``pty``
+            process-execution function, alias-resolved (PMSERV-216).
         git_detect_callers: bare names of defs that call ``read_git_branch``,
             alias-resolved.
+        ledger_writers: the ledger-write helpers plus every def that calls one.
         defined: every defined function/method bare name (vacuity guards).
     """
 
     def __init__(self) -> None:
         self.edges: dict[str, set[str]] = {}
         self.subprocess_fns: set[str] = set()
+        self.exec_fns: set[str] = set()
         self.git_detect_callers: set[str] = set()
+        self.ledger_writers: set[str] = set()
         self.defined: set[str] = set()
 
     def ingest(self, source: str, filename: str = "<src>") -> None:
@@ -159,12 +260,21 @@ class _CallGraph:
                 continue
             name = fn.name
             self.defined.add(name)
-            calls, calls_git, uses_subprocess = _scan_function(fn, aliases)
+            calls, calls_git, uses_subprocess, uses_exec = _scan_function(fn, aliases)
             self.edges.setdefault(name, set()).update(calls)
             if calls_git:
                 self.git_detect_callers.add(name)
             if uses_subprocess:
                 self.subprocess_fns.add(name)
+            if uses_exec:
+                self.exec_fns.add(name)
+            if name in _LEDGER_WRITE_HELPERS or calls & _LEDGER_WRITE_HELPERS:
+                self.ledger_writers.add(name)
+
+    @property
+    def shell_out_fns(self) -> set[str]:
+        """Every def that can start a process (subprocess or os/pty exec)."""
+        return self.subprocess_fns | self.exec_fns
 
     @classmethod
     def build(cls, pkg_dir: Path) -> _CallGraph:
@@ -200,6 +310,30 @@ _GRAPH = _CallGraph.build(_PKG_DIR)
 # proof covers it.
 _RO_SEED = set(srv.RO_ALLOWLIST) | set(srv.OUTBOX_READ_ALLOWLIST)
 _RO_CLOSURE = _GRAPH.reachable(_RO_SEED)
+# PMSERV-216: Desktop outbox writers register under PM_LENS=1 too.
+_OUTBOX_WRITE_SEED = set(srv.OUTBOX_WRITE_ALLOWLIST)
+_OUTBOX_WRITE_CLOSURE = _GRAPH.reachable(_OUTBOX_WRITE_SEED)
+
+
+def _decorated_tools(source: str) -> set[str]:
+    """Names of every ``@_tool()`` function in server.py, read from source.
+
+    Taken from the source rather than ``REGISTERED_TOOLS`` so the full-mode
+    check does not depend on the PM_LENS value the test process imported with.
+    """
+    names: set[str] = set()
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for deco in node.decorator_list:
+            if isinstance(deco, ast.Call) and isinstance(deco.func, ast.Name):
+                if deco.func.id == "_tool":
+                    names.add(node.name)
+    return names
+
+
+_ALL_TOOLS = _decorated_tools((_PKG_DIR / "server.py").read_text(encoding="utf-8"))
+_FULL_CLOSURE = _GRAPH.reachable(_ALL_TOOLS)
 
 
 class TestGraphSanity:
@@ -309,3 +443,121 @@ class TestAliasRobustness:
                 return r(["echo"])
         """)
         assert "pm_next" in graph.subprocess_fns
+
+
+class TestWidenedSurfaces:
+    """PMSERV-216: ledger-write and os/pty-exec sinks, the outbox-write seed and
+    the full-mode surface (see the module docstring)."""
+
+    def test_new_detectors_are_populated(self):
+        """Vacuity guards for the new sinks and seeds."""
+        assert {"_save_yaml", "add_task", "add_decision_with_next_id"} <= _GRAPH.ledger_writers
+        # Decision Lineage (ADR-056 S1): its two composite writers are seen as
+        # ledger writers, while its readers and scrubbers are not — so they can
+        # sit on the Lens surface (pm_status already reaches error_summary).
+        assert {"add_decision_with_lineage", "change_decision_lineage"} <= _GRAPH.ledger_writers
+        lineage_readers = {
+            "read_lineage_raw",
+            "lineage_view",
+            "effective_lifecycle",
+            "scrub_view",
+            "scrub_label",
+            "error_summary",
+        }
+        assert lineage_readers <= _GRAPH.defined
+        reader_closure = _GRAPH.reachable(lineage_readers)
+        assert not reader_closure & _GRAPH.ledger_writers
+        assert not reader_closure & _GRAPH.shell_out_fns
+        assert {"error_summary", "scrub_label"} <= _RO_CLOSURE
+        # pm_decision_query sits on the Lens surface: its readers must be in the
+        # RO closure, or the disjointness checks below would pass without
+        # ever looking at them.
+        assert "pm_decision_query" in _RO_SEED
+        assert {
+            "read_lineage_raw",
+            "load_decisions",
+            "lineage_view",
+            "scan_linked_from",
+            "_attributed_doc",
+            "scrub_view",
+        } <= _RO_CLOSURE
+        assert _OUTBOX_WRITE_SEED <= _GRAPH.defined
+        assert _ALL_TOOLS > _RO_SEED | _OUTBOX_WRITE_SEED
+        assert {
+            "pm_add_task",
+            "pm_add_decision",
+            "pm_update_decision",
+            "pm_decision_query",
+            "pm_update_rules",
+        } <= _ALL_TOOLS
+        # The ADR writer is a full-mode tool only (design §8.2, D9).
+        assert "pm_update_decision" not in _RO_SEED
+
+    def test_ro_surface_never_writes_a_ledger(self):
+        leaked = _RO_CLOSURE & _GRAPH.ledger_writers
+        assert not leaked, (
+            f"read-only tool(s) reach a ledger write/lock helper: {sorted(leaked)} "
+            "— a Lens read must not write .pm/ or ~/.pm"
+        )
+
+    def test_ro_surface_never_execs(self):
+        leaked = _RO_CLOSURE & _GRAPH.shell_out_fns
+        assert not leaked, f"read-only tool(s) can start a process: {sorted(leaked)}"
+
+    def test_outbox_writers_stay_off_ledgers_git_and_shell_out(self):
+        """The outbox writers may touch desktop.db only."""
+        for label, sinks in (
+            ("ledger write", _GRAPH.ledger_writers),
+            ("shell-out", _GRAPH.shell_out_fns),
+            ("git detection", _GRAPH.git_detect_callers),
+        ):
+            leaked = _OUTBOX_WRITE_CLOSURE & sinks
+            assert not leaked, f"outbox writer reaches a {label} sink: {sorted(leaked)}"
+
+    def test_full_mode_never_shells_out(self):
+        """No tool on ANY path starts a process — PM Lens never runs git (ADR-028)."""
+        leaked = _FULL_CLOSURE & _GRAPH.shell_out_fns
+        assert not leaked, (
+            f"MCP tool(s) can start a process: {sorted(leaked)} — the README promises "
+            "PM Lens never shells out to git, on read and write paths alike"
+        )
+
+
+class TestWidenedCheckerHasTeeth:
+    """Mutation guards for the PMSERV-216 checks."""
+
+    def test_mutator_added_to_the_ro_allowlist_is_caught(self):
+        """Putting a write tool on the Lens surface must trip the ledger sink."""
+        closure = _GRAPH.reachable(_RO_SEED | {"pm_add_task"})
+        assert closure & _GRAPH.ledger_writers
+
+    def test_write_tool_reaching_shell_out_is_caught(self):
+        graph = _CallGraph.build(_PKG_DIR)
+        graph.edges.setdefault("pm_add_task", set()).add("install_claude_code")
+        assert graph.reachable(_ALL_TOOLS) & graph.shell_out_fns
+
+    def test_os_exec_forms_are_detected(self):
+        cases = {
+            "import os\n\ndef pm_status():\n    os.system('x')\n": "pm_status",
+            "import os as o\n\ndef pm_next():\n    o.popen('x')\n": "pm_next",
+            "from os import execvp as ex\n\ndef pm_tasks():\n    ex('x', [])\n": "pm_tasks",
+            "import pty\n\ndef pm_risks():\n    pty.spawn('x')\n": "pm_risks",
+            (
+                "import asyncio\n\nasync def pm_list():\n"
+                "    await asyncio.create_subprocess_exec('x')\n"
+            ): "pm_list",
+        }
+        for source, fn in cases.items():
+            assert fn in _CallGraph.from_source(source).exec_fns, source
+
+    def test_unrelated_os_calls_are_not_exec(self):
+        graph = _CallGraph.from_source(
+            "import os\n\ndef pm_status():\n    return os.path.join('a', 'b'), os.getcwd()\n"
+        )
+        assert "pm_status" not in graph.exec_fns
+
+    def test_os_exec_wired_onto_the_ro_surface_is_caught(self):
+        graph = _CallGraph.build(_PKG_DIR)
+        graph.ingest("import os\n\ndef _evil_helper():\n    os.system('git status')\n")
+        graph.edges.setdefault("pm_status", set()).add("_evil_helper")
+        assert graph.reachable(_RO_SEED) & graph.shell_out_fns

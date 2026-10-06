@@ -3,7 +3,15 @@
 import datetime as _dt
 from enum import StrEnum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
+
+# Ledger models that a whole-file rewrite round-trips (decisions.yaml,
+# knowledge.yaml) keep keys they do not know (PMSERV-218 / ADR-056). Under the
+# pydantic default (extra="ignore") an older pmlens that rewrites the file
+# silently drops every field a newer pmlens added — the same version-skew
+# failure ADR-055 fixed for the rule sections. This only protects files
+# rewritten by THIS version onward; already-shipped readers still drop them.
+_KEEP_UNKNOWN = ConfigDict(extra="allow")
 
 # Alias to avoid field-name collisions (e.g. Decision.date vs date type)
 _Date = _dt.date
@@ -87,6 +95,60 @@ class DecisionStatus(StrEnum):
     ACCEPTED = "accepted"
     DEPRECATED = "deprecated"
     SUPERSEDED = "superseded"
+
+
+# Decision Lineage vocabularies (ADR-056 S1). They live in the per-ADR lineage
+# file (.pm/decision_lineage/ADR-NNN.yaml), never in decisions.yaml, whose
+# status keeps the four DecisionStatus values above. Writers validate against
+# these enums; readers keep whatever string the file holds (ADR-056: lenient
+# reads), so a value a newer pmlens adds does not break this one.
+
+
+class DecisionLifecycle(StrEnum):
+    """Where an ADR stands. Projected onto DecisionStatus for older readers."""
+
+    PROPOSED = "proposed"
+    ADOPTED = "adopted"
+    DEPRECATED = "deprecated"
+    SUPERSEDED = "superseded"
+    REJECTED = "rejected"
+    REVERTED = "reverted"
+
+
+class DecisionOrigin(StrEnum):
+    """Who made the decision, as the caller declared it (never verified)."""
+
+    AI_AUTO = "ai_auto"
+    AI_PROPOSED_HUMAN_DECIDED = "ai_proposed_human_decided"
+    HUMAN = "human"
+    UNKNOWN = "unknown"
+
+
+class RecordedTiming(StrEnum):
+    """When the ADR was recorded relative to the implementation (declared)."""
+
+    BEFORE_IMPL = "before_impl"
+    DURING_IMPL = "during_impl"
+    POST_HOC = "post_hoc"
+    UNKNOWN = "unknown"
+
+
+class DecisionKind(StrEnum):
+    """What kind of decision the ADR is (declared once, never changed)."""
+
+    SPEC_POLICY = "spec_policy"
+    PREMISE_DEPENDENT = "premise_dependent"
+    TECHNICAL = "technical"
+    UNKNOWN = "unknown"
+
+
+class EvaluationKind(StrEnum):
+    """Source of an evaluation event. ``ai_review`` is never a human review."""
+
+    TEST = "test"
+    AI_REVIEW = "ai_review"
+    OUTCOME = "outcome"
+    OTHER = "other"
 
 
 class LogCategory(StrEnum):
@@ -244,6 +306,8 @@ class Task(BaseModel):
 class Consequences(BaseModel):
     """ADR consequences structure."""
 
+    model_config = _KEEP_UNKNOWN
+
     positive: list[str] = Field(default_factory=list)
     negative: list[str] = Field(default_factory=list)
     mitigations: list[str] = Field(default_factory=list)
@@ -252,10 +316,18 @@ class Consequences(BaseModel):
 class Decision(BaseModel):
     """Architecture Decision Record (ADR)."""
 
+    model_config = _KEEP_UNKNOWN
+
     id: str
     title: str
     date: _Date = Field(default_factory=_dt.date.today)
-    status: DecisionStatus = DecisionStatus.ACCEPTED
+    # A status outside DecisionStatus (a hand edit, or another tool) is kept as
+    # the raw string instead of failing the whole decisions.yaml load, and is
+    # written back unchanged (PMSERV-218). left_to_right makes known values
+    # still parse as the enum. Writers must validate against DecisionStatus.
+    status: DecisionStatus | str = Field(
+        default=DecisionStatus.ACCEPTED, union_mode="left_to_right"
+    )
     context: str = ""
     decision: str = ""
     consequences: Consequences = Field(default_factory=Consequences)
@@ -344,6 +416,8 @@ class KnowledgeRecord(BaseModel):
     Used for research findings, requirements, trade-off analyses, specs, etc.
     Stored in .pm/knowledge.yaml.
     """
+
+    model_config = _KEEP_UNKNOWN
 
     id: str
     category: KnowledgeCategory

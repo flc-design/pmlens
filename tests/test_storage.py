@@ -417,3 +417,33 @@ class TestBuiltinTemplatesDirStatus:
         assert status["stale"] is True
         assert status["template_count"] == 0
         assert str(vanished) in status["path"]
+
+
+class TestExpandedSize:
+    """The loader's alias-expansion guard (Decision Lineage S1 review)."""
+
+    def test_counts_shared_containers_once_per_reference(self):
+        from pmlens.storage import _expanded_size
+
+        shared = ["xx", "yy"]  # 1 + 2 + 2
+        assert _expanded_size({"a": shared, "b": shared}, 10_000) == 1 + 1 + 5 + 1 + 5
+
+    def test_an_exponential_bomb_is_rejected_in_linear_time(self):
+        import time
+
+        from pmlens.storage import _expanded_size, _ExpansionLimitError
+
+        node: object = ["x"] * 9
+        for _ in range(40):  # 9**41 leaves if expanded
+            node = [node] * 9
+        started = time.perf_counter()
+        with pytest.raises(_ExpansionLimitError):
+            _expanded_size(node, 4 * 1024 * 1024)
+        assert time.perf_counter() - started < 1.0
+
+    def test_a_cycle_is_finite(self):
+        from pmlens.storage import _expanded_size
+
+        loop: list = []
+        loop.append(loop)
+        assert _expanded_size({"loop": loop}, 1000) < 1000

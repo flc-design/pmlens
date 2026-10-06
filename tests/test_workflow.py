@@ -5,6 +5,7 @@ Covers:
 - Storage CRUD (load, save, add, update, next_number)
 - Template loading (builtin, custom, resolution order)
 - Template listing
+- ADR lifecycle guidance (record proposed, adopt at a gate) in built-in templates
 - Workflow engine (start, status, advance, loop, skip, gate, chain)
 - MCP tool wrappers
 - Edge cases and error handling
@@ -13,6 +14,7 @@ Covers:
 from __future__ import annotations
 
 import datetime as _dt
+from pathlib import Path
 
 import pytest
 import yaml
@@ -364,6 +366,142 @@ class TestWorkflowTemplates:
         assert "ADR" in tasks_step.consumes
 
 
+# ─── ADR lifecycle guidance in the templates ────────
+
+
+# Every built-in step that records an ADR today. The scan below must find at
+# least these, so a template that drops its tool_hint cannot empty the check.
+_KNOWN_ADD_DECISION_STEPS = {
+    ("development", "decision"),
+    ("discovery", "confirm"),
+    ("brainstorming", "record"),
+}
+
+
+def _builtin_templates() -> dict[str, WorkflowTemplate]:
+    """Load every built-in workflow template, keyed by its file name.
+
+    Returns:
+        A mapping of template name to the parsed built-in template.
+    """
+    names = [t["name"] for t in list_workflow_templates() if t["source"] == "builtin"]
+    return {name: load_workflow_template(name) for name in names}
+
+
+class TestDecisionLifecycleGuidance:
+    """The templates record ADRs as proposed and adopt them only at a gate."""
+
+    def test_development_decision_records_a_proposed_adr(self) -> None:
+        tmpl = load_workflow_template("development")
+        decision = tmpl.steps[0]
+        assert decision.id == "decision"
+        assert decision.tool_hint == "pm_add_decision"
+        assert decision.gate is None
+        assert decision.required_artifacts == ["ADR"]
+        assert decision.produces == ["ADR"]
+        assert "status=proposed" in decision.description
+        assert "check step" in decision.description
+        # Adoption is the check gate's job; the recording step must not invite it.
+        assert "pm_update_decision" not in decision.description
+        assert "adopted" not in decision.description
+
+    def test_development_check_adopts_the_adr_at_its_gate(self) -> None:
+        tmpl = load_workflow_template("development")
+        check = tmpl.steps[4]
+        assert check.id == "check"
+        assert check.gate == "user_approval"
+        # The gate's main work is the review, so it names no tool of its own.
+        assert check.tool_hint is None
+        assert check.consumes == ["ADR", "spec", "plan"]
+        assert check.produces == ["review_report"]
+        assert "pm_update_decision" in check.description
+        assert "adopted" in check.description
+        assert "rejected" in check.description
+
+    @pytest.mark.parametrize(
+        ("template_name", "step_id"),
+        [("discovery", "confirm"), ("brainstorming", "record")],
+    )
+    def test_gated_record_step_records_proposed_then_adopts(
+        self, template_name: str, step_id: str
+    ) -> None:
+        tmpl = load_workflow_template(template_name)
+        step = tmpl.steps[-1]
+        assert step.id == step_id
+        assert step.tool_hint == "pm_add_decision"
+        assert step.gate == "user_approval"
+        assert "ADR" in step.required_artifacts
+        assert "status=proposed" in step.description
+        assert "pm_update_decision" in step.description
+        assert "adopted" in step.description
+
+    def test_every_add_decision_step_is_proposed_and_adopted_at_the_next_gate(self) -> None:
+        import pmlens.server as srv
+
+        assert "pm_update_decision" in srv.REGISTERED_TOOLS
+        scanned: set[tuple[str, str]] = set()
+        for name, tmpl in _builtin_templates().items():
+            for index, step in enumerate(tmpl.steps):
+                if step.tool_hint != "pm_add_decision":
+                    continue
+                scanned.add((name, step.id))
+                assert "proposed" in step.description, (name, step.id)
+                # The approval that adopts the ADR is this step's own gate, or
+                # the first gate after it in the same template.
+                gate_step = next((s for s in tmpl.steps[index:] if s.gate), None)
+                assert gate_step is not None, (name, step.id)
+                assert "pm_update_decision" in gate_step.description, (name, gate_step.id)
+                assert "adopted" in gate_step.description, (name, gate_step.id)
+        assert scanned >= _KNOWN_ADD_DECISION_STEPS
+
+    def test_a_gate_that_adopts_shows_the_adr_text_first(self) -> None:
+        # Approving a plan, a spec or a direction is not approving the ADR:
+        # the gate shows the ADR's own text, and adopting means the user
+        # accepted that text (ADR-059). Without this, the check gate adopted
+        # an ADR recorded before the spec changed the design.
+        import pmlens.server as srv
+
+        assert "pm_decision_query" in srv.REGISTERED_TOOLS
+        gates: set[tuple[str, str]] = set()
+        for name, tmpl in _builtin_templates().items():
+            for step in tmpl.steps:
+                if not (step.gate and "pm_update_decision" in step.description):
+                    continue
+                gates.add((name, step.id))
+                text = " ".join(step.description.split())
+                assert "pm_decision_query" in text, (name, step.id)
+                assert "Before asking for approval" in text, (name, step.id)
+                assert "accepted what the ADR says" in text, (name, step.id)
+                assert "approves the ADR's content" in text, (name, step.id)
+        assert gates >= {
+            ("development", "check"),
+            ("discovery", "confirm"),
+            ("brainstorming", "record"),
+        }
+        check = load_workflow_template("development").steps[4]
+        text = " ".join(check.description.split())
+        # A design changed after the ADR was recorded gets a new ADR, not the old text.
+        assert "record a new ADR (status=proposed)" in text
+        assert "superseded" in text
+        assert "pm_workflow_status" in text
+
+    def test_adoption_is_guided_only_on_gated_steps(self) -> None:
+        mentions: set[tuple[str, str]] = set()
+        for name, tmpl in _builtin_templates().items():
+            for step in tmpl.steps:
+                # Naming the tool as a step's main hint would invite adopting
+                # before the user has approved anything.
+                assert step.tool_hint != "pm_update_decision", (name, step.id)
+                if "pm_update_decision" in step.description:
+                    mentions.add((name, step.id))
+                    assert step.gate == "user_approval", (name, step.id)
+        assert mentions >= {
+            ("development", "check"),
+            ("discovery", "confirm"),
+            ("brainstorming", "record"),
+        }
+
+
 # ─── Engine Tests ───────────────────────────────────
 
 
@@ -624,6 +762,24 @@ class TestStepGuidance:
         decision = status["current_step"]
         assert "ADR" in decision["produces"]
         assert decision.get("required_artifacts") == ["ADR"]
+
+    def test_guidance_records_proposed_then_adopts_at_check(self, tmp_pm_path: Path) -> None:
+        result = start_workflow(tmp_pm_path, "auth", "development")
+        assert "status=proposed" in result["current_step"]["description"]
+        advance_step(tmp_pm_path, artifacts=["ADR-001"])
+        for _ in range(3):
+            advance_step(tmp_pm_path, skip=True)
+
+        status = workflow_status(tmp_pm_path)
+        check = status["current_step"]
+        assert check["id"] == "check"
+        assert check["gate"] == "user_approval"
+        assert "ADR" in check["consumes"]
+        assert "pm_update_decision" in check["description"]
+        assert "tool_hint" not in check
+        # The ADR to adopt is the one the decision step recorded.
+        decision = next(s for s in status["steps"] if s["id"] == "decision")
+        assert decision["artifacts"] == ["ADR-001"]
 
 
 # ─── Progress Tests ─────────────────────────────────

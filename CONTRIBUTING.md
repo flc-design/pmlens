@@ -50,6 +50,52 @@ directory; we **never** bind-mount the host's `~/.claude`, `~/.codex`, `~/.ssh`,
 etc. That redirected, container-local HOME is the structural guarantee that
 development cannot corrupt your real host config.
 
+## Keep every registered host on the release
+
+The split above only protects you if **every** host that registers pmlens
+points at the released tool. A host registered against an editable checkout
+(for example `pip install -e .` into a pyenv Python, then that interpreter's
+`pm-server` in `~/.codex/config.toml`) imports the source tree directly — so it
+runs **whatever branch that checkout has checked out at the moment the host
+starts**, and writes your real `.pm/` ledgers with half-finished code. A model
+change in a feature branch (new fields, a new status value) can then be
+written into data that the released tool, the Desktop extension and other
+hosts read back with an older schema.
+
+The usual cause is the installer itself: `install` registers the `pmlens`
+executable that sits next to the Python it runs under. Run it from the release
+so that is what gets registered:
+
+```bash
+~/.local/bin/pmlens install --target codex --dry-run   # then without --dry-run
+```
+
+To see what a host runs, print only the command (the entries can carry
+environment variables you do not want in a terminal log):
+
+```bash
+python3 -c "import json,pathlib; e=json.loads((pathlib.Path.home()/'.claude.json').read_text()).get('mcpServers',{}).get('pmlens'); print(e and (e.get('command'), e.get('args')))"
+grep -A2 '^\[mcp_servers.pmlens\]' ~/.codex/config.toml | grep -E '^(command|args)'
+```
+
+`None` from the first line means Claude Code does not register pmlens at user
+scope (it may come from a plugin or a project-scope `.mcp.json` instead —
+check those too). Cursor and Grok read their own config files.
+
+If a host must stay on the editable install, use one of these while a feature
+branch is checked out:
+
+- **Develop in a separate git worktree** (`git worktree add ../pm-server-<topic>
+  -b feat/<topic>`), so the checkout the editable install imports from stays on
+  `main`. The test session pins `PYTHONPATH` to the tree under test, so the
+  subprocess-based tests (the Lens sweep, smoke, launch surfaces) also import
+  the worktree's `src/`, and it fails at start-up if they would not.
+- **Point the session at a copy of the ledger**: run the host with
+  `PM_PROJECT_PATH` set to a scratch copy of the project. It is not fail-safe:
+  an explicit `project_path` argument wins over it, and a path without a
+  `.pm/` directory is silently skipped in favour of the normal lookup. Confirm
+  with `pm_status` which project the session actually resolved before writing.
+
 ## Exercising global side-effects (install / migrate / hooks)
 
 This is the payoff of the sandbox — run the dangerous paths against the

@@ -1,6 +1,6 @@
 # PM Lens Cheatsheet
 
-> **44 MCP tools + 2 compatibility aliases** for Claude Code, Codex CLI, Cursor and Grok Build.
+> **46 MCP tools + 2 compatibility aliases** for Claude Code, Codex CLI, Cursor and Grok Build.
 > Version 0.16.0 | Python 3.11+ | PyPI: `pmlens`
 
 ---
@@ -89,7 +89,9 @@ use the legacy names. See the [migration guide](content-tool-migration.md).
 | Tool | Description | Key Params |
 |------|-------------|------------|
 | `pm_log` | Add daily log entry (auto-links to active task) | `entry`, `category="progress"` |
-| `pm_add_decision` | Record an ADR (ID auto-generated) | `title`, `context`, `decision` |
+| `pm_add_decision` | Record an ADR (ID auto-generated). Saved as proposed; `accepted` only when the user accepted the content | `title`, `context`, `decision`, `status="proposed"`, `origin?`, `recorded_timing?`, `decision_kind?` |
+| `pm_decision_query` | Read ADRs and their lineage, changing nothing (Lens-safe). `lifecycle="proposed"` lists ADRs awaiting the user's review; list pages with `limit` / `offset` | `action="list"`, `decision_id?` (get), `lifecycle?`, `limit=50`, `offset=0` |
+| `pm_update_decision` | Move an ADR's lifecycle (e.g. proposed → adopted once the user approves), change its links, append an evaluation or a note; the text never changes (full mode only) | `decision_id`, `lifecycle?`, `reason?`, `add_links?`, `remove_links?`, `evaluation?`, `note?` |
 | `pm_velocity` | Velocity and trend analysis | `weeks=4` |
 | `pm_risks` | Auto-detected + manual risks | `project_path?` |
 
@@ -185,7 +187,13 @@ User:   We're going with JWT for the API. Record as ADR?
 Claude: → pm_add_decision(title="Use JWT for API auth",
             context="Need stateless auth for microservices",
             decision="JWT with RS256, 15min expiry")
-        [Layer 3: ADR] Formal architecture decision
+        [Layer 3: ADR] Formal architecture decision, saved as proposed
+        (agreeing to record it is not accepting its text)
+
+User:   (reads the ADR's text) Yes, that is what we decided.
+Claude: → pm_update_decision(decision_id="ADR-012", lifecycle="adopted",
+            reason="The user accepted the ADR's text")
+        Adopted; Claude relays the decision_lifecycle_changed warning to the user
 ```
 
 ### Knowledge Record Categories
@@ -427,6 +435,7 @@ pm-server hook post-tool-use   # PostToolUse hook handler
 ├── project.yaml        # Project metadata
 ├── tasks.yaml          # All tasks
 ├── decisions.yaml      # ADRs
+├── decision_lineage/   # One file per ADR: lifecycle, provenance, links, events
 ├── knowledge.yaml      # Knowledge records
 ├── workflows.yaml      # Workflow instances
 ├── risks.yaml          # Manual risks
@@ -451,6 +460,11 @@ pm-server hook post-tool-use   # PostToolUse hook handler
 | TaskStatus | `todo`, `in_progress`, `review`, `done`, `blocked` |
 | Priority | `P0` (critical), `P1` (important), `P2` (nice-to-have), `P3` (someday) |
 | DecisionStatus | `proposed`, `accepted`, `deprecated`, `superseded` |
+| DecisionLifecycle | `proposed`, `adopted`, `deprecated`, `superseded`, `rejected`, `reverted` |
+| DecisionOrigin | `ai_auto`, `ai_proposed_human_decided`, `human`, `unknown` |
+| RecordedTiming | `before_impl`, `during_impl`, `post_hoc`, `unknown` |
+| DecisionKind | `spec_policy`, `premise_dependent`, `technical`, `unknown` |
+| EvaluationKind | `test`, `ai_review`, `outcome`, `other` |
 | LogCategory | `progress`, `decision`, `blocker`, `note`, `milestone` |
 | MemoryType | `observation`, `insight`, `lesson` |
 | KnowledgeCategory | `research`, `market`, `spike`, `requirement`, `constraint`, `tradeoff`, `risk_analysis`, `spec`, `api_design` |

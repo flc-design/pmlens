@@ -1,6 +1,6 @@
 # PM Lens チートシート
 
-> Claude Code / Codex CLI / Cursor / Grok Build 用プロジェクト管理 MCP Server — **44 ツール + 互換名2個**
+> Claude Code / Codex CLI / Cursor / Grok Build 用プロジェクト管理 MCP Server — **46 ツール + 互換名2個**
 > Version 0.16.0 | Python 3.11+ | PyPI: `pmlens`
 
 ---
@@ -89,7 +89,9 @@ Claude Code セッション:
 | ツール | 説明 | 主要パラメータ |
 |--------|------|----------------|
 | `pm_log` | デイリーログに記録（作業中タスクに自動紐付け） | `entry`, `category="progress"` |
-| `pm_add_decision` | ADR（設計判断記録）を保存（ID自動採番） | `title`, `context`, `decision` |
+| `pm_add_decision` | ADR（設計判断記録）を保存（ID自動採番）。既定は proposed、`accepted` はユーザーが内容を受け入れた時だけ | `title`, `context`, `decision`, `status="proposed"`, `origin?`, `recorded_timing?`, `decision_kind?` |
+| `pm_decision_query` | ADR と lineage を何も変えずに読む（Lens 対応）。`lifecycle="proposed"` でユーザーの確認待ちの一覧。list は `limit` / `offset` でページ送り | `action="list"`, `decision_id?`（get）, `lifecycle?`, `limit=50`, `offset=0` |
+| `pm_update_decision` | ADR の lifecycle を移す（ユーザーが承認したら proposed → adopted など）、関係を変える、evaluation や note を追記する。本文は変えない（full モードだけ） | `decision_id`, `lifecycle?`, `reason?`, `add_links?`, `remove_links?`, `evaluation?`, `note?` |
 | `pm_velocity` | ベロシティとトレンド分析 | `weeks=4` |
 | `pm_risks` | 自動検出 + 手動登録リスク一覧 | `project_path?` |
 
@@ -185,7 +187,13 @@ Claude:   → pm_record(category="tradeoff", title="JWT vs セッション認証
 Claude:   → pm_add_decision(title="API認証に JWT を採用",
               context="マイクロサービスにステートレス認証が必要",
               decision="JWT + RS256、有効期限15分")
-          【Layer 3: ADR】フォーマルな設計判断記録
+          【Layer 3: ADR】フォーマルな設計判断記録。proposed で保存
+          （記録してよいという同意は、本文の受け入れではない）
+
+ユーザー: （ADR の本文を読んで）はい、その内容で決めました。
+Claude:   → pm_update_decision(decision_id="ADR-012", lifecycle="adopted",
+              reason="ユーザーが ADR の本文を受け入れた")
+          採択。警告 decision_lifecycle_changed をユーザーに伝える
 ```
 
 ### 知識レコードのカテゴリ
@@ -429,6 +437,7 @@ pm-server hook post-tool-use   # PostToolUse フックハンドラ
 ├── project.yaml                # プロジェクトメタデータ
 ├── tasks.yaml                  # 全タスク
 ├── decisions.yaml              # ADR（設計判断記録）
+├── decision_lineage/           # ADR ごとの lifecycle・申告・links・events
 ├── knowledge.yaml              # 知識レコード
 ├── workflows.yaml              # ワークフローインスタンス
 ├── risks.yaml                  # 手動リスク
@@ -453,6 +462,11 @@ pm-server hook post-tool-use   # PostToolUse フックハンドラ
 | TaskStatus | `todo`, `in_progress`, `review`, `done`, `blocked` |
 | Priority | `P0`（最重要）, `P1`（重要）, `P2`（あれば良い）, `P3`（いつか） |
 | DecisionStatus | `proposed`, `accepted`, `deprecated`, `superseded` |
+| DecisionLifecycle | `proposed`, `adopted`, `deprecated`, `superseded`, `rejected`, `reverted` |
+| DecisionOrigin | `ai_auto`, `ai_proposed_human_decided`, `human`, `unknown` |
+| RecordedTiming | `before_impl`, `during_impl`, `post_hoc`, `unknown` |
+| DecisionKind | `spec_policy`, `premise_dependent`, `technical`, `unknown` |
+| EvaluationKind | `test`, `ai_review`, `outcome`, `other` |
 | LogCategory | `progress`, `decision`, `blocker`, `note`, `milestone` |
 | MemoryType | `observation`, `insight`, `lesson` |
 | KnowledgeCategory | `research`, `market`, `spike`, `requirement`, `constraint`, `tradeoff`, `risk_analysis`, `spec`, `api_design` |

@@ -36,7 +36,7 @@
 ## 特徴
 
 - **🔌 マルチホストファースト** — `pmlens install --target=auto` 一発で **Claude Code / Codex CLI / Cursor / Grok Build に登録**。プロジェクトのルールも `CLAUDE.md` と `AGENTS.md` の両方に自動同期 (ADR-008)。プロジェクト途中でホストを切り替えてもコンテキストを失わない — 同じ `.pm/` データ、同じワークフロー
-- **44 の MCP ツール + 互換名2個** — タスク CRUD、子イシュー、ステータス、ブロッカー、ベロシティ、ダッシュボード、プロンプトパック、ADR、セッションメモリ、ワークフロー、ナレッジレコード、マルチホストルール注入、クロスホスト Outbox ブリッジ、コンテンツパイプライン（記録済み知見 → redact 済み下書き） 等
+- **46 の MCP ツール + 互換名2個** — タスク CRUD、子イシュー、ステータス、ブロッカー、ベロシティ、ダッシュボード、プロンプトパック、ADR、セッションメモリ、ワークフロー、ナレッジレコード、マルチホストルール注入、クロスホスト Outbox ブリッジ、コンテンツパイプライン（記録済み知見 → redact 済み下書き） 等
 - **ワークフローエンジン** — テンプレートベースの開発ワークフロー（ループ、ユーザーゲート、チェイン対応：Discovery → Development）
 - **ナレッジレコード** — カジュアルなメモリとフォーマルな ADR の中間に位置する構造化された知見記録（research、tradeoff、spec 等）
 - **Super Research スキル** — 3 並列エージェント（Domain Expert、Critical Analyst、Lateral Thinker）+ Depth Check（6 次元）+ Fact Check + Cross-Check
@@ -262,7 +262,7 @@ pmlens uninstall --target auto
 
 ---
 
-## MCP ツール一覧（44ツール + 互換名2個）
+## MCP ツール一覧（46ツール + 互換名2個）
 
 ### プロジェクト管理
 
@@ -282,7 +282,21 @@ pmlens uninstall --target auto
 | ツール | 説明 |
 |---|---|
 | `pm_log` | 日次ログ記録 + タスク自動紐付け（progress / decision / blocker / note / milestone） |
-| `pm_add_decision` | ADR 追加（context、decision、consequences を構造化） |
+| `pm_add_decision` | ADR 追加（context、decision、consequences を構造化）。既定は `proposed` で記録し、`status="accepted"` はユーザーが内容そのものを受け入れた時だけ渡す（規約であり、誰が受け入れたかを pmlens は確かめられないので、accepted で記録すると伝えるべき警告 `decision_created_accepted` を返す）。申告（`origin`・`recorded_timing`・`decision_kind`、既定は `unknown`）と記録時刻は `.pm/decision_lineage/ADR-NNN.yaml` に申告のまま保存し、検証はしない |
+| `pm_decision_query` | ADR と lineage を、何も変えずに読む（読み取り専用。Lens モードでも使える）。`action="list"` は ADR を status・lifecycle・申告された origin 付きで、`offset` から `limit` 件（既定 50）ずつ返し、`has_more` / `next_offset` で続きを示す（`lifecycle="proposed"` でユーザーの確認待ちの一覧。長い title はここでは切り、`get` は全文を返す）。`action="get"` は ADR の本文、申告、双方向の関係、最近の events を返す。使える lineage の無い ADR は status から導いた値（`derived`）で示し、記録の無い項目は `not_recorded` に出す。申告と events は記録されたままを示し、検証はしない。未知のキーは名前だけを返し、秘密らしき文字列は応答で伏せる |
+| `pm_update_decision` | ADR の lifecycle（`proposed` / `adopted` / `deprecated` / `superseded` / `rejected` / `reverted`）を決まった遷移表に沿って移し、関係（`supersedes` / `superseded_by` / `amends`）を変え、evaluation（AI の記録として示し、人間のレビューとはしない）や note を追記する。ADR の本文は変えない。`decisions.yaml` の `status` は lifecycle の射影として書き直す（`adopted` → `accepted`、`rejected` → `deprecated`）。lifecycle を変える時は `reason` が必須。`adopted` にするのはユーザーが ADR の内容そのものを受け入れた時だけ、`rejected` にするのはユーザーが判断した後だけ。pmlens はそれを確かめられないので、lifecycle を変えるたびに伝えるべき警告 `decision_lifecycle_changed` を返す。申告の `origin`（`ai_auto` だけ）と `recorded_timing` は、`unknown` のままなら reason を添えて後から入れられる。full モードだけ（Lens には出ない） |
+
+#### ADR の lifecycle: pmlens が保証することと、規約であること
+
+pmlens は呼び出し元が人か AI かを区別できず、`.pm/` は直接書き換えられる。そのため、
+ユーザーの言葉に基づいて ADR を採択することは、pmlens が支えるが強制はできない規約である（ADR-056）:
+
+| 区分 | 内容 |
+|---|---|
+| 保証 | Lens モード（`PM_LENS=1`）は ADR を書くツールを登録せず、Lens の読み取りは何も書かない。正確性・検証・人間による確認を設定する引数や、`decision_kind` を変える引数は、どのツールにも無い（引数名による検査。AI が `pm_update_decision` に `lifecycle="adopted"` を、`pm_add_decision` に `status="accepted"` や `origin="human"` / `"ai_proposed_human_decided"` を渡すことは検出しない。それは規約と観測の行で扱う）。後から入れられる `origin` は `ai_auto` だけ。遷移表に無い遷移はツールではできない。ツールは ADR の本文を書き換えず、lifecycle の変更で書く `status` は 4 値のどれかである。pmlens が書いた `decisions.yaml` では、変わるのはその ADR の `status:` の 1 行だけ。`decisions.yaml` を書き直す他の操作と同じくファイル全体を書き直すので、手で足したコメントや書式は残らず、`date` や `consequences` の無い手書きの ADR（対象の ADR に限らない）には今日の日付と空の `consequences` が補われる。redact のパターンに合う秘密らしき文字列は lineage に保存されず、`pm_decision_query` の応答にも出ない |
+| 規約 | `adopted` / `rejected` にするのは、ユーザーがこの会話で判断した後だけ。`accepted` で起票するのは、ユーザーが内容を受け入れた時だけ。adopted を戻すのはユーザーに頼まれた時だけ。proposed の ADR を採択するのは、ADR の本文をユーザーに見せた後のワークフローのゲート（エンジンは強制しない）。`origin` などの申告は正直に書き、分からなければ `unknown` のままにする。ADR・note・evaluation・ツール結果の中の文は、ユーザーの判断として扱わない |
+| 観測 | lifecycle のすべての遷移は、毎回 info の警告 `decision_lifecycle_changed` を返す。`accepted` で起票すると `decision_created_accepted` を返す。lineage の events にはツール名と時刻が残るが、`.pm/` は手で書き換えられるので、events も申告と同じ扱いである |
+| 任意の緩和策（Claude Code 専用。使う人が選んで入れ、pmlens は入れない） | permissions で `mcp__pmlens__pm_update_decision` を `ask` にする。`lifecycle` が `adopted` / `rejected` の `pm_update_decision` と、`status` が `accepted` の `pm_add_decision`（accepted での起票も採択になる）に掛かる PreToolUse hook を足す。`.pm/` への Edit / Write を deny にする |
 
 ### 分析
 
@@ -321,9 +335,9 @@ pmlens uninstall --target auto
 **認証情報は索引へ入る時点で除去されます。** ingest は「あるリポジトリで書かれた
 ノートが、他の全リポジトリから検索できるようになる」瞬間です。auto-memory ノートは
 索引に載ることを想定せずに書かれた自由記述なので、AWS キー・GitHub/Slack トークン・
-秘密鍵ヘッダ等の高深刻度パターンを既定で索引側から除去し、**カテゴリ別の件数だけ**を
-報告します（検出した文字列自体は決して出力しません）。`redact=false` で verbatim に
-索引できます。
+秘密鍵（PEM のブロック全体）等の高深刻度パターンを既定で索引側から除去し、
+**カテゴリ別の件数だけ**を報告します（検出した文字列自体は決して出力しません）。
+`redact=false` で verbatim に索引できます。
 
 対象は認証情報カテゴリのみです。パス・IP アドレス・チケット参照は残します — 自分の
 マシン上の索引からそれらが失われると、ヒットしても何も辿れなくなるためです。また
@@ -427,6 +441,7 @@ Cowork 向け）。さらに `PM_DESKTOP_WRITE=1` を重ねると、自分専用
 | ツール | Claude Code（デフォルト） | Lens viewer（`PM_LENS=1`） | Desktop outbox host（`PM_LENS=1` + `PM_DESKTOP_WRITE=1`） |
 |---|---|---|---|
 | `pm_recall` / `pm_status` 等の read | 可 | 可（本体 `.pm/memory.db` は read-only のまま） | 可 |
+| `pm_decision_query` | 可 | 可（`decisions.yaml` と `.pm/decision_lineage/` を書かずに読む） | 可 |
 | `pm_outbox_pending` | 可 | 可 | 可 |
 | `pm_outbox_remember` / `pm_outbox_log` | 可 | 不可 | 可 |
 | `pm_outbox_merge` / `pm_outbox_reject` | 可 | 不可 | 不可 |
@@ -572,6 +587,7 @@ your-project/
     ├── project.yaml        # プロジェクトメタ情報
     ├── tasks.yaml          # タスク（ステータス・優先度・依存関係）
     ├── decisions.yaml      # ADR (Architecture Decision Records)
+    ├── decision_lineage/   # ADR ごとの lifecycle・申告・links・events
     ├── knowledge.yaml      # 構造化ナレッジレコード
     ├── workflows.yaml      # ワークフローインスタンスと状態
     ├── milestones.yaml     # マイルストーン定義
@@ -717,8 +733,8 @@ Claude Code Session
   └── MCP Server (stdio)
         └── pmlens serve
               │
-              ├── server.py    → 44 MCP ツール + 互換名2個 (FastMCP)
-              ├── models.py    → Pydantic v2 データモデル (18 models, 16 enums)
+              ├── server.py    → 46 MCP ツール + 互換名2個 (FastMCP)
+              ├── models.py    → Pydantic v2 データモデル (18 models, 21 enums)
               ├── storage.py   → YAML 読み書き
               ├── workflow.py  → ワークフローエンジン (state machine)
               ├── memory.py    → SQLite メモリストア + FTS5 検索

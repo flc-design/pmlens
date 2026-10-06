@@ -2,6 +2,180 @@
 
 ## [Unreleased]
 
+Decision Lineage v1, first half (ADR-056 / ADR-057 / ADR-058 / ADR-059): ADRs
+get a lifecycle and a provenance record kept beside `decisions.yaml`, so a
+decision an assistant recorded can be read, questioned, adopted or reverted
+later. A new ADR is recorded as proposed unless the caller passes
+`status=accepted`. pmlens cannot verify who accepted an ADR, so recording one
+as accepted, like every lifecycle change, returns a warning to pass on to the
+user.
+
+MCP tool count: 48 names for 46 operations in full mode (the two content tool
+aliases); Lens 17, or 19 with Desktop outbox writes. Test suite: 2,493 passing.
+
+**Upgrade notes.**
+
+- `pm_add_decision` now records `status=proposed` unless you pass
+  `status=accepted`. Adopt a proposed ADR with `pm_update_decision` once the
+  user has accepted its text. The rule section (template v15) is unchanged and
+  still says to save an ADR with `pm_add_decision` once the user agrees to
+  record it, so ADRs recorded that way stay proposed until they are adopted;
+  `pm_decision_query` with `lifecycle="proposed"` lists them.
+- Existing ADRs get no lineage file on upgrade and nothing is migrated on
+  read: they are shown with a lifecycle derived from their status
+  (`derived: true`) until `pm_update_decision` first changes them.
+- Upgrade every host that uses the same `.pm/` together — Claude Code, Codex,
+  Cursor, Grok, the Claude Code plugin's pinned version and the Desktop
+  extension (`.mcpb`). An older pmlens still reads and writes `decisions.yaml`
+  (the status values are unchanged and it never touches the new
+  `.pm/decision_lineage/` files), but it records new ADRs as accepted and
+  numbers them outside the lock.
+- Start new workflows only after every host is upgraded. A workflow copies its
+  step texts when it starts, so workflows already running, and custom
+  templates in `.pm/workflow_templates/`, keep the old guidance; and an older
+  host cannot follow the new "record as proposed, adopt at the gate" steps.
+- Drafts redacted before this release (the redaction report that
+  `pm_drafts_pending` shows says `catalog_version` 1 or 2) and memories that
+  `pm_memory_ingest` indexed before it can still hold a private key's body
+  after its BEGIN line (see Security). A redacted draft is never redacted
+  again: reject such a draft with `pm_reject_draft` and stage it again
+  (`pm_draft_content`, then `pm_redact_draft`), and check any you have already
+  posted. Run `pm_memory_ingest` again with `dry_run=false` for the same
+  projects: a note whose redacted text changes is indexed again with the new
+  catalog.
+- Codex users who installed pmlens with `pip install -e` into a pyenv Python:
+  re-run `pmlens install --target codex` from the pipx release so Codex runs
+  the release, not your checkout (see the installer fix below).
+
+### Added
+
+- **Decision lineage (PMSERV-221 / ADR-056)**: one file per ADR in
+  `.pm/decision_lineage/ADR-NNN.yaml` holds its lifecycle (proposed, adopted,
+  deprecated, superseded, rejected, reverted), declared provenance (origin,
+  recorded timing, decision kind — stored as declared, never verified), links
+  (supersedes, superseded_by, amends) and an append-only event log. The
+  lineage is authoritative; `decisions.yaml` keeps the four status values as a
+  projection that older readers understand. Reads are bounded (256 KiB,
+  regular files only, 64 levels of nesting) and never write; an anchor (the
+  ADR's date, when `decisions.yaml` records one, and a hash of its title)
+  stops a lineage from attaching to a different ADR that reused its number.
+  Writes refuse a lineage that would pass the size cap
+  (`decision_lineage_too_large`), and notes and evaluations stop 16 KiB short
+  of it, leaving room for lifecycle and link changes.
+- **`pm_decision_query` (PMSERV-223 / PMSERV-253)**, read-only and available
+  under Lens: list ADRs with their lifecycle and declared origin
+  (`lifecycle=proposed` is the "waiting for review" list), `limit` (default
+  50) at a time from `offset` with `has_more` / `next_offset`; or get one ADR
+  with its provenance, links in both directions and recent events. Long titles
+  are cut in the list and a page stops before 32,000 characters
+  (`decision_list_truncated`); an ADR without a date in `decisions.yaml` shows
+  `date: null` (`decision_date_not_recorded`). Unknown keys are returned by
+  name only and every string is scanned whole for secrets on the way out.
+- **`pm_update_decision` (PMSERV-224 / ADR-059)**: change an ADR's lifecycle
+  along an explicit transition table, add or remove links (at most 50 ids per
+  type in one call), append an evaluation or a note, and fill a still-unknown
+  `origin` (only `ai_auto`) or `recorded_timing`. It never rewrites the ADR's
+  text and has no argument whose name marks accuracy, a classification change
+  or a human confirmation. That is a check on argument names: an assistant
+  that passes `lifecycle="adopted"` without the user's say-so is not
+  detected. Every lifecycle change therefore returns
+  `decision_lifecycle_changed`, to pass on to the user.
+- **Draft guard (PMSERV-225)**: `pm_draft_content` / `pm_draft_x`,
+  `pm_drafts_pending` / `pm_x_drafts_pending` and `pm_redact_draft` warn
+  (`draft_source_decision_not_adopted` and related codes) when a draft cites an
+  ADR that is not adopted, or one whose lineage says adopted while
+  `decisions.yaml` says otherwise. Rejected drafts are not checked; for posted
+  drafts the warning points at the published post instead of
+  `pm_reject_draft`. Nothing is refused.
+- `pm_status` reports `decision_status_unknown` and `decisions_yaml_unreadable`
+  (PMSERV-218 / PMSERV-258), without echoing file contents.
+
+### Changed
+
+- **`pm_add_decision` (PMSERV-222 / ADR-059)** defaults to `status=proposed`,
+  accepts `status`, `origin`, `recorded_timing` and `decision_kind`, records a
+  server timestamp, and creates the ADR's lineage file. Recording with
+  `status=accepted` returns the info warning `decision_created_accepted`:
+  whether the user accepted the content is not verified, and neither is a
+  declared `origin` such as `human`. The title is stored as a reload of
+  `decisions.yaml` gives it back (U+0085, for example, becomes a space).
+  Existing return keys are unchanged.
+- **Workflow templates (PMSERV-226)**: the development `decision` step, the
+  discovery `confirm` step and the brainstorming `record` step record the ADR
+  as proposed. Before asking for approval, the gate shows the user the ADR's
+  own text with `pm_decision_query` (recording a new ADR when the design has
+  changed since), and adopts it with `pm_update_decision` once the user
+  accepts that text.
+- **`prompt_pack` compares its reserved `.pm` file names case-insensitively**:
+  `TASKS.yaml` is refused like `tasks.yaml` (on the default macOS and Windows
+  file systems they are the same file).
+- **IDs are allocated inside the ledger lock (PMSERV-219)** for ADRs, tasks,
+  knowledge records and workflows, and every append refuses a duplicate id.
+  Two concurrent writers (threads in one server, or two hosts) could
+  previously save two records with the same id.
+- **Ledger rewrites keep keys they do not know (PMSERV-218)**:
+  `decisions.yaml` and `knowledge.yaml` keep unknown record, nested and
+  top-level keys, written back as loaded (a YAML alias is not expanded; binary,
+  dates and NaN keep their type). An ADR status outside the four values is kept
+  instead of failing the whole file; a new ADR must still use one of them.
+- Locks are taken in a checked order (`decisions` before
+  `decision_lineage-*`); taking them the other way round fails at once instead
+  of deadlocking.
+
+### Security
+
+- **Private keys are redacted whole (secret redaction catalog v3)**, in
+  `pm_redact_draft`, `pm_memory_ingest` and the decision lineage: a private
+  key (PEM, OpenSSH or PGP) is removed as a whole block — BEGIN line, armor
+  headers, body and END line — when key material follows its BEGIN line.
+  Catalogs v1 and v2 removed only the BEGIN line and left the key body in the
+  redacted text. A BEGIN line named in prose is still removed alone. Redaction
+  reports carry `catalog_version: 3`. Drafts and memories redacted before this
+  release need a look: see the upgrade notes.
+- **Ledgers no longer echo their contents in parse errors**: a YAML syntax
+  error in any `.pm` ledger (tasks, decisions, knowledge, …) is reported as
+  the error type and its line and column, not the offending text, which could
+  quote a secret — including through Lens read tools such as `pm_tasks` and
+  `pm_dashboard`.
+- **Ledgers that YAML aliases inflate are refused**: a ledger whose aliases
+  (`*name`) would expand it past four times its size (at least 4 MiB) is not
+  read. A few hundred bytes of nested aliases used to grow into tens of
+  megabytes on the next rewrite (strings are never re-emitted as anchors) and
+  into oversized tool responses. Ledgers pmlens writes contain no aliases; all
+  792 ledger files of the maintainer's registered projects load unchanged.
+
+### Fixed
+
+- **The installer registered the wrong executable (PMSERV-254)**: it followed
+  the interpreter's symlink out of a pipx/venv environment and registered the
+  `pm-server` next to the base Python — for a pyenv base with an editable
+  checkout, the development code. It now registers the venv's own `pmlens`.
+- **Redaction ran in quadratic time on long runs without spaces**: the email,
+  JWT and GCP service-account patterns retried every character of such a run;
+  every pattern now takes time linear in the text.
+- `pm_add_decision` reports an unreadable `decisions.yaml` by exception type
+  and position only; it used to return the exception text, which can quote a
+  secret from the broken line.
+- `prompt_pack` refuses an output path inside a project's
+  `.pm/decision_lineage/` (checked as written and resolved, and again against
+  the project before writing); a `decision_lineage` directory outside `.pm/`
+  is not affected.
+
+### Tests
+
+- Lens guards: the static reachability check also covers `os` / `pty` /
+  `asyncio` process starts, the ledger-write helpers, the outbox writers and
+  every tool; the mutator set is derived from source; the T6 sweep runs the
+  read tools with argument sets over real stores and asserts it reached the
+  seeded data; subprocess tests import the tree under test
+  (PMSERV-216 / PMSERV-217).
+- Documentation checks: the model and enum counts in README and the design
+  document, the cheatsheets' enum reference and ADR example, the ADR guarantee
+  wording, the `.pm/` layout trees, and the S1 specification's code table and
+  `pm_update_decision` return example (compared with a real call) follow the
+  source; the release that ships a redaction catalog says what to do with
+  drafts and memories redacted by the older one.
+
 ## [0.16.0] - 2026-10-01
 
 Rewrites the PM Lens rule section for current models (template v15) and makes

@@ -11,8 +11,9 @@ steps:
   - id: decision
     name: Architecture Decision
     description: >
-      Record the design decision as an ADR. Define context, decision rationale,
-      and consequences (positive/negative/mitigations).
+      Record the design decision as an ADR with pm_add_decision, status=proposed
+      (context, decision rationale, consequences). It stays proposed until the user
+      approves the design at the check step. Add its ADR id as this step's artifact.
     tool_hint: pm_add_decision
     required_artifacts:
       - ADR
@@ -72,9 +73,21 @@ steps:
       Review the spec and plan for completeness, consistency, and feasibility.
       Check for missing edge cases, security concerns, and performance implications.
       Get a second opinion from a review sub-agent.
+      Before asking for approval, show the user the ADR's own text with
+      pm_decision_query (action=get; its id is in the decision step's artifacts,
+      which pm_workflow_status lists): approving the spec and plan is not
+      approving the ADR, and adopting it means the user accepted what the ADR says.
+      If the spec or plan changed the design, the ADR no longer says it: record a
+      new ADR (status=proposed) for the design as it now stands and show that one;
+      once it is adopted, mark the old ADR superseded by it with pm_update_decision.
+      When the user approves the ADR's content at this gate, set it to adopted with
+      pm_update_decision, giving the approval as the reason.
+      If the user turns the design down, leave the ADR proposed, or mark it rejected
+      when the user says so.
     agent_hint: Use a review sub-agent for independent verification.
     gate: user_approval
     consumes:
+      - ADR
       - spec
       - plan
     produces:

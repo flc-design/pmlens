@@ -4,9 +4,12 @@ These tests spawn real OS-level subprocesses to validate that file locking
 prevents lost updates and that atomic writes prevent partial-write corruption
 under SIGKILL.
 
-Why subprocess and not threading: filelock advisory locks are reentrant within
-the same Python process, so threading wouldn't exercise the lock semantics we
-care about — only multi-process contention does.
+Why subprocess: these tests target the cross-process case (Claude Code, Codex
+and the CLI writing the same .pm/). Threads are not exempt, though — one
+``FileLock`` instance is reentrant, but two separate instances on the same path
+exclude each other across threads too, and the MCP server runs sync tools in a
+threadpool. So id allocation must happen inside the lock even within a single
+server process (PMSERV-219).
 """
 
 from __future__ import annotations
@@ -44,6 +47,42 @@ def _worker_add_tasks(pm_path_str: str, prefix: str, count: int) -> None:
             pm_path,
             Task(id=f"{prefix}-{i:03d}", title=f"task {prefix}-{i}", phase="phase-1"),
         )
+
+
+def _worker_number_records(pm_path_str: str, ledger: str, count: int) -> None:
+    """Append ``count`` records to ``ledger`` through the in-lock numbering API.
+
+    Every record lets storage pick its id (PMSERV-219), so two of these running
+    at once is exactly the duplicate-id race the API exists to close.
+    """
+    from pmlens.models import Decision, KnowledgeCategory, KnowledgeRecord, Workflow
+
+    pm_path = Path(pm_path_str)
+    for i in range(count):
+        if ledger == "tasks":
+            storage.add_task_with_next_id(
+                pm_path, lambda n, i=i: Task(id=f"T-{n:03d}", title=f"t{i}", phase="phase-1")
+            )
+        elif ledger == "decisions":
+            storage.add_decision_with_next_id(
+                pm_path, lambda n, i=i: Decision(id=f"ADR-{n:03d}", title=f"d{i}")
+            )
+        elif ledger == "knowledge":
+            storage.add_knowledge_with_next_id(
+                pm_path,
+                lambda n, i=i: KnowledgeRecord(
+                    id=f"KR-{n:03d}", category=KnowledgeCategory.SPEC, title=f"k{i}"
+                ),
+            )
+        elif ledger == "workflows":
+            storage.add_workflow_with_next_id(
+                pm_path,
+                lambda n, i=i: Workflow(
+                    id=f"WF-{n:03d}", name="n", feature=f"f{i}", template="development"
+                ),
+            )
+        else:  # pragma: no cover - guards a typo in the parametrisation
+            raise ValueError(ledger)
 
 
 def _worker_holds_lock_then_writes(pm_path_str: str, hold_seconds: float, ready_path: str) -> None:
@@ -95,6 +134,39 @@ class TestConcurrentMutations:
         # Without locking, ~50% of writes would be lost. With locking, all 100 survive.
         assert len(tasks) == 100, f"expected 100 tasks, got {len(tasks)}"
         assert ids == {f"A-{i:03d}" for i in range(50)} | {f"B-{i:03d}" for i in range(50)}
+
+    @pytest.mark.parametrize(
+        ("ledger", "loader"),
+        [
+            ("tasks", storage.load_tasks),
+            ("decisions", storage.load_decisions),
+            ("knowledge", storage.load_knowledge),
+            ("workflows", storage.load_workflows),
+        ],
+    )
+    def test_concurrent_numbering_never_duplicates_ids(
+        self, cm_pm_path, monkeypatch, ledger, loader
+    ):
+        """PMSERV-219: two processes allocating ids at once get distinct ids.
+
+        Numbering outside the lock let both read the same max id and save two
+        records with one id (reproduced on a copy of the real decisions.yaml).
+        """
+        monkeypatch.setenv("PM_LOCK_TIMEOUT_S", "30")
+        ctx = mp.get_context("spawn")
+        procs = [
+            ctx.Process(target=_worker_number_records, args=(str(cm_pm_path), ledger, 25))
+            for _ in range(2)
+        ]
+        for p in procs:
+            p.start()
+        for p in procs:
+            p.join(timeout=60)
+
+        assert [p.exitcode for p in procs] == [0, 0]
+        ids = [r.id for r in loader(cm_pm_path)]
+        assert len(ids) == 50
+        assert len(set(ids)) == 50, f"duplicate ids: {sorted(i for i in ids if ids.count(i) > 1)}"
 
     def test_lock_blocks_concurrent_writer(self, cm_pm_path):
         """Second process should fail with PmServerError when first holds lock."""

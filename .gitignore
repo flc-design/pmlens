@@ -16,6 +16,19 @@ env/
 .env
 .env.local
 
+# Keys and credentials — never part of the source tree. A safety net only:
+# git still tracks a matching file that was added before (check with
+# `git ls-files`), and a key under another name is not caught.
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_ecdsa*
+id_ed25519*
+credentials.json
+serviceAccountKey.json
+
 # IDE
 .vscode/
 .idea/

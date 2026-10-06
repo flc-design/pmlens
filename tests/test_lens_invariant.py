@@ -348,10 +348,205 @@ def _seed_lens_invariant_fixture(tmp_path: Path) -> tuple[Path, Path]:
     return fake_home, project_root
 
 
+def _seed_full_stores(fake_home: Path, project_root: Path) -> None:
+    """Give the T6 sweep real data to read (PMSERV-217 review follow-up).
+
+    The minimal ``memories``-only schema made every argument-bearing
+    pm_recall / pm_memory_search call die on its first FTS or summaries query,
+    so the branches the argument sets claim to cover were never reached. Here
+    the stores are built by the production ``MemoryStore`` (full schema, FTS
+    triggers, session summaries), then checkpointed so an ``immutable=1``
+    Lens reader sees the rows; a session on branch ``main``, an auto-memory
+    note, one KR and one workflow give the remaining argument sets something
+    to find.
+    """
+    from pmlens.auto_memory import encode_project_dirname
+    from pmlens.memory import MemoryStore
+    from pmlens.models import (
+        KnowledgeCategory,
+        KnowledgeRecord,
+        Memory,
+        SessionSummary,
+        Workflow,
+    )
+    from pmlens.storage import add_knowledge, add_workflow
+
+    pm_dir = project_root / ".pm"
+    global_db = fake_home / ".pm" / "memory.db"
+    for path in (pm_dir / "memory.db", global_db):
+        for suffix in ("", "-wal", "-shm"):
+            Path(f"{path}{suffix}").unlink(missing_ok=True)
+
+    store = MemoryStore(pm_dir / "memory.db", global_db_path=global_db)
+    store.save(
+        Memory(
+            session_id="sess-t6",
+            type="insight",
+            content="lens seed insight about decision lineage",
+            decision_id="ADR-001",
+            project="t6project",
+        )
+    )
+    store.save_session_summary(
+        SessionSummary(session_id="sess-t6", summary="t6 summary", branch="main")
+    )
+    store.close()
+    for path in (pm_dir / "memory.db", global_db):
+        conn = sqlite3.connect(str(path))
+        try:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        finally:
+            conn.close()
+
+    note_dir = fake_home / ".claude" / "projects" / encode_project_dirname(project_root) / "memory"
+    note_dir.mkdir(parents=True)
+    (note_dir / "lens_note.md").write_text(
+        "---\nname: lens-note\ndescription: lens seed note\n---\n\nlens seed note body\n",
+        encoding="utf-8",
+    )
+    add_knowledge(pm_dir, KnowledgeRecord(id="KR-001", category=KnowledgeCategory.SPEC, title="k"))
+    add_workflow(pm_dir, Workflow(id="WF-001", name="n", feature="f", template="development"))
+    _seed_decisions(pm_dir)
+
+
+# A credential-shaped value seeded into decisions.yaml (ADR-005). Built from
+# pieces so the literal never sits in the source as one token.
+_T6_SECRET = "AKIA" + "T" * 16
+
+
+def _seed_decisions(pm_dir: Path) -> None:
+    """Five ADRs for pm_decision_query (Decision Lineage S1, design §8.2).
+
+    ADR-001 accepted without a lineage; ADR-002 proposed by the assistant with
+    a lineage; ADR-003 whose lineage says adopted while decisions.yaml says
+    proposed; ADR-004 with a lineage that is not valid YAML; ADR-005 with
+    unknown keys holding a secret-like string and a ``!!binary`` value, and a
+    lineage event carrying ``caused_by: !!binary``. No FIFO, symlink or
+    oversized file: a reader that blocks would time the sweep out instead of
+    failing it (those live in tests/test_decision_query.py).
+    """
+    import datetime as dt
+
+    from pmlens.lineage import dump_lineage, new_lineage_doc
+    from pmlens.models import Decision, DecisionStatus
+
+    titles = {
+        "ADR-001": "accepted without lineage",
+        "ADR-002": "proposed by the assistant",
+        "ADR-003": "status edited by hand",
+        "ADR-004": "broken lineage",
+        "ADR-005": "unknown keys",
+    }
+    statuses = {"ADR-002": "proposed", "ADR-003": "proposed"}
+    lines = ["# PM Lens - decisions.yaml", "decisions:"]
+    for adr_id, title in titles.items():
+        lines += [
+            f"- id: {adr_id}",
+            f"  title: {title}",
+            "  date: 2026-10-01",
+            f"  status: {statuses.get(adr_id, 'accepted')}",
+            "  context: c",
+            "  decision: d",
+        ]
+    lines += [f"  review_note: token {_T6_SECRET}", "  blob: !!binary aGVsbG8gd29ybGQ="]
+    (pm_dir / "decisions.yaml").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    def adr(adr_id: str, status: DecisionStatus) -> Decision:
+        return Decision(id=adr_id, title=titles[adr_id], date=dt.date(2026, 10, 1), status=status)
+
+    now = "2026-10-05T03:12:00Z"
+    docs = {
+        "ADR-002": new_lineage_doc(
+            adr("ADR-002", DecisionStatus.PROPOSED), {"origin": "ai_auto"}, now
+        ),
+        "ADR-003": new_lineage_doc(adr("ADR-003", DecisionStatus.ACCEPTED), {}, now),
+        "ADR-005": new_lineage_doc(adr("ADR-005", DecisionStatus.ACCEPTED), {}, now),
+    }
+    docs["ADR-005"]["events"].append(
+        {
+            "at": now,
+            "kind": "note",
+            "text": "n",
+            "caused_by": b"\x00\x01",
+            "via": "pm_update_decision",
+        }
+    )
+    lineage_dir = pm_dir / "decision_lineage"
+    lineage_dir.mkdir()
+    for adr_id, doc in docs.items():
+        (lineage_dir / f"{adr_id}.yaml").write_text(dump_lineage(doc, adr_id), encoding="utf-8")
+    (lineage_dir / "ADR-004.yaml").write_text("lifecycle: [unclosed\n", encoding="utf-8")
+
+
+# PMSERV-217: a zero-arg call never exercised a tool with a required argument
+# (pm_memory_search raised TypeError before doing anything), and only ever hit
+# each tool's default branch. Every registered read tool is ALSO called with
+# these argument sets, which reach the query / cross-project / track / outbox /
+# auto-memory branches. A read tool with a required parameter and no entry
+# here is reported as uncovered and fails the sweep, so the hole cannot reopen
+# when a new read tool is added. Outbox WRITERS are excluded on purpose: they
+# legitimately write desktop.db and have dedicated tests.
+_T6_ARG_SETS: dict[str, list[dict]] = {
+    "pm_memory_search": [{"query": "lens"}, {"query": "lens", "cross_project": True}],
+    "pm_recall": [
+        {"query": "lens"},
+        {"track": "main"},
+        {"query": "lens", "cross_project": True},
+        {"include_outbox": True},
+        {"include_auto_memory": True},
+        # The query path has its own overlay branches (server.pm_recall).
+        {"query": "lens", "include_outbox": True},
+        {"query": "lens", "include_auto_memory": True},
+    ],
+    "pm_knowledge_query": [
+        {"action": "list"},
+        {"action": "summary"},
+        {"action": "get", "record_id": "KR-001"},
+    ],
+    "pm_dashboard": [{"format": "text"}],
+    "pm_tasks": [{"status": "todo"}],
+    "pm_workflow_status": [{"workflow_id": "WF-001"}],
+    "pm_outbox_pending": [{"filter_status": "all"}],
+    # Decision Lineage S1 (design §8.2): every branch of the read, including
+    # the derived, mismatched, unreadable, unknown-key, not-found and
+    # missing-id cases seeded by _seed_decisions.
+    "pm_decision_query": [
+        {"action": "list"},
+        {"action": "list", "lifecycle": "proposed"},
+        # The paging branch (limit / offset, has_more).
+        {"action": "list", "limit": 2, "offset": 1},
+        {"action": "get", "decision_id": "ADR-001"},
+        {"action": "get", "decision_id": "ADR-002"},
+        {"action": "get", "decision_id": "ADR-003"},
+        {"action": "get", "decision_id": "ADR-004"},
+        {"action": "get", "decision_id": "ADR-005"},
+        {"action": "get", "decision_id": "ADR-999"},
+        {"action": "get"},
+    ],
+}
+
+# What the seeded stores must yield through each branch (see _seed_full_stores).
+# The subprocess computes the same keys in _T6_SWEEP_SCRIPT; change both together.
+_EXPECTED_REACH = {
+    "recall_query_hits": 1,
+    "recall_track_matched": True,
+    "recall_auto_memory_entries": 1,
+    "search_cross_project_hits": 1,
+    "decision_list_total": 5,
+    "decision_proposed_ids": ["ADR-002"],
+    "decision_get_derived": True,
+    "decision_mismatch_warned": True,
+    "decision_unreadable_noted": True,
+    "decision_unknown_keys_only_names": True,
+    "decision_page": [["ADR-002", "ADR-003"], True, 3],
+}
+
 # Runs inside the subprocess: import pmlens.server fresh (so PM_LENS /
 # PM_DESKTOP_WRITE gating in server._tool() is evaluated under this env),
-# then call every registered tool with zero args, tolerating any exception.
+# then call every registered tool with zero args and every read tool with the
+# argument sets above, tolerating any exception.
 _T6_SWEEP_SCRIPT = textwrap.dedent("""
+    import inspect
     import json
     import sys
 
@@ -364,6 +559,7 @@ _T6_SWEEP_SCRIPT = textwrap.dedent("""
         f"match expected {expect_desktop_write!r}"
     )
 
+    arg_sets = json.loads(sys.argv[2])
     tool_names = sorted(srv.REGISTERED_TOOLS)
     errors = {}
     for name in tool_names:
@@ -376,7 +572,80 @@ _T6_SWEEP_SCRIPT = textwrap.dedent("""
             # per-tool return value or error type.
             errors[name] = f"{type(e).__name__}: {e}"
 
-    print(json.dumps({"tool_names": tool_names, "errors": errors}))
+    called_with_args = []
+    arg_errors = {}
+    for name in tool_names:
+        if name in srv.OUTBOX_WRITE_ALLOWLIST:
+            continue
+        for kwargs in arg_sets.get(name, []):
+            try:
+                getattr(srv, name)(**kwargs)
+            except Exception as e:  # noqa: BLE001 - reported, then asserted empty
+                arg_errors[f"{name}({sorted(kwargs)})"] = f"{type(e).__name__}: {e}"
+            else:
+                called_with_args.append(name)
+
+    # Proof of reach: the seeded data must come back through each branch,
+    # otherwise "no exception" could still mean an early return.
+    reach = {}
+    try:
+        if "pm_recall" in tool_names:
+            reach["recall_query_hits"] = len(srv.pm_recall(query="lens").get("results") or [])
+            reach["recall_track_matched"] = srv.pm_recall(track="main").get("track_matched")
+            am = srv.pm_recall(include_auto_memory=True).get("auto_memory_entries") or []
+            reach["recall_auto_memory_entries"] = len(am)
+        if "pm_memory_search" in tool_names:
+            hits = srv.pm_memory_search(query="lens", cross_project=True).get("results") or []
+            reach["search_cross_project_hits"] = len(hits)
+        if "pm_decision_query" in tool_names:
+            query = srv.pm_decision_query
+            reach["decision_list_total"] = query().get("total")
+            proposed = query(lifecycle="proposed").get("decisions") or []
+            reach["decision_proposed_ids"] = [row["id"] for row in proposed]
+            page = query(limit=2, offset=1)
+            reach["decision_page"] = [
+                [row["id"] for row in page.get("decisions") or []],
+                page.get("has_more"),
+                page.get("next_offset"),
+            ]
+            derived = query(action="get", decision_id="ADR-001")
+            reach["decision_get_derived"] = derived["lineage"]["derived"]
+            mismatch = query(action="get", decision_id="ADR-003")
+            reach["decision_mismatch_warned"] = "decision_status_mismatch" in [
+                w["code"] for w in mismatch.get("warnings", [])
+            ]
+            broken = query(action="get", decision_id="ADR-004")
+            reach["decision_unreadable_noted"] = "decision_lineage_unreadable" in [
+                n["code"] for n in broken["lineage"]["notes"]
+            ]
+            unknown = query(action="get", decision_id="ADR-005")
+            dumped = json.dumps(unknown)  # raises if a bytes value leaked
+            secret = "AKIA" + "T" * 16
+            reach["decision_unknown_keys_only_names"] = (
+                secret not in dumped
+                and "aGVsbG8" not in dumped
+                and unknown["decision"]["unknown_keys"] == ["review_note", "blob"]
+                and unknown["lineage"]["events"][-1].get("unknown_fields") == ["caused_by"]
+            )
+    except Exception as e:  # noqa: BLE001 - reported and asserted by the test
+        reach["error"] = f"{type(e).__name__}: {e}"
+
+    uncovered = []
+    for name in tool_names:
+        if name in srv.OUTBOX_WRITE_ALLOWLIST or name in arg_sets:
+            continue
+        params = inspect.signature(getattr(srv, name)).parameters.values()
+        if any(p.default is inspect.Parameter.empty for p in params):
+            uncovered.append(name)
+
+    print(json.dumps({
+        "tool_names": tool_names,
+        "errors": errors,
+        "called_with_args": sorted(set(called_with_args)),
+        "arg_errors": arg_errors,
+        "reach": reach,
+        "uncovered_required": uncovered,
+    }))
 """)
 
 
@@ -389,7 +658,13 @@ def _run_t6_sweep(fake_home: Path, project_root: Path, *, desktop_write: bool) -
     env.pop("VIRTUAL_ENV", None)
 
     proc = subprocess.run(
-        [sys.executable, "-c", _T6_SWEEP_SCRIPT, "1" if desktop_write else "0"],
+        [
+            sys.executable,
+            "-c",
+            _T6_SWEEP_SCRIPT,
+            "1" if desktop_write else "0",
+            json.dumps(_T6_ARG_SETS),
+        ],
         env=env,
         capture_output=True,
         text=True,
@@ -411,6 +686,7 @@ def test_lens_pure_viewer_zero_fs_writes(tmp_path: Path) -> None:
     there should be no writable surface reachable at all.
     """
     fake_home, project_root = _seed_lens_invariant_fixture(tmp_path)
+    _seed_full_stores(fake_home, project_root)
     project_pm = project_root / ".pm"
     desktop_db = fake_home / ".pm" / "desktop" / "desktop.db"
     claude_settings = fake_home / ".claude" / "settings.json"
@@ -433,6 +709,14 @@ def test_lens_pure_viewer_zero_fs_writes(tmp_path: Path) -> None:
     # Pure viewer: the outbox WRITE tools must not even be registered.
     assert "pm_outbox_remember" not in result["tool_names"]
     assert "pm_outbox_log" not in result["tool_names"]
+    # PMSERV-217: every read tool with a required parameter has argument sets,
+    # and the argument-bearing calls actually ran.
+    assert result["uncovered_required"] == [], result["uncovered_required"]
+    # Every argument-bearing call must complete: an exception means the branch
+    # it was meant to exercise was never reached (the hole this closes).
+    assert result["arg_errors"] == {}, result["arg_errors"]
+    assert set(_T6_ARG_SETS) <= set(result["called_with_args"]), result["called_with_args"]
+    assert result["reach"] == _EXPECTED_REACH, result["reach"]
 
     diff = {
         "home_added": [e for e in after["home"] if e not in before["home"]],
@@ -467,6 +751,7 @@ def test_lens_desktop_outbox_host_zero_fs_writes(tmp_path: Path) -> None:
     the writable surface for THIS call shape either.
     """
     fake_home, project_root = _seed_lens_invariant_fixture(tmp_path)
+    _seed_full_stores(fake_home, project_root)
     project_pm = project_root / ".pm"
     desktop_db = fake_home / ".pm" / "desktop" / "desktop.db"
     claude_settings = fake_home / ".claude" / "settings.json"
@@ -490,6 +775,10 @@ def test_lens_desktop_outbox_host_zero_fs_writes(tmp_path: Path) -> None:
     # false negative from the writers silently no-op'ing on empty input.
     assert "pm_outbox_remember" in result["errors"], result["errors"]
     assert "pm_outbox_log" in result["errors"], result["errors"]
+    assert result["uncovered_required"] == [], result["uncovered_required"]
+    assert result["arg_errors"] == {}, result["arg_errors"]
+    assert set(_T6_ARG_SETS) <= set(result["called_with_args"]), result["called_with_args"]
+    assert result["reach"] == _EXPECTED_REACH, result["reach"]
 
     diff = {
         "home_added": [e for e in after["home"] if e not in before["home"]],
