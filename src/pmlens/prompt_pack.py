@@ -45,7 +45,7 @@ from . import safe_yaml
 from .memory import MemoryStore, _has_pm_server_schema
 from .models import Decision, Memory, MemoryType, Project, SuggestedModel, Task, TaskStatus
 from .storage import load_decisions, load_project, load_tasks
-from .utils import FileRefusedError, read_file_in_dir, replace_file_in_dir, write_file_in_dir
+from .utils import FileRefusedError, read_file_in_dir, write_file_below, write_file_in_dir
 
 # Built-in template dir (shared with dashboard). The two-layer override adds the
 # project's ``.pm/prompt-templates/`` in front of this at render time.
@@ -770,8 +770,9 @@ def run_prompt_pack(
         )
         ext = "md"
 
+    # Expanded once, so the checks below and the write see the same path.
     dest = (
-        Path(out_path)
+        Path(out_path).expanduser()
         if out_path
         else pm_path / "exports" / f"prompt-pack-{_prompt_pack_slug(filter_label)}.{ext}"
     )
@@ -805,7 +806,7 @@ def run_prompt_pack(
             if not in_pm:
                 raise IsADirectoryError(errno.EISDIR, os.strerror(errno.EISDIR))
             if out_path:
-                replace_file_in_dir(pm_path, in_pm, content.encode("utf-8"))
+                write_file_below(pm_path, in_pm, content.encode("utf-8"), refuse_link=True)
             else:
                 write_file_in_dir(pm_path, "exports", dest.name, content.encode("utf-8"))
         except FileRefusedError as exc:

@@ -1097,3 +1097,53 @@ class TestPromptPackOutPathInPm:
             result = srv.pm_prompt_pack(project_path=str(pm.parent), out_path=str(dest))
             assert result["status"] == "ok", result
             assert "T-001" in dest.read_text(encoding="utf-8")
+
+    def test_a_tilde_out_path_is_expanded_before_it_is_checked_and_written(
+        self, tmp_path, monkeypatch
+    ):
+        pm = self._project_with_task(tmp_path)
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        victim = _outside(tmp_path) / "victim.txt"
+        victim.write_text("ORIGINAL", encoding="utf-8")
+        (pm / "exports").mkdir()
+        (pm / "exports" / "x.md").symlink_to(victim)
+        (pm.parent / "~").symlink_to(pm, target_is_directory=True)  # shipped by the repo
+        monkeypatch.chdir(pm.parent)
+
+        result = srv.pm_prompt_pack(project_path=str(pm.parent), out_path="~/exports/x.md")
+
+        assert result["status"] == "ok", result
+        assert result["out_path"] == str(home / "exports" / "x.md")
+        assert "T-001" in (home / "exports" / "x.md").read_text(encoding="utf-8")
+        assert victim.read_text(encoding="utf-8") == "ORIGINAL"
+
+    def test_an_out_path_in_pm_rewrites_an_export_in_place(self, tmp_path):
+        pm = self._project_with_task(tmp_path)
+        dest = pm / "exports" / "mine.md"
+        dest.parent.mkdir()
+        dest.write_text("old", encoding="utf-8")
+        dest.chmod(0o640)
+        before = dest.stat().st_ino
+
+        result = srv.pm_prompt_pack(project_path=str(pm.parent), out_path=str(dest))
+
+        assert result["status"] == "ok", result
+        assert dest.stat().st_ino == before
+        assert stat.S_IMODE(dest.stat().st_mode) == 0o640
+        assert "T-001" in dest.read_text(encoding="utf-8")
+
+    def test_an_out_path_in_pm_does_not_replace_a_read_only_export(self, tmp_path):
+        pm = self._project_with_task(tmp_path)
+        dest = pm / "exports" / "mine.md"
+        dest.parent.mkdir()
+        dest.write_text("keep", encoding="utf-8")
+        dest.chmod(0o444)
+        try:
+            result = srv.pm_prompt_pack(project_path=str(pm.parent), out_path=str(dest))
+        finally:
+            dest.chmod(0o644)
+
+        assert result["status"] == "error"
+        assert dest.read_text(encoding="utf-8") == "keep"

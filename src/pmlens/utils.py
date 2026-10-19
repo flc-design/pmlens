@@ -390,48 +390,54 @@ def write_file_in_dir(parent: Path, dirname: str, filename: str, data: bytes) ->
 
     For pmlens's own output inside a project (``.pm/exports``): a repository
     can ship that directory or the file as a symlink, and writing through it
-    would overwrite any file the user can write (PMSERV-270 review). The
-    directory is created if missing (umask applied) and refused if it is a
-    link. An existing regular file is rewritten in place, as
-    ``open(path, "w")`` does, so it keeps its permissions, owner, group, ACL
-    and extended attributes, and a file the user may not write is refused.
-    Anything else at the name (nothing, a symlink, a FIFO) is replaced by a
-    new file renamed over it, so a link is replaced, never written through.
-    ``parent`` itself is trusted.
+    would overwrite any file the user can write (PMSERV-270 review). See
+    :func:`write_file_below`; a link at the file is replaced.
+    """
+    write_file_below(parent, (dirname, filename), data)
+
+
+def write_file_below(
+    root: Path, parts: Sequence[str], data: bytes, *, refuse_link: bool = False
+) -> None:
+    """Write ``root/parts...`` the way ``open(path, "w")`` does, following no link below root.
+
+    Each directory on the way is created if missing (umask applied) and
+    refused if it is a link. An existing regular file is rewritten in place,
+    so it keeps its permissions, owner, group, ACL and extended attributes,
+    and a file the user may not write is refused. Anything else at the name
+    (nothing, a FIFO, or a symlink unless ``refuse_link``) is replaced by a
+    new file renamed over it, so a link is never written through. ``root``
+    itself is trusted.
 
     Raises:
-        FileRefusedError: ``dirname`` is a symlink or not a directory, a name is
-            not plain, or the file was swapped while it was being written.
+        FileRefusedError: A directory on the way is a symlink or not a
+            directory, a name is not plain, the file is a symlink and
+            ``refuse_link`` is set, or the file was swapped while it was
+            being written.
         OSError: The write failed (PermissionError for a read-only file).
     """
-    _plain_parts([dirname, filename])
+    parts = _plain_parts(parts)
+    *dirs, filename = parts
     if _no_dir_fd():
-        directory = parent / dirname
-        if directory.is_symlink():
-            raise FileRefusedError("a symlink or not a directory")
+        directory = root
+        for part in dirs:
+            directory = directory / part
+            if directory.is_symlink():
+                raise FileRefusedError("a symlink or not a directory")
+        if refuse_link and (directory / filename).is_symlink():
+            raise FileRefusedError("a symlink")
         directory.mkdir(parents=True, exist_ok=True)
         _atomic_write_text(directory / filename, data.decode("utf-8"))
         return
-    parent.mkdir(parents=True, exist_ok=True)
-    parent_fd = open_trusted_dir(parent)
-    try:
-        dir_fd = _open_dir_nofollow(dirname, dir_fd=parent_fd)
-        if dir_fd is None:
-            try:
-                os.mkdir(dirname, 0o777, dir_fd=parent_fd)
-            except FileExistsError:
-                pass
-            dir_fd = _open_dir_nofollow(dirname, dir_fd=parent_fd)
-            if dir_fd is None:
-                raise FileRefusedError("the directory could not be created")
-    finally:
-        os.close(parent_fd)
+    dir_fd = open_dir_below(root, dirs)
     cloexec = getattr(os, "O_CLOEXEC", 0)
     try:
         try:
             existing = os.stat(filename, dir_fd=dir_fd, follow_symlinks=False)
         except FileNotFoundError:
             existing = None
+        if refuse_link and existing is not None and stat.S_ISLNK(existing.st_mode):
+            raise FileRefusedError("a symlink")
         if existing is not None and stat.S_ISREG(existing.st_mode):
             # O_NONBLOCK: a FIFO swapped in after the stat fails at once
             # (ENXIO) instead of waiting for a reader; a regular file ignores it.
