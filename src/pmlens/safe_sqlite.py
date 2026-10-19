@@ -18,6 +18,7 @@ import os
 import sqlite3
 import stat
 from pathlib import Path
+from urllib.parse import quote
 
 from .utils import FileRefusedError, _no_dir_fd
 
@@ -40,6 +41,18 @@ def _refuse_unless_regular(info: os.stat_result, what: str) -> None:
         raise FileRefusedError(f"{what} is a symlink")
     if not stat.S_ISREG(info.st_mode):
         raise FileRefusedError(f"{what} is not a regular file")
+
+
+def _file_uri(target: Path) -> str:
+    """A ``file:`` URI with an empty authority for an absolute path.
+
+    ``Path.as_uri`` puts a UNC host (a mapped network drive resolves to
+    ``\\\\server\\share``) in the authority, which SQLite rejects.
+    """
+    path = target.as_posix()
+    if not path.startswith("/"):
+        path = "/" + path  # C:/x -> /C:/x
+    return "file://" + quote(path, safe="/:")
 
 
 def connect_store(
@@ -97,7 +110,7 @@ def connect_store(
         if dir_fd is not None:
             os.close(dir_fd)
     mode = "?mode=ro&immutable=1" if readonly else "?mode=rw"
-    conn = sqlite3.connect(target.as_uri() + mode, uri=True, check_same_thread=False)
+    conn = sqlite3.connect(_file_uri(target) + mode, uri=True, check_same_thread=False)
     try:
         # mode=rw never creates, so a link swapped in for a missing target fails
         # to open; a link to an existing file is caught here, before any write.

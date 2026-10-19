@@ -430,3 +430,190 @@ class TestRuleFiles:
         assert victim.read_text(encoding="utf-8") == "precious"
         assert summary.results[0].backup_path.name == "CLAUDE.md.bak.20261020-120000-1"
         assert summary.results[0].backup_path.read_text(encoding="utf-8") == "# Team rules\n"
+
+
+# ─── review fixes (PMSERV-277 adversarial review) ────
+
+
+class TestReviewFixes:
+    def test_a_case_variant_of_git_is_refused(self, tmp_path):
+        from pmlens.rules import inject_pm_rules
+
+        root = _repo(tmp_path)
+        (root / ".git").mkdir()
+        config = root / ".git" / "config"
+        config.write_text("[core]\n", encoding="utf-8")
+        (root / "CLAUDE.md").symlink_to(".GIT/config")
+
+        summary = inject_pm_rules(root, target="claude-code")
+
+        assert summary.results[0].status == "failed"
+        assert config.read_text(encoding="utf-8") == "[core]\n"
+        assert sorted(p.name for p in (root / ".git").iterdir()) == ["config"]
+
+    def test_a_case_variant_is_refused_by_name_before_git_exists(self, tmp_path):
+        # Without a .git to compare identities with, the name check alone holds.
+        from pmlens.rules import inject_pm_rules
+
+        root = _repo(tmp_path)
+        (root / "CLAUDE.md").symlink_to(".GIT/hooks/pre-commit")
+
+        summary = inject_pm_rules(root, target="claude-code")
+
+        assert summary.results[0].status == "failed"
+        assert not (root / ".GIT").exists()
+
+    def test_a_link_into_a_pm_alias_is_refused(self, tmp_path):
+        from pmlens.rules import ensure_claudemd
+
+        root = _repo(tmp_path)
+        (root / "data").mkdir()
+        (root / "data" / "tasks.yaml").write_text("tasks: []\n", encoding="utf-8")
+        (root / ".pm").symlink_to("data", target_is_directory=True)
+        (root / "CLAUDE.md").symlink_to("data/tasks.yaml")
+
+        assert ensure_claudemd(root).startswith("left CLAUDE.md unchanged")
+        assert (root / "data" / "tasks.yaml").read_text(encoding="utf-8") == "tasks: []\n"
+
+    def test_a_crlf_rule_file_that_is_current_is_left_alone(self, tmp_path):
+        from pmlens.rules import _render_template, inject_pm_rules
+
+        root = _repo(tmp_path)
+        text = "# Team\n\n" + _render_template() + "\n"
+        (root / "AGENTS.md").write_bytes(text.replace("\n", "\r\n").encode("utf-8"))
+        before = (root / "AGENTS.md").read_bytes()
+
+        summary = inject_pm_rules(root, target="codex")
+
+        assert summary.results[0].status == "skipped"
+        assert (root / "AGENTS.md").read_bytes() == before
+        assert not [p for p in root.iterdir() if ".bak." in p.name]
+
+    def test_a_backup_keeps_the_originals_permissions_and_times(self, tmp_path):
+        from pmlens.rules import inject_pm_rules
+
+        root = _repo(tmp_path)
+        claude = root / "CLAUDE.md"
+        claude.write_text("# Private\n", encoding="utf-8")
+        claude.chmod(0o640)
+        os.utime(claude, (1_700_000_000, 1_700_000_000))
+
+        summary = inject_pm_rules(root, target="claude-code")
+
+        backup = summary.results[0].backup_path
+        assert stat.S_IMODE(backup.stat().st_mode) == 0o640
+        assert int(backup.stat().st_mtime) == 1_700_000_000
+        assert stat.S_IMODE(claude.stat().st_mode) == 0o640
+
+    def test_a_directory_without_read_permission_still_takes_writes(self, tmp_path):
+        pm = _project(tmp_path)
+        (pm / "daily").chmod(0o300)
+        entry = DailyLogEntry(time="10:00", category=LogCategory.NOTE, entry="x")
+        try:
+            add_daily_log(pm, entry, dt.date(2026, 10, 20))
+        finally:
+            (pm / "daily").chmod(0o755)
+        assert (pm / "daily" / "2026-10-20.yaml").is_file()
+
+    def test_sqlite_uris_have_an_empty_authority(self):
+        from pathlib import PurePosixPath, PureWindowsPath
+
+        from pmlens.safe_sqlite import _file_uri
+
+        assert _file_uri(PurePosixPath("/tmp/a b/x.db")) == "file:///tmp/a%20b/x.db"
+        assert _file_uri(PureWindowsPath(r"C:\p\x.db")) == "file:///C:/p/x.db"
+        assert (
+            _file_uri(PureWindowsPath(r"\\server\share\p\x.db")) == "file:////server/share/p/x.db"
+        )
+
+    def test_pm_status_reports_a_linked_sidecar(self, tmp_path):
+        from pmlens.draft_store import DraftStore
+
+        pm = _project(tmp_path)
+        DraftStore(pm / "drafts.db").close()
+        for sidecar in ("drafts.db-wal", "drafts.db-shm"):
+            (pm / sidecar).unlink(missing_ok=True)
+        victim = _outside(tmp_path) / "victim"
+        victim.write_text("precious", encoding="utf-8")
+        (pm / "drafts.db-wal").symlink_to(victim)
+
+        status = srv.pm_status(project_path=str(pm.parent))
+
+        codes = {w["code"]: w for w in status["warnings"]}
+        assert "draft_store_refused" in codes
+        assert "drafts.db-wal" in codes["symlinks_in_pm_refused"]["message"]
+        assert status["diagnostics"]["x_drafts_pending"] is None
+        assert victim.read_text(encoding="utf-8") == "precious"
+
+    def test_the_home_registry_keeps_a_linked_locks_directory(self, tmp_path):
+        from pmlens.storage import load_registry, register_project
+
+        registry_dir = tmp_path / "home_pm"
+        registry_dir.mkdir()
+        elsewhere = tmp_path / "tmpfs_locks"
+        elsewhere.mkdir()
+        (registry_dir / ".locks").symlink_to(elsewhere, target_is_directory=True)
+        project = tmp_path / "p"
+        project.mkdir()
+
+        register_project(project, "p", registry_dir)
+
+        assert [e.name for e in load_registry(registry_dir).projects] == ["p"]
+
+    def test_locks_swapped_for_a_link_while_waiting_are_caught(self, tmp_path, monkeypatch):
+        import pmlens.storage as storage
+
+        pm = _project(tmp_path)
+        outside = _outside(tmp_path)
+        add_task(pm, _task(1))  # .locks exists as a real directory
+        real_acquire = storage.FileLock.acquire
+
+        def swap_then_acquire(self, *args, **kwargs):
+            (pm / ".locks").rename(pm / ".locks-moved")
+            (pm / ".locks").symlink_to(outside, target_is_directory=True)
+            return real_acquire(self, *args, **kwargs)
+
+        monkeypatch.setattr(storage.FileLock, "acquire", swap_then_acquire)
+        with pytest.raises(LedgerWriteRefused, match=r"\.pm/\.locks"):
+            add_task(pm, _task(2))
+        assert [t.id for t in load_tasks(pm)] == ["T-001"]
+
+    def test_context_inject_skips_a_linked_memory_db(self, tmp_path):
+        import subprocess
+        import sys
+
+        pm = _project(tmp_path)
+        other = _outside(tmp_path) / "other.db"
+        before = _sqlite_file(other)
+        (pm / "memory.db").symlink_to(other)
+
+        run = subprocess.run(
+            [sys.executable, "-m", "pmlens", "context-inject"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            cwd=pm.parent,
+        )
+
+        assert run.returncode == 0, run.stderr
+        assert "Traceback" not in run.stderr
+        assert other.read_bytes() == before
+
+    def test_rule_files_work_without_dir_fd(self, tmp_path, monkeypatch):
+        # Windows: os.open takes no dir_fd; the lstat fallbacks must still
+        # back up and write, and write bytes as given (no CR CR LF).
+        import pmlens.rules as rules
+        import pmlens.utils as utils
+        from pmlens.rules import inject_pm_rules
+
+        monkeypatch.setattr(utils, "_no_dir_fd", lambda: True)
+        monkeypatch.setattr(rules, "_no_dir_fd", lambda: True)
+        root = _repo(tmp_path)
+        (root / "CLAUDE.md").write_bytes(b"# Team\r\n")
+
+        summary = inject_pm_rules(root, target="claude-code")
+
+        assert summary.results[0].status == "appended"
+        assert summary.results[0].backup_path.read_bytes() == b"# Team\r\n"
+        written = (root / "CLAUDE.md").read_bytes()
+        assert written.startswith(b"# Team\n") and b"\r" not in written

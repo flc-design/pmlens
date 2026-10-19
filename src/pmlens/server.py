@@ -818,9 +818,11 @@ _PM_WRITE_ENTRIES = (
     "daily",
     "decision_lineage",
     "exports",
-    "memory.db",
-    "drafts.db",
-    "x_drafts.db",
+    *(
+        f"{db}{suffix}"
+        for db in ("memory.db", "drafts.db", "x_drafts.db")
+        for suffix in ("", "-wal", "-shm", "-journal")
+    ),
     "project.yaml",
     "tasks.yaml",
     "decisions.yaml",
@@ -958,7 +960,11 @@ def pm_status(project_path: str | None = None) -> dict:
                     }
                 )
             elif draft_db.exists():
-                drafts_pending = get_draft_store(draft_db).get_pending_count()
+                try:
+                    drafts_pending = get_draft_store(draft_db).get_pending_count()
+                except PmServerError as exc:  # a sidecar link, refused by connect_store
+                    drafts_pending = None
+                    status_warnings.append({"code": "draft_store_refused", "remediation": str(exc)})
         except DraftStoreConflictError as exc:
             drafts_pending = None  # Unknown, not an empty queue.
             status_warnings.append({"code": "draft_store_conflict", "remediation": str(exc)})

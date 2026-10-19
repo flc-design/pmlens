@@ -64,6 +64,15 @@ class FileRefusedError(Exception):
 
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _DIR_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | _NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+# O_SEARCH (macOS, BSD) or O_PATH (Linux) opens a directory for *at() calls
+# with search permission only; with O_DIRECTORY | O_NOFOLLOW a symlink is
+# still refused (ELOOP or ENOTDIR).
+_SEARCH = getattr(os, "O_SEARCH", 0) or getattr(os, "O_PATH", 0)
+_DIR_SEARCH_FLAGS = (
+    _SEARCH | getattr(os, "O_DIRECTORY", 0) | _NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    if _SEARCH
+    else None
+)
 
 
 def _plain_parts(name: str | Sequence[str]) -> list[str]:
@@ -97,6 +106,16 @@ def _open_dir_nofollow(path: Path | str, dir_fd: int | None = None) -> int | Non
         return os.open(path, _DIR_FLAGS, dir_fd=dir_fd)
     except FileNotFoundError:
         return None
+    except PermissionError:
+        # A directory that may be searched and written but not listed (mode
+        # 0o300) cannot be opened O_RDONLY; a descriptor only for *at() calls
+        # needs search permission alone.
+        if _DIR_SEARCH_FLAGS is not None:
+            try:
+                return os.open(path, _DIR_SEARCH_FLAGS, dir_fd=dir_fd)
+            except OSError:
+                pass
+        raise FileRefusedError("the directory could not be opened (Permission denied)") from None
     except OSError as exc:
         if exc.errno in {errno.ELOOP, errno.ENOTDIR, errno.EMLINK}:
             raise FileRefusedError("a symlink or not a directory") from None
@@ -277,7 +296,7 @@ def replace_file_in_dir(
         if only_if_absent and path.exists():
             return False
         path.parent.mkdir(parents=True, exist_ok=True)
-        _atomic_write_text(path, data.decode("utf-8"))
+        _atomic_write_bytes(path, data)
         return True
     dir_fd = open_dir_below(root, parts[:-1])
     leaf = parts[-1]
@@ -638,6 +657,24 @@ def _timestamped_backup(path: Path) -> Path:
     backup_path = path.with_name(f"{path.name}.bak.{timestamp}")
     shutil.copy2(path, backup_path)
     return backup_path
+
+
+def _atomic_write_bytes(path: Path, data: bytes) -> None:
+    """Like :func:`_atomic_write_text` for bytes, written as given (no newline translation)."""
+    tmp_fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+    try:
+        with os.fdopen(tmp_fd, "wb") as f:
+            f.write(data)
+        if path.exists():
+            shutil.copymode(path, tmp_name)
+        else:
+            current_umask = os.umask(0)
+            os.umask(current_umask)
+            os.chmod(tmp_name, 0o666 & ~current_umask)
+        os.replace(tmp_name, path)
+    except BaseException:
+        Path(tmp_name).unlink(missing_ok=True)
+        raise
 
 
 def _atomic_write_text(path: Path, content: str, *, encoding: str = "utf-8") -> None:

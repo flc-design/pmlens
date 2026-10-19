@@ -31,7 +31,11 @@ def inject_context(project_path: Path | None = None) -> None:
     if not db_path.exists():
         return
 
-    store = MemoryStore(db_path, global_db_path=None)
+    try:
+        store = MemoryStore(db_path, global_db_path=None)
+    except Exception as exc:  # noqa: BLE001 - a refused or unreadable store: inject nothing
+        sys.stderr.write(f"pmlens context-inject: memory not loaded ({type(exc).__name__})\n")
+        return
     try:
         builder = ContextBuilder(store, pm_path)
         context = builder.build_session_context()

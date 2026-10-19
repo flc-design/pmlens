@@ -235,14 +235,19 @@ def _save_yaml(
 
 
 def _write_refused(rel: str, exc: FileRefusedError) -> LedgerWriteRefused:
-    return LedgerWriteRefused(
-        f"refusing to write .pm/{rel}: it or a directory on the way is {exc}; pmlens does not "
-        "write through symlinks inside .pm (to move or share the data, make .pm itself the "
-        "symlink)"
-    )
+    reason = str(exc)
+    if "symlink" in reason or "not a regular file" in reason or "not a directory" in reason:
+        return LedgerWriteRefused(
+            f"refusing to write .pm/{rel}: it or a directory on the way is {reason}; pmlens does "
+            "not write through symlinks inside .pm (to move or share the data, make .pm itself "
+            "the symlink)"
+        )
+    return LedgerWriteRefused(f"could not write .pm/{rel}: {reason}")
 
 
-def _ensure_locks_dir(base_dir: Path) -> tuple[Path, tuple[int, int] | None]:
+def _ensure_locks_dir(
+    base_dir: Path, *, contained: bool = True
+) -> tuple[Path, tuple[int, int] | None]:
     """Create ``base_dir/.locks/`` and seed it with a self-ignoring .gitignore.
 
     The seeded ``.gitignore`` (``*\\n!.gitignore\\n``) means lock files never
@@ -261,10 +266,19 @@ def _ensure_locks_dir(base_dir: Path) -> tuple[Path, tuple[int, int] | None]:
         again once the lock is held (None where ``os.open`` takes no
         ``dir_fd``).
 
+    ``contained=False`` is for the home ``~/.pm`` registry, which no repository
+    supplies: its ``.locks`` is used as before, a user's symlink included.
+
     Raises:
         LedgerWriteRefused: ``.locks`` is a symlink or not a directory.
     """
     lock_dir = base_dir / _LOCKS_DIR
+    if not contained:
+        lock_dir.mkdir(parents=True, exist_ok=True)
+        gitignore = lock_dir / ".gitignore"
+        if not gitignore.is_symlink() and not gitignore.exists():
+            gitignore.write_text(_LOCKS_GITIGNORE, encoding="utf-8")
+        return lock_dir, None
     if _no_dir_fd():  # pragma: no cover - Windows: lstat checks, not atomic
         if lock_dir.is_symlink():
             raise _write_refused(_LOCKS_DIR, FileRefusedError("a symlink or not a directory"))
@@ -353,7 +367,8 @@ def _yaml_transaction(
             )
     if timeout is None:
         timeout = _resolve_lock_timeout()
-    lock_dir, identity = _ensure_locks_dir(base_dir)
+    # The registry lock lives in the home ~/.pm, which no repository supplies.
+    lock_dir, identity = _ensure_locks_dir(base_dir, contained=stem != "registry")
     lock_path = lock_dir / f"{stem}.lock"
     lock = FileLock(str(lock_path), timeout=timeout)
     try:

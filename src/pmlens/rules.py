@@ -31,7 +31,7 @@ from .models import PmServerError
 from .utils import (
     TARGET_CHOICES,
     FileRefusedError,
-    create_file_in_dir,
+    _no_dir_fd,
     open_dir_below,
     read_file_in_dir,
     replace_file_in_dir,
@@ -198,6 +198,10 @@ def _status_from_content(content: str) -> dict:
 
 # --- PMSERV-277: rule files a repository may ship as symlinks --------------
 
+_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+_O_BINARY = getattr(os, "O_BINARY", 0)
+
 # A rule file is Markdown; anything larger is not one.
 RULE_FILE_MAX_BYTES = 1024 * 1024
 
@@ -253,9 +257,39 @@ def _rule_location(path: Path) -> _RuleLocation:
             "write through it; replace the link with the file, or point it at a file inside "
             "the project"
         ) from None
-    if not rel.parts or any(part in {".git", ".pm"} for part in rel.parts):
+    if not rel.parts or _inside_git_or_pm(root, target, rel.parts):
         raise RuleFileRefused(f"{name} is a symlink into .git or .pm; pmlens does not follow it")
     return _RuleLocation(root, rel.parts)
+
+
+def _inside_git_or_pm(root: Path, target: Path, parts: tuple[str, ...]) -> bool:
+    """Whether ``target`` (under ``root``) is in the project's .git or .pm.
+
+    By name, ignoring case (a case-insensitive filesystem opens ``.GIT/config``
+    as ``.git/config``), and by identity, so a ``.pm`` that is itself a link
+    (``.pm -> data``) or a differently spelled alias is caught too.
+    """
+    if any(part.casefold() in {".git", ".pm"} for part in parts):
+        return True
+    guarded = []
+    for name in (".git", ".pm"):
+        try:
+            info = os.stat(root / name)
+        except OSError:
+            continue
+        guarded.append((info.st_dev, info.st_ino))
+    if not guarded:
+        return False
+    directory = target.parent
+    while directory != root and root in directory.parents:
+        try:
+            info = os.stat(directory)
+        except OSError:
+            return False
+        if (info.st_dev, info.st_ino) in guarded:
+            return True
+        directory = directory.parent
+    return False
 
 
 def _read_rule(loc: _RuleLocation, name: str) -> bytes | None:
@@ -267,10 +301,17 @@ def _read_rule(loc: _RuleLocation, name: str) -> bytes | None:
 
 
 def _decode_rule(raw: bytes, name: str) -> str:
+    """The rule file's text with newlines normalised, as ``read_text`` did.
+
+    A CRLF file therefore compares equal to the LF template when nothing
+    changed, and is written back with LF, as before (the backup keeps the
+    original bytes).
+    """
     try:
-        return raw.decode("utf-8")
+        text = raw.decode("utf-8")
     except UnicodeDecodeError:
         raise RuleFileRefused(f"{name} is not UTF-8 text") from None
+    return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
 def _backup_rule(loc: _RuleLocation, data: bytes) -> Path:
@@ -281,18 +322,50 @@ def _backup_rule(loc: _RuleLocation, data: bytes) -> Path:
     """
     leaf = loc.parts[-1]
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    names = [f"{leaf}.bak.{stamp}" + (f"-{i}" if i else "") for i in range(100)]
+    directory = loc.root.joinpath(*loc.parts[:-1])
+    if _no_dir_fd():  # pragma: no cover - Windows: O_EXCL never follows an existing name
+        original = os.stat(directory / leaf, follow_symlinks=False)
+        for name in names:
+            try:
+                fd = os.open(
+                    directory / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_BINARY, 0o600
+                )
+            except FileExistsError:
+                continue
+            _finish_backup(fd, data, original)
+            return directory / name
+        raise OSError(errno.EEXIST, "no free backup name")
     try:
         fd = open_dir_below(loc.root, loc.parts[:-1])
     except FileRefusedError as exc:
         raise RuleFileRefused(f"{leaf}: {exc}") from None
     try:
-        for i in range(100):
-            name = f"{leaf}.bak.{stamp}" + (f"-{i}" if i else "")
-            if create_file_in_dir(fd, name, data):
-                return loc.root.joinpath(*loc.parts[:-1], name)
+        original = os.stat(leaf, dir_fd=fd, follow_symlinks=False)
+        for name in names:
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW | _CLOEXEC
+            try:
+                out = os.open(name, flags, 0o600, dir_fd=fd)
+            except FileExistsError:
+                continue
+            _finish_backup(out, data, original)
+            return directory / name
     finally:
         os.close(fd)
     raise OSError(errno.EEXIST, "no free backup name")
+
+
+def _finish_backup(fd: int, data: bytes, original: os.stat_result) -> None:
+    """Write a backup and give it the original's permissions and times, as copy2 did."""
+    try:
+        view = memoryview(data)
+        while view:
+            view = view[os.write(fd, view) :]
+        if hasattr(os, "fchmod"):
+            os.fchmod(fd, stat.S_IMODE(original.st_mode) & 0o777)
+        os.utime(fd, ns=(original.st_atime_ns, original.st_mtime_ns))
+    finally:
+        os.close(fd)
 
 
 def _write_rule(loc: _RuleLocation, content: str, name: str) -> None:
