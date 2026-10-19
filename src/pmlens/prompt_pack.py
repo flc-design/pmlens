@@ -28,7 +28,8 @@ import re
 from pathlib import Path
 
 import yaml
-from jinja2 import ChoiceLoader, Environment, FileSystemLoader, select_autoescape
+from jinja2 import ChoiceLoader, FileSystemLoader, select_autoescape
+from jinja2.sandbox import ImmutableSandboxedEnvironment
 
 from .memory import MemoryStore, _has_pm_server_schema
 from .models import Decision, Memory, MemoryType, Project, SuggestedModel, Task, TaskStatus
@@ -315,12 +316,18 @@ def task_node(task: Task) -> dict:
     }
 
 
-def _prompt_pack_env(pm_path: Path | None) -> Environment:
+def _prompt_pack_env(pm_path: Path | None) -> ImmutableSandboxedEnvironment:
     """Jinja2 env with the two-layer loader: project override then built-in.
 
     ``.pm/prompt-templates/`` (when present) takes precedence over the bundled
     template, mirroring the workflow-templates override convention (ADR-041).
     autoescape is on for html so all task-derived text is XSS-safe.
+
+    The override comes with the repository, so it is untrusted: a plain
+    Environment let it reach Python through attributes such as
+    ``cycler.__init__.__globals__`` and run code when a pack is rendered
+    (PMSERV-270). The sandbox refuses such access (SecurityError) and renders
+    the bundled template unchanged.
     """
     search: list[FileSystemLoader] = []
     if pm_path is not None:
@@ -328,7 +335,7 @@ def _prompt_pack_env(pm_path: Path | None) -> Environment:
         if override.is_dir():
             search.append(FileSystemLoader(str(override)))
     search.append(FileSystemLoader(str(_TEMPLATES_DIR)))
-    return Environment(
+    return ImmutableSandboxedEnvironment(
         loader=ChoiceLoader(search),
         autoescape=select_autoescape(["html"]),
     )

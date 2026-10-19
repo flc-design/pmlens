@@ -789,6 +789,70 @@ class TestTemplateOverride:
         )
         assert html == "OVERRIDE-MARKER 1 tasks"
 
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "{{ cycler.__init__.__globals__.os.getpid() }}",
+            "{{ cycler.__init__.__globals__.os.system('touch MARKER') }}",
+            "{{ ''.__class__.__mro__[1].__subclasses__() }}",
+            "{% set x = filter_label.upper %}{{ x.__self__.__class__ }}",
+        ],
+    )
+    def test_override_cannot_reach_python(self, tmp_path, monkeypatch, body):
+        # A repository-supplied template ran code under a plain Environment
+        # (PMSERV-270). The sandbox refuses the attribute walk: it raises
+        # SecurityError or renders the unsafe attribute as empty.
+        import os
+
+        from jinja2.exceptions import SecurityError
+
+        monkeypatch.chdir(tmp_path)
+        pm_path = init_pm_directory(tmp_path)
+        override_dir = pm_path / "prompt-templates"
+        override_dir.mkdir()
+        (override_dir / "prompt_pack.html").write_text(body, encoding="utf-8")
+        try:
+            html = build_prompt_pack_html(
+                [_task(id="A")],
+                project=load_project(pm_path),
+                memories_by_task={},
+                decisions_by_id={},
+                verify_commands=[],
+                filter_label="x",
+                pm_path=pm_path,
+            )
+        except SecurityError:
+            html = ""
+        assert "class" not in html and str(os.getpid()) not in html
+        assert not (tmp_path / "MARKER").exists()
+
+    def test_sandbox_renders_the_bundled_template_unchanged(self, tmp_path, monkeypatch):
+        import jinja2
+
+        import pmlens.prompt_pack as pp
+
+        pm_path = init_pm_directory(tmp_path)
+        tasks = [
+            _task(id="A", track="Sprint A", description="<b>x</b>", blocked_by=["B"]),
+            _task(id="B", track="DX", acceptance_criteria=["ok"]),
+        ]
+
+        def render() -> str:
+            return build_prompt_pack_html(
+                tasks,
+                project=load_project(pm_path),
+                memories_by_task={},
+                decisions_by_id={},
+                verify_commands=["make test"],
+                filter_label="all",
+                group_by="track",
+                pm_path=pm_path,
+            )
+
+        sandboxed = render()
+        monkeypatch.setattr(pp, "ImmutableSandboxedEnvironment", jinja2.Environment)
+        assert sandboxed == render()
+
     def test_builtin_used_when_no_override(self, tmp_path):
         pm_path = init_pm_directory(tmp_path)
         html = build_prompt_pack_html(
