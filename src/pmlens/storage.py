@@ -38,6 +38,7 @@ labels are not ranked and behave as before. Lineage files are read through
 from __future__ import annotations
 
 import datetime as _dt
+import errno
 import os
 import threading
 from collections.abc import Callable, Iterable, Iterator, Mapping
@@ -53,7 +54,7 @@ from pydantic import BaseModel
 
 from . import lineage as _lineage
 from . import safe_yaml as _safe_yaml
-from .ledger_errors import LedgerReadError, build_record, build_records
+from .ledger_errors import LedgerReadError, LedgerWriteRefused, build_record, build_records
 from .lineage import LineageChange, LineageWriteRefused
 from .models import (
     DailyLog,
@@ -75,7 +76,15 @@ from .models import (
     WorkflowStep,
     WorkflowTemplate,
 )
-from .utils import FileRefusedError, _atomic_write_text, read_file_in_dir
+from .utils import (
+    FileRefusedError,
+    _atomic_write_text,
+    _no_dir_fd,
+    create_file_in_dir,
+    open_dir_below,
+    read_file_in_dir,
+    replace_file_in_dir,
+)
 
 PM_DIR = ".pm"
 GLOBAL_PM_DIR = Path.home() / ".pm"
@@ -190,29 +199,90 @@ def _parse_yaml_text(text: str, name: str) -> dict | list | None:
     return data
 
 
-def _save_yaml(path: Path, data: dict | list, header_name: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+def _save_yaml(
+    path: Path, data: dict | list, header_name: str, *, root: Path | None = None
+) -> None:
+    """Write a YAML ledger atomically.
+
+    Args:
+        path: The file to write.
+        data: The document.
+        header_name: The name in the file's comment header.
+        root: For a project ledger, its ``.pm`` directory: nothing below it is
+            followed if it is a symlink (PMSERV-277). None for files outside a
+            project (the ``~/.pm`` registry), written as before.
+
+    Raises:
+        LedgerWriteRefused: A directory on the way or the file is a symlink or
+            not a regular file.
+    """
     body = yaml.safe_dump(
         data,
         default_flow_style=False,
         allow_unicode=True,
         sort_keys=False,
     )
-    _atomic_write_text(path, _yaml_header(header_name) + body)
+    text = _yaml_header(header_name) + body
+    if root is None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write_text(path, text)
+        return
+    parts = path.relative_to(root).parts
+    try:
+        replace_file_in_dir(root, parts, text.encode("utf-8"))
+    except FileRefusedError as exc:
+        raise _write_refused("/".join(parts), exc) from None
 
 
-def _ensure_locks_dir(base_dir: Path) -> Path:
+def _write_refused(rel: str, exc: FileRefusedError) -> LedgerWriteRefused:
+    return LedgerWriteRefused(
+        f"refusing to write .pm/{rel}: it or a directory on the way is {exc}; pmlens does not "
+        "write through symlinks inside .pm (to move or share the data, make .pm itself the "
+        "symlink)"
+    )
+
+
+def _ensure_locks_dir(base_dir: Path) -> tuple[Path, tuple[int, int] | None]:
     """Create ``base_dir/.locks/`` and seed it with a self-ignoring .gitignore.
 
     The seeded ``.gitignore`` (``*\\n!.gitignore\\n``) means lock files never
     get committed, even for users who track ``.pm/`` in git.
+
+    A repository can ship ``.pm/.locks`` or ``.pm/.locks/.gitignore`` as a
+    symlink (PMSERV-277): ``write_text`` through a dangling ``.gitignore`` link
+    created its target, such as git's global excludes file, with ``*`` in it,
+    and lock files landed in a linked directory, where filelock truncates a
+    same-named file. ``.locks`` is opened without following a link and the
+    ``.gitignore`` is created only if no entry has that name, so neither is
+    written through. ``base_dir`` itself is trusted.
+
+    Returns:
+        The lock directory and its (st_dev, st_ino), which the caller checks
+        again once the lock is held (None where ``os.open`` takes no
+        ``dir_fd``).
+
+    Raises:
+        LedgerWriteRefused: ``.locks`` is a symlink or not a directory.
     """
     lock_dir = base_dir / _LOCKS_DIR
-    lock_dir.mkdir(parents=True, exist_ok=True)
-    gitignore = lock_dir / ".gitignore"
-    if not gitignore.exists():
-        gitignore.write_text(_LOCKS_GITIGNORE, encoding="utf-8")
-    return lock_dir
+    if _no_dir_fd():  # pragma: no cover - Windows: lstat checks, not atomic
+        if lock_dir.is_symlink():
+            raise _write_refused(_LOCKS_DIR, FileRefusedError("a symlink or not a directory"))
+        lock_dir.mkdir(parents=True, exist_ok=True)
+        gitignore = lock_dir / ".gitignore"
+        if not gitignore.is_symlink() and not gitignore.exists():
+            gitignore.write_text(_LOCKS_GITIGNORE, encoding="utf-8")
+        return lock_dir, None
+    try:
+        fd = open_dir_below(base_dir, (_LOCKS_DIR,))
+    except FileRefusedError as exc:
+        raise _write_refused(_LOCKS_DIR, exc) from None
+    try:
+        create_file_in_dir(fd, ".gitignore", _LOCKS_GITIGNORE.encode("utf-8"))
+        info = os.fstat(fd)
+    finally:
+        os.close(fd)
+    return lock_dir, (info.st_dev, info.st_ino)
 
 
 def _resolve_lock_timeout() -> float:
@@ -283,22 +353,41 @@ def _yaml_transaction(
             )
     if timeout is None:
         timeout = _resolve_lock_timeout()
-    lock_dir = _ensure_locks_dir(base_dir)
+    lock_dir, identity = _ensure_locks_dir(base_dir)
     lock_path = lock_dir / f"{stem}.lock"
     lock = FileLock(str(lock_path), timeout=timeout)
     try:
-        with lock:
-            if rank is not None:
-                held.append((stem, rank))
-            try:
-                yield
-            finally:
-                if rank is not None:
-                    held.pop()
+        lock.acquire()
     except FileLockTimeout as e:
         raise PmServerError(
             f"Failed to acquire lock on {filename}: timeout after {timeout}s"
         ) from e
+    except OSError as e:
+        # filelock opens the lock file with O_NOFOLLOW: a symlink there is ELOOP.
+        if e.errno in {errno.ELOOP, errno.EMLINK}:
+            raise _write_refused(
+                f"{_LOCKS_DIR}/{stem}.lock", FileRefusedError("a symlink")
+            ) from None
+        raise
+    try:
+        if identity is not None:
+            # .locks swapped for a link between the check and filelock's open
+            # by path: the lock is not where it was checked, so refuse.
+            try:
+                now = os.stat(lock_dir, follow_symlinks=False)
+            except OSError:
+                now = None
+            if now is None or (now.st_dev, now.st_ino) != identity:
+                raise _write_refused(_LOCKS_DIR, FileRefusedError("a symlink or not a directory"))
+        if rank is not None:
+            held.append((stem, rank))
+        try:
+            yield
+        finally:
+            if rank is not None:
+                held.pop()
+    finally:
+        lock.release()
 
 
 # Per-thread stack of the ranked ledger locks currently held (see
@@ -419,7 +508,7 @@ def load_project(pm_path: Path) -> Project:
 
 def _save_project(pm_path: Path, project: Project) -> None:
     """Save project to project.yaml."""
-    _save_yaml(pm_path / "project.yaml", _model_dump(project), "project.yaml")
+    _save_yaml(pm_path / "project.yaml", _model_dump(project), "project.yaml", root=pm_path)
 
 
 def load_tracks(pm_path: Path) -> dict[str, list[str]]:
@@ -479,6 +568,7 @@ def _save_tasks(pm_path: Path, tasks: list[Task]) -> None:
         pm_path / "tasks.yaml",
         {"tasks": [_model_dump(t) for t in tasks]},
         "tasks.yaml",
+        root=pm_path,
     )
 
 
@@ -570,6 +660,7 @@ def _save_decisions(pm_path: Path, decisions: list[Decision]) -> None:
         path,
         _with_sibling_keys(path, "decisions", [_model_dump(d) for d in decisions]),
         "decisions.yaml",
+        root=pm_path,
     )
 
 
@@ -872,8 +963,8 @@ def add_decision_with_lineage(
                 if path.exists() or path.is_symlink():
                     state = "preexisting"
                 else:
-                    _save_yaml(path, doc, _lineage.lineage_header_name(decision.id))
-            except OSError:
+                    _save_yaml(path, doc, _lineage.lineage_header_name(decision.id), root=pm_path)
+            except (OSError, LedgerWriteRefused):
                 state = "not_written"
             if state != "written":
                 # Report what a reader shows for this ADR now. A preexisting
@@ -1124,7 +1215,12 @@ def change_decision_lineage(
                     pass  # _require_known_status rejects it below
                 # Checked before anything is written: _save_decisions does not.
                 _require_known_status(adr.model_copy(update={"status": new_status}))
-            _save_yaml(path, outcome.doc, _lineage.lineage_header_name(decision_id))
+            try:
+                _save_yaml(
+                    path, outcome.doc, _lineage.lineage_header_name(decision_id), root=pm_path
+                )
+            except LedgerWriteRefused as exc:
+                raise LineageWriteRefused(_lineage.LINEAGE_UNREADABLE, str(exc)) from None
             if status_changes:
                 old_status = adr.status
                 adr.status = new_status
@@ -1174,6 +1270,7 @@ def _save_milestones(pm_path: Path, milestones: list[Milestone]) -> None:
         pm_path / "milestones.yaml",
         {"milestones": [_model_dump(m) for m in milestones]},
         "milestones.yaml",
+        root=pm_path,
     )
 
 
@@ -1203,6 +1300,7 @@ def _save_risks(pm_path: Path, risks: list[Risk]) -> None:
         pm_path / "risks.yaml",
         {"risks": [_model_dump(r) for r in risks]},
         "risks.yaml",
+        root=pm_path,
     )
 
 
@@ -1241,6 +1339,7 @@ def _save_knowledge(pm_path: Path, records: list[KnowledgeRecord]) -> None:
         path,
         _with_sibling_keys(path, "knowledge", [_model_dump(r) for r in records]),
         "knowledge.yaml",
+        root=pm_path,
     )
 
 
@@ -1308,14 +1407,12 @@ def add_daily_log(
 ) -> DailyLog:
     """Append an entry to today's daily log."""
     log_date = log_date or _dt.date.today()
-    daily_dir = pm_path / "daily"
-    daily_dir.mkdir(exist_ok=True)
-    log_file = daily_dir / f"{log_date.isoformat()}.yaml"
+    log_file = pm_path / "daily" / f"{log_date.isoformat()}.yaml"
 
     with _yaml_transaction(pm_path, f"daily-{log_date.isoformat()}"):
         log = load_daily_log(pm_path, log_date)
         log.entries.append(entry)
-        _save_yaml(log_file, _model_dump(log), f"daily/{log_date.isoformat()}.yaml")
+        _save_yaml(log_file, _model_dump(log), f"daily/{log_date.isoformat()}.yaml", root=pm_path)
     return log
 
 
@@ -1422,6 +1519,7 @@ def _save_workflows(pm_path: Path, workflows: list[Workflow]) -> None:
         pm_path / "workflows.yaml",
         {"workflows": [_model_dump(w) for w in workflows]},
         "workflows.yaml",
+        root=pm_path,
     )
 
 

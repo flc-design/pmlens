@@ -289,11 +289,11 @@ def test_pm_add_decision_writes_the_lineage_while_the_decisions_lock_is_held(
     seen: dict[str, list[bool]] = {"decisions.yaml": [], "decision_lineage-ADR-001": []}
     real_save = storage._save_yaml
 
-    def probed_save(path: Path, data, header_name: str) -> None:
+    def probed_save(path: Path, data, header_name: str, **kwargs) -> None:
         if Path(path).parent.name == "decision_lineage":
             for lock_name, results in seen.items():
                 _lock_probe(pm_path, lock_name, results)(lambda: None)()
-        real_save(path, data, header_name)
+        real_save(path, data, header_name, **kwargs)
 
     monkeypatch.setattr(storage, "_save_yaml", probed_save)
 

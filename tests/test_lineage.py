@@ -955,10 +955,10 @@ class TestCreate:
     ):
         real_save = storage._save_yaml
 
-        def failing(path: Path, data, header_name: str) -> None:
+        def failing(path: Path, data, header_name: str, **kwargs) -> None:
             if path.parent.name == "decision_lineage":
                 raise OSError(28, "No space left on device")
-            real_save(path, data, header_name)
+            real_save(path, data, header_name, **kwargs)
 
         monkeypatch.setattr(storage, "_save_yaml", failing)
         result = add_decision_with_lineage(tmp_pm_path, _build())
@@ -1074,11 +1074,11 @@ class TestCreate:
             other.join()
             return outcome[0]
 
-        def probed(path: Path, data, header_name: str) -> None:
+        def probed(path: Path, data, header_name: str, **kwargs) -> None:
             if path.parent.name == "decision_lineage":
                 seen["decisions"] = probe("decisions.yaml")
                 seen["lineage"] = probe("decision_lineage-ADR-001")
-            real_save(path, data, header_name)
+            real_save(path, data, header_name, **kwargs)
 
         monkeypatch.setattr(storage, "_save_yaml", probed)
         add_decision_with_lineage(tmp_pm_path, _build())

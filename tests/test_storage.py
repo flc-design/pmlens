@@ -364,7 +364,7 @@ class TestYamlTransactionLocking:
 
         original_replace = _utils.os.replace
 
-        def boom(src, dst):
+        def boom(src, dst, **kwargs):
             raise OSError("disk full")
 
         monkeypatch.setattr(_utils.os, "replace", boom)
@@ -375,6 +375,8 @@ class TestYamlTransactionLocking:
         # Restore replace and verify the original is untouched (atomicity)
         monkeypatch.setattr(_utils.os, "replace", original_replace)
         assert original_path.read_bytes() == original_bytes
+        # The temporary file was removed.
+        assert not [p for p in tmp_pm_path.iterdir() if p.name.endswith(".tmp")]
 
 
 class TestBuiltinTemplatesDirStatus:

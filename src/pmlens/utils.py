@@ -193,6 +193,155 @@ def read_file_in_dir(directory: Path, name: str | Sequence[str], max_bytes: int)
     return data
 
 
+def _open_or_make_dir(name: str, dir_fd: int) -> int:
+    """Open (creating it if missing) the directory ``name`` under ``dir_fd``, no-follow.
+
+    Raises:
+        FileRefusedError: ``name`` is a symlink or not a directory.
+    """
+    fd = _open_dir_nofollow(name, dir_fd=dir_fd)
+    if fd is None:
+        try:
+            os.mkdir(name, 0o777, dir_fd=dir_fd)
+        except FileExistsError:
+            pass
+        fd = _open_dir_nofollow(name, dir_fd=dir_fd)
+        if fd is None:
+            raise FileRefusedError("the directory could not be created")
+    return fd
+
+
+def open_dir_below(root: Path, parts: Sequence[str]) -> int:
+    """Open ``root/parts...``, creating what is missing and following no link below root.
+
+    ``root`` itself is trusted (a symlinked ``.pm`` keeps working, as do
+    ancestor links such as /tmp -> /private/tmp). The caller closes the
+    descriptor.
+
+    Raises:
+        FileRefusedError: A directory in ``parts`` is a symlink or not a
+            directory, or a part is not a plain name.
+    """
+    if parts:
+        _plain_parts(parts)
+    root.mkdir(parents=True, exist_ok=True)
+    fd = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0))
+    try:
+        for part in parts:
+            next_fd = _open_or_make_dir(part, fd)
+            os.close(fd)
+            fd = next_fd
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def replace_file_in_dir(
+    root: Path, name: str | Sequence[str], data: bytes, *, only_if_absent: bool = False
+) -> bool:
+    """Atomically write ``root/name``, following no symlink below ``root`` (PMSERV-277).
+
+    For files a project's ``.pm/`` holds: a repository can ship a directory or
+    a file there as a symlink, and writing through it would create or replace
+    files anywhere the user can write. Each directory below ``root`` is opened
+    (or created) with ``O_NOFOLLOW``, an existing name must be a regular file,
+    and the data goes to a temporary file renamed over the name, so a link
+    swapped in later is replaced, never written through. An existing file's
+    permission bits are kept; a new one gets the umask's.
+
+    Args:
+        root: The trusted directory (``.pm``).
+        name: The file name, or its path below ``root`` as parts.
+        data: The bytes to write.
+        only_if_absent: Create the file only if no entry has the name; an
+            existing regular file is left alone and False is returned.
+
+    Returns:
+        True if the file was written.
+
+    Raises:
+        FileRefusedError: A directory on the way or the name is a symlink, or
+            the name is not a regular file.
+        OSError: The write failed.
+    """
+    parts = _plain_parts(name)
+    if _no_dir_fd():
+        path = root
+        for part in parts:
+            path = path / part
+            if path.is_symlink():
+                raise FileRefusedError("a symlink")
+        if path.exists() and not path.is_file():
+            raise FileRefusedError("not a regular file")
+        if only_if_absent and path.exists():
+            return False
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write_text(path, data.decode("utf-8"))
+        return True
+    dir_fd = open_dir_below(root, parts[:-1])
+    leaf = parts[-1]
+    cloexec = getattr(os, "O_CLOEXEC", 0)
+    try:
+        try:
+            existing = os.stat(leaf, dir_fd=dir_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            existing = None
+        if existing is not None:
+            if stat.S_ISLNK(existing.st_mode):
+                raise FileRefusedError("a symlink")
+            if not stat.S_ISREG(existing.st_mode):
+                raise FileRefusedError("not a regular file")
+            if only_if_absent:
+                return False
+        temp = f".{leaf}.{os.getpid()}.{os.urandom(4).hex()}.tmp"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW | cloexec
+        fd = os.open(temp, flags, 0o666, dir_fd=dir_fd)
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                if existing is not None:
+                    os.fchmod(fh.fileno(), stat.S_IMODE(existing.st_mode))
+                fh.write(data)
+            if only_if_absent:
+                # link() fails if the name appeared meanwhile; rename would replace it.
+                try:
+                    os.link(temp, leaf, src_dir_fd=dir_fd, dst_dir_fd=dir_fd, follow_symlinks=False)
+                except FileExistsError:
+                    return False
+                finally:
+                    os.unlink(temp, dir_fd=dir_fd)
+            else:
+                os.replace(temp, leaf, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+        except BaseException:
+            try:
+                os.unlink(temp, dir_fd=dir_fd)
+            except OSError:
+                pass
+            raise
+    finally:
+        os.close(dir_fd)
+    return True
+
+
+def create_file_in_dir(dir_fd: int, name: str, data: bytes) -> bool:
+    """Create ``name`` under ``dir_fd`` with ``data`` only if no entry has that name.
+
+    ``O_CREAT | O_EXCL`` fails for any existing name, a dangling symlink
+    included, so nothing is ever written through a link (PMSERV-277).
+
+    Returns:
+        True if the file was created, False if the name was already taken.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    try:
+        fd = os.open(name, flags, 0o666, dir_fd=dir_fd)
+    except FileExistsError:
+        return False
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(data)
+    return True
+
+
 def write_file_in_dir(parent: Path, dirname: str, filename: str, data: bytes) -> None:
     """Write ``parent/dirname/filename`` without following a symlink.
 
