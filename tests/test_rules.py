@@ -688,10 +688,10 @@ class TestInjectPmRules:
             "<!-- pm-server:begin v=0 -->\nold\n<!-- pm-server:end -->\n"
         )
 
-        def failing_write(path, content, *, encoding="utf-8"):
+        def failing_write(root, name, data, *, only_if_absent=False):
             raise OSError("simulated atomic write failure")
 
-        monkeypatch.setattr(rules_mod, "_atomic_write_text", failing_write)
+        monkeypatch.setattr(rules_mod, "replace_file_in_dir", failing_write)
 
         summary = inject_pm_rules(tmp_path, target="claude-code")
 

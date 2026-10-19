@@ -295,3 +295,138 @@ class TestSqliteStores:
         started = time.monotonic()
         assert srv._db_stamp(pm / "memory.db") == (False, 0, 0, 0)
         assert time.monotonic() - started < 2
+
+
+# ─── rule files (CLAUDE.md / AGENTS.md) ──────────────
+
+
+def _repo(tmp_path: Path) -> Path:
+    root = tmp_path / "repo"
+    root.mkdir()
+    return root
+
+
+class TestRuleFiles:
+    def test_a_link_to_a_file_outside_the_project_is_neither_read_nor_written(self, tmp_path):
+        from pmlens.rules import ensure_claudemd, get_rules_status, inject_pm_rules
+
+        root = _repo(tmp_path)
+        zshrc = _outside(tmp_path) / ".zshrc"
+        zshrc.write_text("export PATH=/usr/bin\n", encoding="utf-8")
+        (root / "CLAUDE.md").symlink_to(zshrc)
+        (root / "AGENTS.md").symlink_to(zshrc)
+
+        message = ensure_claudemd(root)
+        summary = inject_pm_rules(root, target="all")
+        status = get_rules_status(root)
+
+        assert message.startswith(
+            "left CLAUDE.md unchanged: CLAUDE.md is a symlink to a file outside"
+        )
+        assert {r.status for r in summary.results} == {"failed"}
+        assert all("outside the project" in r.message for r in summary.results)
+        assert all("refused" in v for v in status.values())
+        assert zshrc.read_text(encoding="utf-8") == "export PATH=/usr/bin\n"
+        assert sorted(p.name for p in zshrc.parent.iterdir()) == [".zshrc"]  # no backup there
+
+    def test_a_dangling_link_outside_is_not_created(self, tmp_path):
+        from pmlens.rules import inject_pm_rules
+
+        root = _repo(tmp_path)
+        target = _outside(tmp_path) / "AGENTS.md"
+        (root / "AGENTS.md").symlink_to(target)
+
+        summary = inject_pm_rules(root, target="codex")
+
+        assert summary.results[0].status == "failed"
+        assert not target.exists()
+
+    def test_agents_md_linked_to_claude_md_keeps_working(self, tmp_path):
+        from pmlens.rules import inject_pm_rules
+
+        root = _repo(tmp_path)
+        (root / "CLAUDE.md").write_text("# Team rules\n", encoding="utf-8")
+        (root / "AGENTS.md").symlink_to("CLAUDE.md")
+
+        summary = inject_pm_rules(root, target="all")
+
+        assert summary.overall_status != "failed"
+        text = (root / "CLAUDE.md").read_text(encoding="utf-8")
+        assert text.startswith("# Team rules\n") and text.count("pm-server:begin") == 1
+        assert (root / "AGENTS.md").is_symlink()
+
+    def test_a_dangling_link_inside_the_project_creates_its_target(self, tmp_path):
+        from pmlens.rules import ensure_claudemd
+
+        root = _repo(tmp_path)
+        (root / "CLAUDE.md").symlink_to("AGENTS.md")
+
+        assert ensure_claudemd(root) == "created CLAUDE.md with PM Lens rules"
+        assert (root / "CLAUDE.md").is_symlink()
+        assert "pm-server:begin" in (root / "AGENTS.md").read_text(encoding="utf-8")
+
+    @pytest.mark.parametrize("into", [".git", ".pm"])
+    def test_links_into_git_or_pm_are_refused(self, tmp_path, into):
+        from pmlens.rules import inject_pm_rules
+
+        root = _repo(tmp_path)
+        (root / into / "hooks").mkdir(parents=True)
+        hook = root / into / "hooks" / "pre-commit"
+        hook.write_text("#!/bin/sh\n", encoding="utf-8")
+        (root / "CLAUDE.md").symlink_to(hook)
+
+        summary = inject_pm_rules(root, target="claude-code")
+
+        assert summary.results[0].status == "failed"
+        assert hook.read_text(encoding="utf-8") == "#!/bin/sh\n"
+
+    def test_a_link_through_a_linked_directory_is_refused(self, tmp_path):
+        from pmlens.rules import inject_pm_rules
+
+        root = _repo(tmp_path)
+        outside = _outside(tmp_path)
+        (outside / "rules.md").write_text("ORIGINAL", encoding="utf-8")
+        (root / "docs").symlink_to(outside, target_is_directory=True)
+        (root / "CLAUDE.md").symlink_to("docs/rules.md")
+
+        summary = inject_pm_rules(root, target="claude-code")
+
+        assert summary.results[0].status == "failed"
+        assert (outside / "rules.md").read_text(encoding="utf-8") == "ORIGINAL"
+
+    def test_a_fifo_rule_file_does_not_hang_status(self, tmp_path):
+        import time
+
+        from pmlens.rules import get_rules_status
+
+        root = _repo(tmp_path)
+        os.mkfifo(root / "CLAUDE.md")
+        started = time.monotonic()
+        status = get_rules_status(root)
+        assert time.monotonic() - started < 2
+        assert "refused" in status["claude_code"]
+
+    def test_a_planted_backup_name_is_not_written_through(self, tmp_path, monkeypatch):
+        import datetime as real_dt
+
+        import pmlens.rules as rules
+        from pmlens.rules import inject_pm_rules
+
+        class Frozen(real_dt.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 10, 20, 12, 0, 0)
+
+        monkeypatch.setattr(rules, "datetime", Frozen)
+        root = _repo(tmp_path)
+        (root / "CLAUDE.md").write_text("# Team rules\n", encoding="utf-8")
+        victim = _outside(tmp_path) / "victim"
+        victim.write_text("precious", encoding="utf-8")
+        (root / "CLAUDE.md.bak.20261020-120000").symlink_to(victim)
+
+        summary = inject_pm_rules(root, target="claude-code")
+
+        assert summary.results[0].status == "appended"
+        assert victim.read_text(encoding="utf-8") == "precious"
+        assert summary.results[0].backup_path.name == "CLAUDE.md.bak.20261020-120000-1"
+        assert summary.results[0].backup_path.read_text(encoding="utf-8") == "# Team rules\n"
