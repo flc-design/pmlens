@@ -1334,7 +1334,9 @@ class TestOverrideSymlinks:
         assert ".pm/exports is a symlink" in res["message"]
         assert list(outside.iterdir()) == []
 
-    def test_a_re_export_keeps_permissions_like_a_plain_write(self, tmp_path):
+    def test_a_re_export_rewrites_the_file_in_place_like_a_plain_write(self, tmp_path):
+        # The same inode keeps its permissions, owner, group, ACL and xattrs,
+        # as open(path, "w") did on main.
         import os
         import stat
 
@@ -1342,13 +1344,25 @@ class TestOverrideSymlinks:
         res, _ = self._render(pm_path)
         target = Path(res["out_path"])
         target.chmod(0o600)
+        inode = target.stat().st_ino
         res, _ = self._render(pm_path)
         assert res["status"] == "ok"
+        assert target.stat().st_ino == inode
         assert stat.S_IMODE(target.stat().st_mode) == 0o600
+        # A read-only directory still allows rewriting an existing file.
+        exports = target.parent
+        exports.chmod(0o555)
+        try:
+            res, _ = self._render(pm_path)
+        finally:
+            exports.chmod(0o755)
+        assert res["status"] == "ok"
+        # A read-only file is not replaced.
         target.chmod(0o444)
         res = run_prompt_pack(pm_path, filter_tag="x", format="html")
-        assert res["status"] == "error" and "the existing file is read-only" in res["message"]
         target.chmod(0o644)
+        assert res["status"] == "error" and "Permission denied" in res["message"]
+        # A new file gets the umask's permissions.
         target.unlink()
         old = os.umask(0o002)
         try:

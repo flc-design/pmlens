@@ -199,17 +199,17 @@ def write_file_in_dir(parent: Path, dirname: str, filename: str, data: bytes) ->
     For pmlens's own output inside a project (``.pm/exports``): a repository
     can ship that directory or the file as a symlink, and writing through it
     would overwrite any file the user can write (PMSERV-270 review). The
-    directory is created if missing, refused if it is a link, and the file is
-    written to a temporary name and renamed over the final one, so a link
-    there is replaced, never written through. ``parent`` itself is trusted.
-
-    As with ``open(path, "w")``: new files and the directory get the umask's
-    permissions, an existing file keeps its permission bits, and a read-only
-    file is not replaced.
+    directory is created if missing (umask applied) and refused if it is a
+    link. An existing regular file is rewritten in place, as
+    ``open(path, "w")`` does, so it keeps its permissions, owner, group, ACL
+    and extended attributes, and a file the user may not write is refused.
+    Anything else at the name (nothing, a symlink, a FIFO) is replaced by a
+    new file renamed over it, so a link is replaced, never written through.
+    ``parent`` itself is trusted.
 
     Raises:
-        FileRefusedError: ``dirname`` is a symlink or not a directory, or a name is
-            not plain.
+        FileRefusedError: ``dirname`` is a symlink or not a directory, a name is
+            not plain, or the file was swapped while it was being written.
         OSError: The write failed (PermissionError for a read-only file).
     """
     _plain_parts([dirname, filename])
@@ -234,23 +234,38 @@ def write_file_in_dir(parent: Path, dirname: str, filename: str, data: bytes) ->
                 raise FileRefusedError("the directory could not be created")
     finally:
         os.close(parent_fd)
+    cloexec = getattr(os, "O_CLOEXEC", 0)
     try:
         try:
             existing = os.stat(filename, dir_fd=dir_fd, follow_symlinks=False)
         except FileNotFoundError:
             existing = None
-        keep_mode = None
         if existing is not None and stat.S_ISREG(existing.st_mode):
-            if existing.st_uid == os.getuid() and not existing.st_mode & stat.S_IWUSR:
-                raise PermissionError(errno.EACCES, "the existing file is read-only")
-            keep_mode = stat.S_IMODE(existing.st_mode)
+            try:
+                fd = os.open(filename, os.O_WRONLY | _NOFOLLOW | cloexec, dir_fd=dir_fd)
+            except OSError as exc:
+                if exc.errno in {errno.ELOOP, errno.EMLINK}:
+                    raise FileRefusedError("the file changed while it was being written") from None
+                raise
+            try:
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode) or (info.st_dev, info.st_ino) != (
+                    existing.st_dev,
+                    existing.st_ino,
+                ):
+                    raise FileRefusedError("the file changed while it was being written")
+                os.ftruncate(fd, 0)
+                view = memoryview(data)
+                while view:
+                    view = view[os.write(fd, view) :]
+            finally:
+                os.close(fd)
+            return
         temp = f".{filename}.{os.getpid()}.{os.urandom(4).hex()}.tmp"
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW | cloexec
         fd = os.open(temp, flags, 0o666, dir_fd=dir_fd)
         try:
             with os.fdopen(fd, "wb") as fh:
-                if keep_mode is not None:
-                    os.fchmod(fh.fileno(), keep_mode)
                 fh.write(data)
             os.replace(temp, filename, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
         except BaseException:

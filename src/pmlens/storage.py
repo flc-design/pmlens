@@ -1471,18 +1471,20 @@ def next_workflow_number(pm_path: Path) -> int:
 
 # A workflow template is named by its file stem. The name is joined into a
 # path, so it may not carry a path (PMSERV-271): "/abs/creds" or "../x" read
-# any *.yaml on disk and returned its text. Anything else is allowed, as
-# before, including spaces and every script's letters and combining marks
-# (an allow-list built on \w hid names stored decomposed, as macOS tools do).
-_TEMPLATE_NAME_FORBIDDEN = ("/", "\\", ":", "\x00")
+# any *.yaml on disk and returned its text. Only path separators and NUL are
+# refused (plus ':' on Windows, where "C:x" names a drive); every other name
+# that loaded before still does, and ".yaml" is appended, so even ".." names
+# the file "...yaml" in the directory.
+_TEMPLATE_NAME_FORBIDDEN = tuple(
+    {"/", "\x00", os.sep, *(os.altsep or ""), *((":",) if os.name == "nt" else ())}
+)
 
 
 def _plain_template_name(name: object) -> bool:
     """Whether ``name`` names a file in a template directory and nothing else."""
     return (
         isinstance(name, str)
-        and 0 < len(name) <= 200
-        and name not in {".", ".."}
+        and name != ""
         and not any(c in name for c in _TEMPLATE_NAME_FORBIDDEN)
     )
 
@@ -1557,7 +1559,7 @@ def load_workflow_template(name: str, pm_path: Path | None = None) -> WorkflowTe
     """
     if not _plain_template_name(name):
         raise PmServerError(
-            "A workflow template name is a file name without '/', '\\', ':' or NUL "
+            "A workflow template name is a file name without a path separator or NUL "
             "(no path); see pm_workflow_templates"
         )
     # Custom template

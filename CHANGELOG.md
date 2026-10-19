@@ -11,7 +11,7 @@ as accepted, like every lifecycle change, returns a warning to pass on to the
 user.
 
 MCP tool count: 48 names for 46 operations in full mode (the two content tool
-aliases); Lens 17, or 19 with Desktop outbox writes. Test suite: 2,617 passing.
+aliases); Lens 17, or 19 with Desktop outbox writes. Test suite: 2,621 passing.
 
 **Upgrade notes.**
 
@@ -162,15 +162,16 @@ aliases); Lens 17, or 19 with Desktop outbox writes. Test suite: 2,617 passing.
   as a link, and the pack — whose text an override template controls — was
   written through it to any file the user can write. A link at the file is
   now replaced, and a symlinked `.pm/exports` is refused; an existing export
-  keeps its permissions and a read-only one is not replaced, as before. An
-  explicit `out_path` is written as before. A write that fails returns
-  `status: error` with the reason instead of raising.
+  is rewritten in place as before, keeping its permissions, group and ACL,
+  and a read-only one is not replaced. An explicit `out_path` is written as
+  before. A write that fails returns `status: error` with the reason instead
+  of raising.
 - **Workflow template names cannot carry a path** (PMSERV-271):
   `pm_workflow_start(template=...)` joined the name into a file path, so an
   absolute path or `../` read any `*.yaml` on disk and put its text in the
-  response and `.pm/workflows.yaml`. A name may no longer contain `/`, `\`,
-  `:` or NUL or be `.` or `..`, and a custom template is read once without
-  following a symlink. A symlinked template file or `workflow_templates` directory, or a
+  response and `.pm/workflows.yaml`. A name may no longer contain a path
+  separator or NUL (nor `:` on Windows); every other name loads as before.
+  A custom template is read once without following a symlink. A symlinked template file or `workflow_templates` directory, or a
   template over 1 MiB, is refused with an error naming it rather than
   silently replaced by a built-in template of the same name, and swapping a
   file for a link while it is being checked no longer works. Built-in

@@ -319,7 +319,7 @@ class TestWorkflowTemplates:
         )
         return target
 
-    @pytest.mark.parametrize("kind", ["absolute", "relative", "separator", "dotdot", "empty"])
+    @pytest.mark.parametrize("kind", ["absolute", "relative", "separator", "nul", "empty"])
     def test_a_name_that_carries_a_path_is_refused(self, tmp_path, tmp_pm_path, kind):
         # PMSERV-271: the name was joined into the path, so "/abs/creds" or
         # "../x" read any *.yaml on disk and returned its text.
@@ -329,7 +329,7 @@ class TestWorkflowTemplates:
             "absolute": str(target.with_suffix("")),
             "relative": "../../outside/creds",
             "separator": "sub/creds",
-            "dotdot": "..",
+            "nul": "creds\x00",
             "empty": "",
         }[kind]
         with pytest.raises(PmServerError, match="no path") as caught:
@@ -413,7 +413,20 @@ class TestWorkflowTemplates:
         assert len(listed) == 1
         assert load_workflow_template(listed[0], tmp_pm_path).name == "decomposed"
 
-    @pytest.mark.parametrize("name", ["my.flow", "my_flow-2", "検証フロー", "my flow"])
+    @pytest.mark.parametrize(
+        "name",
+        # Every name that is not a path loads, as before: ".." names "...yaml".
+        [
+            "my.flow",
+            "my_flow-2",
+            "検証フロー",
+            "my flow",
+            "dev:fast",
+            "back\\slash",
+            "..",
+            "x" * 240,
+        ],
+    )
     def test_plain_names_still_load(self, tmp_pm_path, name):
         custom_dir = tmp_pm_path / "workflow_templates"
         custom_dir.mkdir()
