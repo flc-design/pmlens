@@ -768,12 +768,21 @@ def run_prompt_pack(
         # through it would overwrite any file the user can write.
         try:
             write_file_in_dir(pm_path, "exports", dest.name, content.encode("utf-8"))
-        except FileRefusedError:
+        except FileRefusedError as exc:
             return {
                 "status": "error",
                 "message": (
-                    "refusing to write the prompt pack: .pm/exports is a symlink or not a "
-                    "directory; remove it or pass out_path"
+                    f"refusing to write the prompt pack: .pm/exports is {exc}; fix it or "
+                    "pass out_path"
+                ),
+            }
+        except OSError as exc:  # a directory at the name, a read-only file, a full disk
+            reason = exc.strerror or type(exc).__name__
+            return {
+                "status": "error",
+                "message": (
+                    f"could not write the prompt pack to .pm/exports/{dest.name}: {reason}; "
+                    "fix it or pass out_path"
                 ),
             }
 

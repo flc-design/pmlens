@@ -391,6 +391,28 @@ class TestWorkflowTemplates:
         for name in listed:
             assert load_workflow_template(name).name
 
+    def test_a_stray_file_named_workflow_templates_is_ignored(self, tmp_pm_path):
+        (tmp_pm_path / "workflow_templates").write_text("notes", encoding="utf-8")
+        assert load_workflow_template("development", tmp_pm_path).steps
+        assert "development" in [t["name"] for t in list_workflow_templates(tmp_pm_path)]
+
+    @pytest.mark.parametrize("name", ["café", "デザイン"])
+    def test_names_stored_decomposed_are_listed_and_load(self, tmp_pm_path, name):
+        import unicodedata
+
+        stored = unicodedata.normalize("NFD", name)
+        custom_dir = tmp_pm_path / "workflow_templates"
+        custom_dir.mkdir()
+        (custom_dir / f"{stored}.yaml").write_text(
+            yaml.safe_dump({"name": "decomposed", "steps": [{"id": "s", "name": "n"}]}),
+            encoding="utf-8",
+        )
+        listed = [
+            t["name"] for t in list_workflow_templates(tmp_pm_path) if t["source"] == "custom"
+        ]
+        assert len(listed) == 1
+        assert load_workflow_template(listed[0], tmp_pm_path).name == "decomposed"
+
     @pytest.mark.parametrize("name", ["my.flow", "my_flow-2", "検証フロー", "my flow"])
     def test_plain_names_still_load(self, tmp_pm_path, name):
         custom_dir = tmp_pm_path / "workflow_templates"

@@ -39,7 +39,6 @@ from __future__ import annotations
 
 import datetime as _dt
 import os
-import re
 import threading
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
@@ -1472,10 +1471,20 @@ def next_workflow_number(pm_path: Path) -> int:
 
 # A workflow template is named by its file stem. The name is joined into a
 # path, so it may not carry a path (PMSERV-271): "/abs/creds" or "../x" read
-# any *.yaml on disk and returned its text. Letters, digits, '.', '_' and '-'
-# and spaces only, starting with a letter or digit, so it cannot be "..",
-# absolute or contain a separator.
-_TEMPLATE_NAME_RE = re.compile(r"[^\W_][\w .-]{0,63}")
+# any *.yaml on disk and returned its text. Anything else is allowed, as
+# before, including spaces and every script's letters and combining marks
+# (an allow-list built on \w hid names stored decomposed, as macOS tools do).
+_TEMPLATE_NAME_FORBIDDEN = ("/", "\\", ":", "\x00")
+
+
+def _plain_template_name(name: object) -> bool:
+    """Whether ``name`` names a file in a template directory and nothing else."""
+    return (
+        isinstance(name, str)
+        and 0 < len(name) <= 200
+        and name not in {".", ".."}
+        and not any(c in name for c in _TEMPLATE_NAME_FORBIDDEN)
+    )
 
 
 # A template file larger than this is not a template.
@@ -1494,19 +1503,17 @@ def _custom_templates_dir(pm_path: Path) -> Path | None:
     """
     directory = pm_path / "workflow_templates"
     try:
-        if not directory.is_symlink() and not directory.exists():
-            return None
-        usable = (
-            not directory.is_symlink()
-            and directory.is_dir()
-            and directory.resolve().is_relative_to(pm_path.resolve())
+        if not directory.is_symlink() and not directory.is_dir():
+            return None  # absent, or a stray file of that name (ignored, as before)
+        usable = not directory.is_symlink() and directory.resolve().is_relative_to(
+            pm_path.resolve()
         )
     except OSError:
         usable = False
     if not usable:
         summary = (
-            "a symlink, not a directory or outside the project, so its templates are not "
-            "read; replace it with a directory"
+            "a symlink or outside the project, so its templates are not read; replace it "
+            "with a directory"
         )
         raise LedgerReadError(f"workflow_templates is {summary}", summary)
     return directory
@@ -1548,9 +1555,9 @@ def load_workflow_template(name: str, pm_path: Path | None = None) -> WorkflowTe
         PmServerError: The name is not a plain template name, or no template
             has it.
     """
-    if not isinstance(name, str) or not _TEMPLATE_NAME_RE.fullmatch(name):
+    if not _plain_template_name(name):
         raise PmServerError(
-            "A workflow template name is letters, digits, spaces, '.', '_' or '-' "
+            "A workflow template name is a file name without '/', '\\', ':' or NUL "
             "(no path); see pm_workflow_templates"
         )
     # Custom template
@@ -1583,7 +1590,7 @@ def list_workflow_templates(pm_path: Path | None = None) -> list[dict]:
     if custom_dir is not None:
         for f in sorted(custom_dir.glob("*.yaml")):
             name = f.stem
-            if not _TEMPLATE_NAME_RE.fullmatch(name):
+            if not _plain_template_name(name):
                 continue
             file = f"workflow_templates/{f.name}"
             data = _read_template(custom_dir, name, file)

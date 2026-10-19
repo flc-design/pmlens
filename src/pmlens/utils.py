@@ -100,7 +100,8 @@ def _open_dir_nofollow(path: Path | str, dir_fd: int | None = None) -> int | Non
     except OSError as exc:
         if exc.errno in {errno.ELOOP, errno.ENOTDIR, errno.EMLINK}:
             raise FileRefusedError("a symlink or not a directory") from None
-        raise FileRefusedError("the directory could not be opened") from None
+        reason = os.strerror(exc.errno) if exc.errno else type(exc).__name__
+        raise FileRefusedError(f"the directory could not be opened ({reason})") from None
 
 
 def read_file_in_dir(directory: Path, name: str | Sequence[str], max_bytes: int) -> bytes | None:
@@ -202,10 +203,14 @@ def write_file_in_dir(parent: Path, dirname: str, filename: str, data: bytes) ->
     written to a temporary name and renamed over the final one, so a link
     there is replaced, never written through. ``parent`` itself is trusted.
 
+    As with ``open(path, "w")``: new files and the directory get the umask's
+    permissions, an existing file keeps its permission bits, and a read-only
+    file is not replaced.
+
     Raises:
         FileRefusedError: ``dirname`` is a symlink or not a directory, or a name is
             not plain.
-        OSError: The write failed.
+        OSError: The write failed (PermissionError for a read-only file).
     """
     _plain_parts([dirname, filename])
     if _no_dir_fd():
@@ -221,7 +226,7 @@ def write_file_in_dir(parent: Path, dirname: str, filename: str, data: bytes) ->
         dir_fd = _open_dir_nofollow(dirname, dir_fd=parent_fd)
         if dir_fd is None:
             try:
-                os.mkdir(dirname, 0o755, dir_fd=parent_fd)
+                os.mkdir(dirname, 0o777, dir_fd=parent_fd)
             except FileExistsError:
                 pass
             dir_fd = _open_dir_nofollow(dirname, dir_fd=parent_fd)
@@ -230,11 +235,22 @@ def write_file_in_dir(parent: Path, dirname: str, filename: str, data: bytes) ->
     finally:
         os.close(parent_fd)
     try:
+        try:
+            existing = os.stat(filename, dir_fd=dir_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            existing = None
+        keep_mode = None
+        if existing is not None and stat.S_ISREG(existing.st_mode):
+            if existing.st_uid == os.getuid() and not existing.st_mode & stat.S_IWUSR:
+                raise PermissionError(errno.EACCES, "the existing file is read-only")
+            keep_mode = stat.S_IMODE(existing.st_mode)
         temp = f".{filename}.{os.getpid()}.{os.urandom(4).hex()}.tmp"
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
-        fd = os.open(temp, flags, 0o644, dir_fd=dir_fd)
+        fd = os.open(temp, flags, 0o666, dir_fd=dir_fd)
         try:
             with os.fdopen(fd, "wb") as fh:
+                if keep_mode is not None:
+                    os.fchmod(fh.fileno(), keep_mode)
                 fh.write(data)
             os.replace(temp, filename, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
         except BaseException:

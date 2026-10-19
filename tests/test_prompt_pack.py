@@ -1333,3 +1333,36 @@ class TestOverrideSymlinks:
         assert res["status"] == "error"
         assert ".pm/exports is a symlink" in res["message"]
         assert list(outside.iterdir()) == []
+
+    def test_a_re_export_keeps_permissions_like_a_plain_write(self, tmp_path):
+        import os
+        import stat
+
+        pm_path, _ = self._pack(tmp_path)
+        res, _ = self._render(pm_path)
+        target = Path(res["out_path"])
+        target.chmod(0o600)
+        res, _ = self._render(pm_path)
+        assert res["status"] == "ok"
+        assert stat.S_IMODE(target.stat().st_mode) == 0o600
+        target.chmod(0o444)
+        res = run_prompt_pack(pm_path, filter_tag="x", format="html")
+        assert res["status"] == "error" and "the existing file is read-only" in res["message"]
+        target.chmod(0o644)
+        target.unlink()
+        old = os.umask(0o002)
+        try:
+            res, _ = self._render(pm_path)
+        finally:
+            os.umask(old)
+        assert stat.S_IMODE(target.stat().st_mode) == 0o664
+
+    def test_write_errors_say_what_happened(self, tmp_path):
+        pm_path, _ = self._pack(tmp_path)
+        exports = pm_path / "exports"
+        exports.mkdir(exist_ok=True)
+        (exports / "prompt-pack-tag-x.html").mkdir()  # a directory at the file's name
+        res = run_prompt_pack(pm_path, filter_tag="x", format="html")
+        assert res["status"] == "error"
+        assert "symlink" not in res["message"]
+        assert res["message"].startswith("could not write the prompt pack to .pm/exports/")
