@@ -567,6 +567,7 @@ def _read_bounded(path: Path) -> bytes:
         | getattr(os, "O_NOFOLLOW", 0)
         | getattr(os, "O_NONBLOCK", 0)
         | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_BINARY", 0)
     )
     fd = os.open(path, flags)
     chunks: list[bytes] = []

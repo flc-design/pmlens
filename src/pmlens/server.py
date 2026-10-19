@@ -541,7 +541,8 @@ def _db_stamp(db_path: Path) -> tuple[bool, int, int, int]:
         if not stat.S_ISREG(st.st_mode):
             return (False, 0, 0, 0)
         flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
-        fd = os.open(db_path, flags | getattr(os, "O_CLOEXEC", 0))
+        flags |= getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0)
+        fd = os.open(db_path, flags)
         try:
             header = os.read(fd, 28)
         finally:

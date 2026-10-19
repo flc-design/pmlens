@@ -798,6 +798,19 @@ def run_prompt_pack(
     # directory or the file there may be a symlink, and writing through it
     # would overwrite any file the user can write (PMSERV-270, PMSERV-277).
     in_pm = ("exports", dest.name) if not out_path else _parts_inside_pm(dest, pm_path)
+    if in_pm and (
+        in_pm[-1].casefold() in _PROMPT_PACK_RESERVED_NAMES
+        or in_pm[0].casefold() in _PROMPT_PACK_RESERVED_DIRS
+    ):
+        # out_path named a link (PROMPT.md -> .pm/tasks.yaml) that the name
+        # check above could not see through.
+        return {
+            "status": "error",
+            "message": (
+                f"refusing to write a prompt pack over .pm/{'/'.join(in_pm)}, which out_path "
+                "leads to; choose a different out_path"
+            ),
+        }
     if in_pm is None:
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(content, encoding="utf-8")

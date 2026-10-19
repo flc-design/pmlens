@@ -1225,3 +1225,63 @@ class TestDryRound5Fixes:
 
         assert ensure_claudemd(root).startswith("left CLAUDE.md unchanged")
         assert (root / "config").read_text(encoding="utf-8") == "[core]\n"
+
+
+class TestDryRound6Fixes:
+    _BINARY = 1 << 40  # a stand-in for Windows' O_BINARY, stripped before the real open
+
+    def _spy_open(self, monkeypatch):
+        seen = []
+        real_open = os.open
+
+        def spy(path, flags, *args, **kwargs):
+            seen.append(flags)
+            return real_open(path, flags & ~self._BINARY, *args, **kwargs)
+
+        monkeypatch.setattr(os, "open", spy)
+        return seen
+
+    def test_raw_reads_ask_for_binary_mode(self, tmp_path, monkeypatch):
+        import pmlens.utils as utils
+        from pmlens.lineage import _read_bounded
+        from pmlens.utils import read_file_in_dir
+
+        (tmp_path / "CLAUDE.md").write_bytes(b"a\r\nb\x1a c")
+        (tmp_path / "memory.db").write_bytes(b"SQLite format 3\x00" + bytes(100))
+        monkeypatch.setattr(utils, "_O_BINARY", self._BINARY)
+        monkeypatch.setattr(os, "O_BINARY", self._BINARY, raising=False)
+        seen = self._spy_open(monkeypatch)
+        for no_dir_fd in (False, True):
+            monkeypatch.setattr(utils, "_no_dir_fd", lambda v=no_dir_fd: v)
+            seen.clear()
+            read_file_in_dir(tmp_path, "CLAUDE.md", 1024)
+            assert seen and seen[-1] & self._BINARY
+        seen.clear()
+        srv._db_stamp(tmp_path / "memory.db")
+        _read_bounded(tmp_path / "CLAUDE.md")
+        assert len(seen) == 2 and all(flags & self._BINARY for flags in seen)
+
+    def test_a_new_export_with_a_long_name_can_be_written(self, tmp_path):
+        pm = _project(tmp_path)
+        add_task(pm, _task(1))
+        dest = pm / "exports" / ("a" * 245 + ".md")
+
+        result = srv.pm_prompt_pack(project_path=str(pm.parent), out_path=str(dest))
+
+        assert result["status"] == "ok", result
+        assert "T-001" in dest.read_text(encoding="utf-8")
+
+    @pytest.mark.parametrize("ledger", ["tasks.yaml", "memory.db"])
+    def test_an_out_path_that_is_a_link_onto_a_ledger_is_refused(self, tmp_path, ledger):
+        pm = _project(tmp_path)
+        add_task(pm, _task(1))
+        (pm / "memory.db").write_bytes(b"SQLite format 3\x00")
+        before = (pm / ledger).read_bytes()
+        (pm.parent / "PROMPT.md").symlink_to(f".pm/{ledger}")
+
+        result = srv.pm_prompt_pack(
+            project_path=str(pm.parent), out_path=str(pm.parent / "PROMPT.md")
+        )
+
+        assert result["status"] == "error"
+        assert (pm / ledger).read_bytes() == before

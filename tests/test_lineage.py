@@ -2398,7 +2398,8 @@ _BANNED_CALLS = frozenset(
     }
 )
 _YAML_DUMPS = frozenset({"dump", "safe_dump", "dump_all", "safe_dump_all"})
-_ALLOWED_OPEN_FLAGS = frozenset({"O_RDONLY", "O_NOFOLLOW", "O_NONBLOCK", "O_CLOEXEC"})
+# O_BINARY only stops Windows from reading in CRT text mode; it grants nothing.
+_ALLOWED_OPEN_FLAGS = frozenset({"O_RDONLY", "O_NOFOLLOW", "O_NONBLOCK", "O_CLOEXEC", "O_BINARY"})
 
 
 def _call_name(call: ast.Call) -> str | None:

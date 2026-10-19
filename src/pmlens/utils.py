@@ -63,6 +63,9 @@ class FileRefusedError(Exception):
 
 
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+# Windows: a raw os.open is in CRT text mode unless O_BINARY is given (CRLF
+# read as LF, a Ctrl-Z ends the read); Python's io layer always adds it.
+_O_BINARY = getattr(os, "O_BINARY", 0)
 _DIR_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | _NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
 # O_SEARCH (macOS, BSD) or O_PATH (Linux) opens a directory for *at() calls
 # with search permission only; with O_DIRECTORY | O_NOFOLLOW a symlink is
@@ -73,6 +76,15 @@ _DIR_SEARCH_FLAGS = (
     if _SEARCH
     else None
 )
+
+
+def _temp_name() -> str:
+    """A temporary file name for a write renamed into place.
+
+    Independent of the target's name, so a target whose name is near the
+    filesystem's limit (255 bytes) can still be written.
+    """
+    return f".pmlens-{os.getpid()}-{os.urandom(6).hex()}.tmp"
 
 
 def _plain_parts(name: str | Sequence[str]) -> list[str]:
@@ -151,7 +163,13 @@ def read_file_in_dir(directory: Path, name: str | Sequence[str], max_bytes: int)
             not a plain relative path.
     """
     parts = _plain_parts(name)
-    flags = os.O_RDONLY | _NOFOLLOW | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
+    flags = (
+        os.O_RDONLY
+        | _NOFOLLOW
+        | _O_BINARY
+        | getattr(os, "O_NONBLOCK", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
     if _no_dir_fd():
         path = directory
         for part in parts:
@@ -337,7 +355,7 @@ def replace_file_in_dir(
                 raise FileRefusedError("not a regular file")
             if only_if_absent:
                 return False
-        temp = f".{leaf}.{os.getpid()}.{os.urandom(4).hex()}.tmp"
+        temp = _temp_name()
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW | cloexec
         fd = os.open(temp, flags, 0o666, dir_fd=dir_fd)
         try:
@@ -462,7 +480,7 @@ def write_file_below(
             finally:
                 os.close(fd)
             return
-        temp = f".{filename}.{os.getpid()}.{os.urandom(4).hex()}.tmp"
+        temp = _temp_name()
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW | cloexec
         fd = os.open(temp, flags, 0o666, dir_fd=dir_fd)
         try:

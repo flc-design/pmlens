@@ -11,7 +11,7 @@ as accepted, like every lifecycle change, returns a warning to pass on to the
 user.
 
 MCP tool count: 48 names for 46 operations in full mode (the two content tool
-aliases); Lens 17, or 19 with Desktop outbox writes. Test suite: 2,711 passing.
+aliases); Lens 17, or 19 with Desktop outbox writes. Test suite: 2,715 passing.
 
 **Upgrade notes.**
 
@@ -167,7 +167,8 @@ aliases); Lens 17, or 19 with Desktop outbox writes. Test suite: 2,711 passing.
   (such as `.pm/exports/mine.md`) is written the same way, except that a
   link at the file is refused; one elsewhere is written as before. `~` and
   `..` in `out_path` are resolved once, before the path is checked and
-  written, so the write goes where the checks looked.
+  written, so the write goes where the checks looked, and an `out_path` that
+  is a link onto a ledger in `.pm` is refused like the ledger's own name.
   A write that fails returns `status: error` with the reason instead of
   raising.
 - **Writes no longer follow symlinks a repository ships in `.pm/` or as a
