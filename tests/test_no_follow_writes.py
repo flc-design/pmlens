@@ -680,3 +680,58 @@ class TestClosingRoundFixes:
         ensure_claudemd(root)
         data = (root / "CLAUDE.md").read_bytes()
         assert b"\r\n" in data and b"\r\r" not in data
+
+
+class TestFinalRoundFixes:
+    def test_a_pm_that_is_the_project_root_is_guarded(self, tmp_path):
+        from pmlens.rules import inject_pm_rules
+
+        root = _repo(tmp_path)
+        (root / "project.yaml").write_text("name: proj\n", encoding="utf-8")
+        (root / ".pm").symlink_to(".", target_is_directory=True)
+        (root / "CLAUDE.md").symlink_to("project.yaml")
+
+        summary = inject_pm_rules(root, target="claude-code")
+
+        assert summary.results[0].status == "failed"
+        assert (root / "project.yaml").read_text(encoding="utf-8") == "name: proj\n"
+
+    def test_a_pm_above_the_project_root_is_guarded(self, tmp_path):
+        from pmlens.rules import inject_pm_rules
+
+        root = tmp_path / "daily"
+        root.mkdir()
+        (root / ".pm").symlink_to("..", target_is_directory=True)
+        (root / "CLAUDE.md").symlink_to("2026-10-20.md")
+
+        summary = inject_pm_rules(root, target="claude-code")
+
+        assert summary.results[0].status == "failed"
+        assert sorted(p.name for p in root.iterdir()) == [".pm", "CLAUDE.md"]
+
+    def test_a_git_that_is_the_project_root_is_guarded(self, tmp_path):
+        from pmlens.rules import ensure_claudemd
+
+        root = _repo(tmp_path)
+        (root / "hooks").mkdir()
+        hook = root / "hooks" / "pre-commit"
+        hook.write_text("#!/bin/sh\n", encoding="utf-8")
+        (root / ".git").symlink_to(".", target_is_directory=True)
+        (root / "CLAUDE.md").symlink_to("hooks/pre-commit")
+
+        assert ensure_claudemd(root).startswith("left CLAUDE.md unchanged")
+        assert hook.read_text(encoding="utf-8") == "#!/bin/sh\n"
+
+    def test_a_pm_kept_outside_still_allows_links_inside_the_project(self, tmp_path):
+        from pmlens.rules import inject_pm_rules
+
+        root = _repo(tmp_path)
+        (root / ".git").mkdir()
+        (root / "docs").mkdir()
+        (root / ".pm").symlink_to(_outside(tmp_path), target_is_directory=True)
+        (root / "CLAUDE.md").symlink_to("docs/rules.md")
+
+        summary = inject_pm_rules(root, target="claude-code")
+
+        assert summary.results[0].status == "created"
+        assert "pm-server:begin" in (root / "docs" / "rules.md").read_text(encoding="utf-8")

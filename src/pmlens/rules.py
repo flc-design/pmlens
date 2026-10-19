@@ -267,7 +267,9 @@ def _inside_git_or_pm(root: Path, target: Path, parts: tuple[str, ...]) -> bool:
 
     By name, ignoring case (a case-insensitive filesystem opens ``.GIT/config``
     as ``.git/config``), and by identity, so a ``.pm`` that is itself a link
-    (``.pm -> data``) or a differently spelled alias is caught too.
+    (``.pm -> data``) or a differently spelled alias is caught too, as is one
+    that is the project root or above it (``.pm -> .``, ``.git -> ..``), which
+    puts every file in the project inside it.
     """
     if any(part.casefold() in {".git", ".pm"} for part in parts):
         return True
@@ -280,21 +282,23 @@ def _inside_git_or_pm(root: Path, target: Path, parts: tuple[str, ...]) -> bool:
         guarded.append((info.st_dev, info.st_ino))
     if not guarded:
         return False
-    # Walk up through directories that do not exist yet (the write would
-    # create them) to the nearest existing one; refuse if any is unreadable.
+    # Walk up from the target's directory through the root to the filesystem
+    # root, past directories that do not exist yet (the write would create
+    # them); refuse if any cannot be checked.
     directory = target.parent
-    while directory != root and root in directory.parents:
+    while True:
         try:
             info = os.stat(directory)
         except (FileNotFoundError, NotADirectoryError):
-            directory = directory.parent
-            continue
+            pass
         except OSError:
             return True
-        if (info.st_dev, info.st_ino) in guarded:
-            return True
+        else:
+            if (info.st_dev, info.st_ino) in guarded:
+                return True
+        if directory == directory.parent:
+            return False
         directory = directory.parent
-    return False
 
 
 def _read_rule(loc: _RuleLocation, name: str) -> bytes | None:
