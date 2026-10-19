@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import os
+import re
 import threading
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
@@ -1460,24 +1461,56 @@ def next_workflow_number(pm_path: Path) -> int:
     return _next_number_from_ids(w.id for w in load_workflows(pm_path))
 
 
+# A workflow template is named by its file stem. The name is joined into a
+# path, so it may not carry a path (PMSERV-271): "/abs/creds" or "../x" read
+# any *.yaml on disk and returned its text. Letters, digits, '.', '_' and '-'
+# only, starting with a letter or digit, so it cannot be "..", absolute or
+# contain a separator.
+_TEMPLATE_NAME_RE = re.compile(r"[^\W_][\w.-]{0,63}")
+
+
+def _template_file(directory: Path, name: str) -> Path | None:
+    """``directory/{name}.yaml`` if it is a file that resolves inside ``directory``.
+
+    A symlink that leads out of the directory is not followed.
+    """
+    path = directory / f"{name}.yaml"
+    try:
+        if not path.is_file():
+            return None
+        inside = path.resolve().is_relative_to(directory.resolve())
+    except OSError:
+        return None
+    return path if inside else None
+
+
 def load_workflow_template(name: str, pm_path: Path | None = None) -> WorkflowTemplate:
     """Load a workflow template by name.
 
     Resolution order:
     1. Custom: .pm/workflow_templates/{name}.yaml
     2. Built-in: templates/workflows/{name}.yaml
+
+    Raises:
+        PmServerError: The name is not a plain template name, or no template
+            has it.
     """
+    if not isinstance(name, str) or not _TEMPLATE_NAME_RE.fullmatch(name):
+        raise PmServerError(
+            "A workflow template name is letters, digits, '.', '_' or '-' "
+            "(no path); see pm_workflow_templates"
+        )
     # Custom template
     if pm_path:
-        custom_path = pm_path / "workflow_templates" / f"{name}.yaml"
-        if custom_path.exists():
+        custom_path = _template_file(pm_path / "workflow_templates", name)
+        if custom_path is not None:
             data = _load_yaml(custom_path)
             if data:
                 return _parse_workflow_template(data, f"workflow_templates/{custom_path.name}")
 
     # Built-in template
-    builtin_path = BUILTIN_TEMPLATES_DIR / f"{name}.yaml"
-    if builtin_path.exists():
+    builtin_path = _template_file(BUILTIN_TEMPLATES_DIR, name)
+    if builtin_path is not None:
         data = _load_yaml(builtin_path)
         if data:
             return _parse_workflow_template(data, builtin_path.name)
@@ -1496,6 +1529,9 @@ def list_workflow_templates(pm_path: Path | None = None) -> list[dict]:
         if custom_dir.is_dir():
             for f in sorted(custom_dir.glob("*.yaml")):
                 name = f.stem
+                loadable = _TEMPLATE_NAME_RE.fullmatch(name) and _template_file(custom_dir, name)
+                if not loadable:
+                    continue  # pm_workflow_start could not load it either
                 seen.add(name)
                 data = _load_yaml(f)
                 if data:

@@ -305,6 +305,60 @@ class TestWorkflowTemplates:
         with pytest.raises(PmServerError, match="not found"):
             load_workflow_template("nonexistent")
 
+    @staticmethod
+    def _outside_template(tmp_path: Path) -> Path:
+        """A valid template file outside the project, carrying a marker."""
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        target = outside / "creds.yaml"
+        target.write_text(
+            yaml.safe_dump(
+                {"name": "x", "steps": [{"id": "s", "name": "n", "description": "OUTSIDE-MARKER"}]}
+            ),
+            encoding="utf-8",
+        )
+        return target
+
+    @pytest.mark.parametrize("kind", ["absolute", "relative", "separator", "dotdot", "empty"])
+    def test_a_name_that_carries_a_path_is_refused(self, tmp_path, tmp_pm_path, kind):
+        # PMSERV-271: the name was joined into the path, so "/abs/creds" or
+        # "../x" read any *.yaml on disk and returned its text.
+        target = self._outside_template(tmp_path)
+        (tmp_pm_path / "workflow_templates").mkdir()
+        name = {
+            "absolute": str(target.with_suffix("")),
+            "relative": "../../outside/creds",
+            "separator": "sub/creds",
+            "dotdot": "..",
+            "empty": "",
+        }[kind]
+        with pytest.raises(PmServerError, match="no path") as caught:
+            load_workflow_template(name, tmp_pm_path)
+        assert "OUTSIDE-MARKER" not in str(caught.value)
+        with pytest.raises(PmServerError):
+            start_workflow(tmp_pm_path, "feature", name)
+        workflows = tmp_pm_path / "workflows.yaml"
+        assert not workflows.exists() or "OUTSIDE-MARKER" not in workflows.read_text("utf-8")
+
+    def test_a_symlink_out_of_the_template_directory_is_not_followed(self, tmp_path, tmp_pm_path):
+        target = self._outside_template(tmp_path)
+        custom_dir = tmp_pm_path / "workflow_templates"
+        custom_dir.mkdir()
+        (custom_dir / "linked.yaml").symlink_to(target)
+        with pytest.raises(PmServerError, match="not found"):
+            load_workflow_template("linked", tmp_pm_path)
+        assert "linked" not in [t["name"] for t in list_workflow_templates(tmp_pm_path)]
+
+    @pytest.mark.parametrize("name", ["my.flow", "my_flow-2", "検証フロー"])
+    def test_plain_names_still_load(self, tmp_pm_path, name):
+        custom_dir = tmp_pm_path / "workflow_templates"
+        custom_dir.mkdir()
+        (custom_dir / f"{name}.yaml").write_text(
+            yaml.safe_dump({"name": name, "steps": [{"id": "s", "name": "n"}]}), encoding="utf-8"
+        )
+        assert load_workflow_template(name, tmp_pm_path).name == name
+        assert name in [t["name"] for t in list_workflow_templates(tmp_pm_path)]
+
     def test_custom_overrides_builtin(self, tmp_pm_path):
         """Custom template with the same name should override built-in."""
         custom_dir = tmp_pm_path / "workflow_templates"

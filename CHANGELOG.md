@@ -11,7 +11,7 @@ as accepted, like every lifecycle change, returns a warning to pass on to the
 user.
 
 MCP tool count: 48 names for 46 operations in full mode (the two content tool
-aliases); Lens 17, or 19 with Desktop outbox writes. Test suite: 2,493 passing.
+aliases); Lens 17, or 19 with Desktop outbox writes. Test suite: 2,585 passing.
 
 **Upgrade notes.**
 
@@ -150,6 +150,12 @@ aliases); Lens 17, or 19 with Desktop outbox writes. Test suite: 2,493 passing.
   run Python (for example through `cycler.__init__.__globals__`) when
   `pm_prompt_pack(format="html")` or `pmlens prompt-pack --format html` ran.
   The bundled template renders exactly as before.
+- **Workflow template names cannot carry a path** (PMSERV-271):
+  `pm_workflow_start(template=...)` joined the name into a file path, so an
+  absolute path or `../` read any `*.yaml` on disk and put its text in the
+  response and `.pm/workflows.yaml`. A name is now letters, digits, `.`, `_`
+  or `-`, and a template file that resolves outside its directory (a
+  symlink) is not loaded or listed.
 - **Ledgers that YAML aliases inflate are refused**: a ledger whose aliases
   (`*name`) would expand it past four times its size (at least 4 MiB) is not
   read. A few hundred bytes of nested aliases used to grow into tens of
