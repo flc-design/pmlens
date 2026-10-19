@@ -49,6 +49,7 @@ from .models import (
     RecordedTiming,
 )
 from .redaction import redact_secrets
+from .safe_yaml import UnreadableValueError
 
 # ─── Constants ───────────────────────────────────────
 
@@ -200,7 +201,7 @@ def lineage_header_name(decision_id: str) -> str:
 
 
 def error_summary(exc: BaseException) -> str:
-    """Describe an exception by type (and YAML position) without its text.
+    """Describe an exception without quoting its text.
 
     ``str(exc)`` quotes the offending YAML line or pydantic's ``input_value``,
     which can be a secret, so only the type name is used. A LedgerReadError
@@ -226,6 +227,8 @@ def error_summary(exc: BaseException) -> str:
         yaml_exc = exc.__cause__
     if yaml_exc is None:
         return type(exc).__name__
+    if isinstance(yaml_exc, UnreadableValueError):
+        return str(yaml_exc)  # names only the constructor's exception type
     mark = getattr(yaml_exc, "problem_mark", None)
     line = getattr(mark, "line", None)
     column = getattr(mark, "column", None)

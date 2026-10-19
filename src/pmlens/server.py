@@ -11,7 +11,9 @@ import os
 import re
 import uuid
 from collections import Counter
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import yaml
 from fastmcp import FastMCP
@@ -275,13 +277,34 @@ def _tool():
     return decorator
 
 
+# Modules whose exceptions can quote the text they were given: PyYAML's
+# constructors (an explicit !!int / !!float / !!bool tag that does not fit)
+# and pydantic.
+_PARSER_MODULES = ("yaml", "pydantic", "pydantic_core")
+
+
+def _raised_by_parser(exc: BaseException) -> bool:
+    """Whether ``exc`` was raised inside PyYAML or pydantic code."""
+    tb = exc.__traceback__
+    while tb is not None:
+        module = tb.tb_frame.f_globals.get("__name__", "")
+        if isinstance(module, str) and module.split(".", 1)[0] in _PARSER_MODULES:
+            return True
+        tb = tb.tb_next
+    return False
+
+
 def _raw_error_in_chain(exc: BaseException) -> bool:
-    """Whether a pydantic or YAML error is chained to ``exc`` where a traceback shows it."""
+    """Whether ``exc``, or an exception a traceback shows chained to it, may quote content.
+
+    That is a pydantic ValidationError, a YAML error, or anything raised inside
+    PyYAML or pydantic code.
+    """
     seen: set[int] = set()
     current: BaseException | None = exc
     while current is not None and id(current) not in seen:
         seen.add(id(current))
-        if isinstance(current, (ValidationError, yaml.YAMLError)):
+        if isinstance(current, (ValidationError, yaml.YAMLError)) or _raised_by_parser(current):
             return True
         if current.__cause__ is not None:
             current = current.__cause__
@@ -305,18 +328,24 @@ def _content_free_message(exc: BaseException) -> str | None:
     return f"{type(exc).__name__} while reading stored data"
 
 
-def _content_free_errors(fn):
-    """Wrap a tool so stored content never reaches its error text or log (PMSERV-266).
+def _content_free_errors(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Wrap a tool so a parser's error never reaches its error text or log (PMSERV-266).
 
-    The ledger loaders raise LedgerReadError, which quotes nothing. This is the
-    safety net for a path that still lets a pydantic ValidationError or a YAML
-    error escape, raised directly or chained: FastMCP sends an exception's text
-    to the client (fastmcp 3.x includes a ValidationError's input_value) and
-    logs its traceback with every chained exception. Such an error becomes a
-    ToolError with a content-free message, raised from None, which FastMCP
-    returns as written and logs without a traceback. Every other exception
-    passes through unchanged. Only the registered tool is wrapped; direct calls
-    (tests, the CLI) still see the original exceptions.
+    The loaders raise LedgerReadError, and stored YAML is read through
+    safe_yaml.safe_load; both quote nothing. This is the safety net for a path
+    that still lets a parser's error out: a pydantic ValidationError, a YAML
+    error, or any exception raised inside PyYAML or pydantic code, directly or
+    chained. FastMCP sends an exception's text to the client (fastmcp 3.x
+    includes a ValidationError's input_value) and logs its traceback with every
+    chained exception. Such an error becomes a ToolError with a content-free
+    message, raised from None, which FastMCP returns as written and logs
+    without a traceback.
+
+    Every other exception passes through unchanged. This is not a general
+    filter: tools report a bad argument with the ValueError of an enum lookup
+    (``'P9' is not a valid Priority``), and that text must reach the caller.
+    Only the registered tool is wrapped; direct calls (tests, the CLI) still
+    see the original exceptions.
     """
 
     def translate(exc: Exception) -> None:
@@ -327,7 +356,7 @@ def _content_free_errors(fn):
     if inspect.iscoroutinefunction(fn):
 
         @functools.wraps(fn)
-        async def async_wrapper(*args, **kwargs):
+        async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
             try:
                 return await fn(*args, **kwargs)
             except ToolError:
@@ -339,7 +368,7 @@ def _content_free_errors(fn):
         return async_wrapper
 
     @functools.wraps(fn)
-    def wrapper(*args, **kwargs):
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
         try:
             return fn(*args, **kwargs)
         except ToolError:
@@ -1134,9 +1163,10 @@ def _decision_ledger_warnings(pm_path: Path) -> list[dict]:
     reject the entire decisions.yaml over it, so the user needs to hear about
     it. Read-only: this never repairs the file.
 
-    Nothing from the file is quoted verbatim (PMSERV-258): a parse failure is
-    described by exception type and YAML line/column only (``str(exc)`` quotes
-    the offending line or pydantic's ``input_value``), and each listed id and
+    Nothing from the file is quoted verbatim (PMSERV-258, PMSERV-266): a load
+    failure is described by ``error_summary`` — the YAML line and column, or
+    which record and fields are invalid — never by ``str(exc)``, which quotes
+    the offending line or pydantic's ``input_value``; and each listed id and
     status is passed whole through ``redact_secrets``, then cut to 100
     characters. One scrub cache serves the list, so a value that a YAML alias
     repeats on every ADR is scanned once.
@@ -3163,7 +3193,7 @@ class _DraftDecisionIndex:
                 self._by_number.setdefault(number, []).append(adr)
 
     def unreadable(self) -> str | None:
-        """Why decisions.yaml could not be read (type and position only), or None."""
+        """Why decisions.yaml could not be read (a content-free summary), or None."""
         self._load()
         return self._unreadable
 
@@ -3804,8 +3834,8 @@ def pm_add_decision(
         # Checked before anything is written (a symlinked lineage directory).
         return {"status": "error", "code": refused.code, "message": str(refused)}
     if written.error == "decisions_yaml_unreadable":
-        # error_detail is the exception's type and YAML position only: its
-        # text could quote a secret from the broken file.
+        # error_detail is a content-free summary (error_summary): the
+        # exception text could quote a secret from the broken file.
         return {
             "status": "error",
             "code": written.error,

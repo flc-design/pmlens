@@ -38,14 +38,18 @@ def _list_to_json(items: list[str]) -> str:
 
 
 def _json_to_list(s: str | None) -> list[str]:
-    """Convert JSON string back to list (anything that is not a JSON list gives [])."""
+    """Convert JSON string back to list.
+
+    A JSON value that is not a list is returned as is, so the model rejects
+    the row (a LedgerReadError that quotes nothing) instead of reading it as
+    empty and letting the next save overwrite it.
+    """
     if not s:
         return []
     try:
-        value = json.loads(s)
+        return json.loads(s)
     except (json.JSONDecodeError, TypeError):
         return []
-    return value if isinstance(value, list) else []
 
 
 def _row_label(kind: str, row: sqlite3.Row) -> str:

@@ -4,10 +4,11 @@ A pydantic ``ValidationError`` quotes the offending value (``input_value``) and
 a YAML error quotes the offending line; either can be a secret. FastMCP sends
 an exception's text to the client and logs its traceback, chained exceptions
 included, and Lens read-only tools reach the same loaders. Loaders therefore
-raise :class:`LedgerReadError`, whose text is built only from what pmlens
-itself defines: the file name, a record's position, the model's field names
-and pydantic's error type codes. It is raised ``from None`` so the original
-exception is never printed.
+raise :class:`LedgerReadError`, whose text is built from the file name, a
+record's position, the model's field names and pydantic's error type codes,
+plus one piece of file content: the record's id, and only when it has the
+ASCII shape pmlens gives ids (``_RECORD_ID_RE``). It is raised ``from None`` so
+the original exception is never printed.
 """
 
 from __future__ import annotations
@@ -32,9 +33,11 @@ except ImportError:  # pragma: no cover - pydantic-core always ships it today
 _UNKNOWN_ERROR_TYPE = "invalid"
 # How many "field (type)" items a message lists before "and N more".
 _FIELDS_SHOWN = 5
-# A record id is file content, shown only when it has the shape pmlens gives
-# ids (PMSERV-012, ADR-007, KR-001, WF-045, R-001).
-_RECORD_ID_RE = re.compile(r"[A-Z][A-Z0-9]{0,15}-\d{1,6}")
+# A record id is file content, shown only when it has the common ASCII id shape
+# (PMSERV-012, ADR-007, KR-001, WF-045, RISK-001). Ids made from project names
+# with dots, spaces, a leading digit or non-ASCII letters are left out, as is
+# anything longer; [0-9], not \d, which also matches other scripts' digits.
+_RECORD_ID_RE = re.compile(r"[A-Z][A-Z0-9]{0,15}-[0-9]{1,6}")
 _SEQUENCE_ORIGINS = (list, tuple, set, frozenset, Sequence)
 
 M = TypeVar("M", bound=BaseModel)
@@ -169,9 +172,16 @@ def build_record(
 def build_records(model: type[M], items: object, file: str, key: str) -> list[M]:
     """Build every record of a ledger list (``tasks:``, ``decisions:`` ...).
 
+    An empty value (``tasks:``, ``tasks: {}``, ``tasks: ''``) holds no records
+    and reads as an empty list, as before; any other value that is not a list
+    is refused, so a writer never treats it as empty and overwrites it.
+
     Raises:
-        LedgerReadError: ``items`` is not a list, or a record cannot be built.
+        LedgerReadError: ``items`` is a non-empty value that is not a list, or
+            a record cannot be built.
     """
+    if items is None or (isinstance(items, (dict, str)) and not items):
+        return []
     if not isinstance(items, list):
         summary = f"{key!r} is not a list ({type(items).__name__})"
         raise LedgerReadError(f"{file}: {summary}", summary)

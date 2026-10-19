@@ -67,16 +67,17 @@ def _pick_from_registry() -> Path | None:
     """
     if os.environ.get("PM_LENS", "").lower() not in {"1", "true", "yes", "on"}:
         return None
-    try:
-        import yaml  # local import: registry path is the exception, not the rule
-    except ImportError:
-        return None
+    # Local import: storage imports this module. Its loader caps alias
+    # expansion and raises errors that quote nothing (PMSERV-266).
+    from .models import PmServerError
+    from .storage import _load_yaml
+
     registry_file = Path.home() / ".pm" / "registry.yaml"
     if not registry_file.exists():
         return None
     try:
-        data = yaml.safe_load(registry_file.read_text(encoding="utf-8")) or {}
-    except (OSError, yaml.YAMLError):
+        data = _load_yaml(registry_file) or {}
+    except (OSError, PmServerError):
         return None
     if not isinstance(data, dict):
         return None

@@ -2334,12 +2334,16 @@ _ALLOWED_IMPORTS = frozenset(
         ".ledger_errors",  # itself held to the same rules (test_ledger_errors_...)
         ".models",
         ".redaction",
+        ".safe_yaml",  # likewise
     }
 )
 # ledger_errors.py builds content-free messages from pydantic errors; it does
 # no I/O at all.
 _LEDGER_ERRORS_TREE = ast.parse(
     (Path(pmlens.__file__).parent / "ledger_errors.py").read_text(encoding="utf-8")
+)
+_SAFE_YAML_TREE = ast.parse(
+    (Path(pmlens.__file__).parent / "safe_yaml.py").read_text(encoding="utf-8")
 )
 _LEDGER_ERRORS_IMPORTS = frozenset(
     {
@@ -2488,6 +2492,10 @@ class TestModuleBoundary:
         # lineage.py imports it, so it is held to the same rules, with no os.
         assert _write_violations(_LEDGER_ERRORS_TREE, _LEDGER_ERRORS_IMPORTS) == []
         assert "os" not in _import_names(_LEDGER_ERRORS_TREE)
+
+    def test_safe_yaml_makes_no_write_calls(self):
+        allowed = frozenset({"__future__", "yaml"})
+        assert _write_violations(_SAFE_YAML_TREE, allowed) == []
 
     def test_os_open_is_one_read_only_call_in_the_bounded_reader(self):
         opens = []

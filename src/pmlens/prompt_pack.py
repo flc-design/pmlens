@@ -31,6 +31,7 @@ import yaml
 from jinja2 import ChoiceLoader, FileSystemLoader, select_autoescape
 from jinja2.sandbox import ImmutableSandboxedEnvironment
 
+from . import safe_yaml
 from .memory import MemoryStore, _has_pm_server_schema
 from .models import Decision, Memory, MemoryType, Project, SuggestedModel, Task, TaskStatus
 from .storage import load_decisions, load_project, load_tasks
@@ -67,7 +68,7 @@ def read_verify_commands(pm_path: Path) -> list[str]:
     if not project_yaml.exists():
         return []
     try:
-        data = yaml.safe_load(project_yaml.read_text(encoding="utf-8")) or {}
+        data = safe_yaml.safe_load(project_yaml.read_text(encoding="utf-8")) or {}
     except (OSError, yaml.YAMLError):
         return []
     # A project.yaml whose root is valid YAML but not a mapping (a list, bare

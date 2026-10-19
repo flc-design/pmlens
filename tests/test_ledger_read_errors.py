@@ -154,6 +154,11 @@ class TestBuildRecord:
             build_records(Task, {SECRET: 1}, "tasks.yaml", "tasks")
         assert str(caught.value) == "tasks.yaml: 'tasks' is not a list (dict)"
 
+    @pytest.mark.parametrize("empty", [None, {}, "", []])
+    def test_an_empty_value_still_reads_as_no_records(self, empty):
+        # tasks: / tasks: {} / tasks: '' hold nothing a writer could lose.
+        assert build_records(Task, empty, "tasks.yaml", "tasks") == []
+
     def test_fields_summary_reads_no_input(self):
         with pytest.raises(ValidationError) as caught:
             Task(id="T-1", title=[SECRET], phase="p")
@@ -255,6 +260,64 @@ def test_a_yaml_error_keeps_its_position_and_drops_the_line(tmp_pm_path: Path):
     assert error_summary(caught.value).startswith("ScannerError at line ")
 
 
+_TAGS = ["!!int", "!!float", "!!bool", "!!timestamp"]
+
+
+@pytest.mark.parametrize("tag", _TAGS)
+def test_an_explicit_tag_that_does_not_fit_quotes_nothing(tmp_pm_path: Path, tag):
+    # PyYAML's constructor raises a plain ValueError / KeyError that quotes
+    # the value, not a YAMLError, so `except yaml.YAMLError` missed it.
+    (tmp_pm_path / "tasks.yaml").write_text(
+        f"tasks:\n- id: T-1\n  title: {tag} {SECRET}\n  phase: p\n", encoding="utf-8"
+    )
+    with pytest.raises(LedgerReadError) as caught:
+        load_tasks(tmp_pm_path)
+    _assert_content_free(caught.value, "tasks.yaml")
+    assert str(caught.value).startswith("Failed to parse tasks.yaml: a value could not be read (")
+    assert error_summary(caught.value) == caught.value.summary
+
+
+def test_safe_yaml_still_refuses_python_tags():
+    from pmlens.safe_yaml import safe_load
+
+    with pytest.raises(yaml.YAMLError):
+        safe_load("x: !!python/object/apply:os.getpid []\n")
+    assert safe_load("x: !!int 3\n") == {"x": 3}
+
+
+@pytest.mark.parametrize("tag", _TAGS)
+def test_other_yaml_readers_tolerate_a_bad_tag_quietly(tmp_project: Path, monkeypatch, tag):
+    from pmlens.auto_memory import _split_frontmatter
+    from pmlens.prompt_pack import read_verify_commands
+    from pmlens.redaction import load_redaction_config
+    from pmlens.utils import _pick_from_registry
+
+    pm = tmp_project / ".pm"
+    (pm / "redaction.yaml").write_text(f"deny:\n- {tag} {SECRET}\n", encoding="utf-8")
+    assert load_redaction_config(pm)["deny"] == []
+    (pm / "project.yaml").write_text(
+        f"name: p\nverify_commands: {tag} {SECRET}\n", encoding="utf-8"
+    )
+    assert read_verify_commands(pm) == []
+    text = f"---\nname: {tag} {SECRET}\n---\nbody\n"
+    assert _split_frontmatter(text) == ({}, text)
+    # Lens auto-picks the only registered project through the registry.
+    registry = Path.home() / ".pm" / "registry.yaml"
+    registry.parent.mkdir(parents=True, exist_ok=True)
+    registry.write_text(
+        f"projects:\n- path: {tmp_project}\n  name: {tag} {SECRET}\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("PM_LENS", "1")
+    assert _pick_from_registry() is None
+
+
+def test_id_suffixes_count_only_ascii_digits():
+    from pmlens.storage import _next_number_from_ids
+
+    # int("²") raises a ValueError that quotes the stored id.
+    assert _next_number_from_ids(["X-²", "X-3", "X-٤"]) == 4
+
+
 def test_alias_expansion_refusal_has_a_summary(tmp_pm_path: Path):
     bomb = "a0: &a0 [x, x, x, x, x, x, x, x, x]\n" + "".join(
         f"a{i}: &a{i} [" + ", ".join([f"*a{i - 1}"] * 9) + "]\n" for i in range(1, 8)
@@ -291,10 +354,25 @@ def test_a_stored_memory_with_an_unknown_type_quotes_nothing(tmp_project: Path):
     _assert_content_free(caught.value, "memory.db")
 
 
-def test_json_lists_that_are_not_lists_read_as_empty():
-    assert _json_to_list(json.dumps({"a": SECRET})) == []
-    assert _json_to_list(json.dumps(SECRET)) == []
-    assert _json_to_list(json.dumps(["x"])) == ["x"]
+def test_json_that_is_not_a_list_is_refused_not_emptied(tmp_project: Path):
+    # Read as [] it would let the next pm_session_summary save overwrite the
+    # row without the pending-dropped warning; refused, the save stops first.
+    _write(tmp_project / ".pm" / "project.yaml", {"name": "p"})
+    saved = srv.pm_session_summary(
+        summary="s1", pending="finish X, ship Y", project_path=str(tmp_project)
+    )
+    assert saved["status"] == "saved"
+    db = tmp_project / ".pm" / "memory.db"
+    for stored in (json.dumps(SECRET), json.dumps({"a": SECRET})):
+        with closing(sqlite3.connect(db)) as conn, conn:
+            conn.execute("UPDATE session_summaries SET pending = ?", (stored,))
+        with pytest.raises(LedgerReadError) as caught:
+            srv.pm_session_summary(summary="s2", pending="", project_path=str(tmp_project))
+        assert str(caught.value).startswith("memory.db: ValidationError in session summary ")
+        _assert_content_free(caught.value, "memory.db")
+        with closing(sqlite3.connect(db)) as conn:
+            assert conn.execute("SELECT pending FROM session_summaries").fetchall() == [(stored,)]
+    assert _json_to_list("not json") == []
 
 
 # ─── the MCP boundary: response and log ──────────────
@@ -355,6 +433,52 @@ def test_tools_report_a_broken_record_without_its_value(tmp_project, captured_lo
     assert "tasks.yaml: ValidationError in record 1 (PMSERV-001): title (string_type)" in text
     assert SECRET not in text
     assert SECRET not in captured_log.text
+
+
+@pytest.mark.parametrize("tag", _TAGS)
+@pytest.mark.parametrize(("tool", "extra"), _LENS_READS)
+def test_tools_report_a_bad_tag_without_the_value(tmp_project, captured_log, tool, extra, tag):
+    _write(tmp_project / ".pm" / "project.yaml", {"name": "p"})
+    (tmp_project / ".pm" / "tasks.yaml").write_text(
+        f"tasks:\n- id: T-1\n  title: {tag} {SECRET}\n  phase: p\n", encoding="utf-8"
+    )
+
+    is_error, text = _call(tool, {"project_path": str(tmp_project), **extra})
+
+    assert is_error is True, text
+    assert "Failed to parse tasks.yaml: a value could not be read (" in text
+    assert SECRET not in text and SECRET.lower() not in text
+    assert SECRET not in captured_log.text and SECRET.lower() not in captured_log.text
+
+
+def test_the_safety_net_catches_an_error_raised_inside_pyyaml(
+    tmp_project, captured_log, monkeypatch
+):
+    # A reader that calls yaml.safe_load directly (not safe_yaml) and lets the
+    # constructor's ValueError out.
+    def broken(_pm_path):
+        return yaml.safe_load(f"x: !!int {SECRET}")
+
+    monkeypatch.setattr(srv, "load_tasks", broken)
+
+    is_error, text = _call("pm_tasks", {"project_path": str(tmp_project)})
+
+    assert is_error is True, text
+    assert "ValueError while reading stored data" in text
+    assert SECRET not in text
+    assert SECRET not in captured_log.text
+
+
+def test_argument_errors_keep_their_text(tmp_project):
+    # The net is not a general filter: an enum lookup on a bad argument tells
+    # the caller what it sent.
+    _write(tmp_project / ".pm" / "project.yaml", {"name": "p"})
+    is_error, text = _call(
+        "pm_add_task",
+        {"title": "t", "phase": "phase-1", "priority": "P9", "project_path": str(tmp_project)},
+    )
+    assert is_error is True
+    assert "'P9' is not a valid Priority" in text
 
 
 @pytest.mark.parametrize(("tool", "extra"), _LENS_READS)
@@ -502,3 +626,93 @@ def test_project_detection_keeps_only_text_values(tmp_path: Path):
     result = srv.pm_init(project_path=str(root))
     assert result["status"] == "initialized"
     assert SECRET not in json.dumps(result)
+
+
+# ─── production entry points: a real server process and the CLI ──────
+
+
+def _broken_projects(root: Path) -> list[Path]:
+    """One project per kind of broken tasks.yaml, each carrying SECRET."""
+    kinds = {
+        "validation": f"tasks:\n- id: PMSERV-001\n  title: [{SECRET}]\n  phase: p\n",
+        "syntax": f'tasks:\n- id: T-1\n  title: "{SECRET} never closed\n',
+        "tag": f"tasks:\n- id: T-1\n  title: !!int {SECRET}\n  phase: p\n",
+    }
+    projects = []
+    for kind, text in kinds.items():
+        project = root / kind
+        _write(project / ".pm" / "project.yaml", {"name": kind})
+        (project / ".pm" / "tasks.yaml").write_text(text, encoding="utf-8")
+        projects.append(project)
+    return projects
+
+
+@pytest.mark.parametrize("lens", ["0", "1"])
+def test_a_real_server_process_keeps_stored_values_out(tmp_path: Path, lens):
+    # The in-process tests stand in for stderr with a logging handler; this
+    # runs `pmlens serve` as Claude Code and Desktop do, with FastMCP's own
+    # stderr handler, in full and Lens mode.
+    import os
+    import sys
+
+    from fastmcp.client.transports import StdioTransport
+
+    projects = _broken_projects(tmp_path / "projects")
+    log = tmp_path / "server.stderr"
+    env = {**os.environ, "PM_LENS": lens}
+
+    async def run() -> list[tuple[bool, str]]:
+        results = []
+        with log.open("w", encoding="utf-8") as stderr:
+            transport = StdioTransport(
+                command=sys.executable,
+                args=["-m", "pmlens", "serve"],
+                env=env,
+                cwd=str(tmp_path),
+                log_file=stderr,
+            )
+            async with Client(transport) as client:
+                for project in projects:
+                    for tool in ("pm_tasks", "pm_status"):
+                        result = await client.call_tool(
+                            tool, {"project_path": str(project)}, raise_on_error=False
+                        )
+                        text = " ".join(getattr(c, "text", "") for c in result.content)
+                        results.append((result.is_error, text))
+        return results
+
+    results = asyncio.run(run())
+
+    assert len(results) == 6
+    for is_error, text in results:
+        assert is_error is True, text
+        assert "tasks.yaml" in text
+        assert SECRET.lower() not in text.lower()
+    assert SECRET.lower() not in log.read_text(encoding="utf-8").lower()
+
+
+def test_cli_commands_print_no_stored_values(tmp_path: Path):
+    import subprocess
+    import sys
+
+    for project in _broken_projects(tmp_path / "projects"):
+        status = subprocess.run(
+            [sys.executable, "-m", "pmlens", "status"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            cwd=project,
+        )
+        assert status.returncode != 0
+        assert SECRET.lower() not in (status.stdout + status.stderr).lower()
+
+        payload = {"tool_input": {"command": "git commit -m x"}, "cwd": str(project)}
+        hook = subprocess.run(
+            [sys.executable, "-m", "pmlens", "hook", "post-tool-use"],
+            input=json.dumps(payload),
+            capture_output=True,
+            text=True,
+            timeout=60,
+            cwd=project,
+        )
+        assert SECRET.lower() not in (hook.stdout + hook.stderr).lower()

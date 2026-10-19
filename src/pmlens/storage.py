@@ -52,6 +52,7 @@ from filelock import Timeout as FileLockTimeout
 from pydantic import BaseModel
 
 from . import lineage as _lineage
+from . import safe_yaml as _safe_yaml
 from .ledger_errors import LedgerReadError, build_record, build_records
 from .lineage import LineageChange, LineageWriteRefused
 from .models import (
@@ -162,7 +163,7 @@ def _load_yaml(path: Path) -> dict | list | None:
         return None
     text = path.read_text(encoding="utf-8")
     try:
-        data = yaml.safe_load(text)
+        data = _safe_yaml.safe_load(text)
     except yaml.YAMLError as e:
         # Position only: str(e) quotes the offending line, which can be a secret.
         # from None: FastMCP logs a tool's traceback with its chained exceptions.
@@ -372,11 +373,15 @@ def _with_sibling_keys(path: Path, list_key: str, items: list[dict]) -> dict:
 
 
 def _next_number_from_ids(ids: Iterable[str]) -> int:
-    """Return max(numeric id suffix) + 1, or 1 when there is none."""
+    """Return max(numeric id suffix) + 1, or 1 when there is none.
+
+    Only ASCII digits count: ``"²".isdigit()`` is True but ``int("²")`` raises
+    a ValueError that quotes the stored id (PMSERV-266).
+    """
     numbers = []
     for item_id in ids:
         parts = item_id.rsplit("-", 1)
-        if len(parts) == 2 and parts[1].isdigit():
+        if len(parts) == 2 and parts[1].isascii() and parts[1].isdigit():
             numbers.append(int(parts[1]))
     return max(numbers, default=0) + 1
 
@@ -649,8 +654,9 @@ class DecisionWrite:
         decision: The appended ADR, or ``None`` when ``error`` is set.
         error: ``decision_id_exhausted`` or ``decisions_yaml_unreadable``
             (nothing written in either case), else ``None``.
-        error_detail: For ``decisions_yaml_unreadable``, the exception's type
-            and YAML position (:func:`lineage.error_summary`), never its text.
+        error_detail: For ``decisions_yaml_unreadable``, a content-free
+            summary (:func:`lineage.error_summary`): the YAML position, or which
+            record and fields are invalid; never the exception text.
         lineage_state: ``written``; ``not_written`` (checking for or writing
             the lineage failed with an OS error — the ADR is saved without a
             lineage); or ``preexisting`` (a file was already there and was
@@ -801,8 +807,7 @@ def add_decision_with_lineage(
         The write result; ``error="decision_id_exhausted"`` when the next
         number would exceed 999,999, and ``error="decisions_yaml_unreadable"``
         when decisions.yaml cannot be loaded (described in ``error_detail`` by
-        exception type and YAML position only). Nothing is written in either
-        case.
+        a content-free summary). Nothing is written in either case.
 
     Raises:
         LineageWriteRefused: ``.pm/decision_lineage`` is a symbolic link
@@ -818,7 +823,7 @@ def add_decision_with_lineage(
     with _yaml_transaction(pm_path, "decisions.yaml"):
         try:
             decisions = load_decisions(pm_path)
-        except Exception as exc:  # noqa: BLE001 - reported by type only, never quoted
+        except Exception as exc:  # noqa: BLE001 - reported as a content-free summary
             # str(exc) would quote the offending YAML line or pydantic's
             # input_value, which can be a secret (design §4, D11).
             return DecisionWrite(
@@ -996,8 +1001,7 @@ def change_decision_lineage(
     Returns:
         The result. Expected failures come back as ``status="error"`` with
         nothing written; that includes a decisions.yaml that cannot be loaded
-        (``decisions_yaml_unreadable``, described by exception type and YAML
-        position only).
+        (``decisions_yaml_unreadable``, described by a content-free summary).
 
     Raises:
         PmServerError: A lock timed out, or the projected status is not one of
@@ -1015,7 +1019,7 @@ def change_decision_lineage(
     with _yaml_transaction(pm_path, "decisions.yaml"):
         try:
             decisions = load_decisions(pm_path)
-        except Exception as exc:  # noqa: BLE001 - reported by type only, never quoted
+        except Exception as exc:  # noqa: BLE001 - reported as a content-free summary
             # str(exc) would quote the offending YAML line or pydantic's
             # input_value, which can be a secret (design §4, D11).
             return LineageChangeResult(
@@ -1207,12 +1211,7 @@ def next_risk_number(pm_path: Path) -> int:
     risks = load_risks(pm_path)
     if not risks:
         return 1
-    numbers = []
-    for r in risks:
-        parts = r.id.rsplit("-", 1)
-        if len(parts) == 2 and parts[1].isdigit():
-            numbers.append(int(parts[1]))
-    return max(numbers, default=0) + 1
+    return _next_number_from_ids(r.id for r in risks)
 
 
 # ─── Knowledge Records ──────────────────────────────

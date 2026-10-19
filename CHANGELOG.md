@@ -132,11 +132,24 @@ aliases); Lens 17, or 19 with Desktop outbox writes. Test suite: 2,493 passing.
   redacted text. A BEGIN line named in prose is still removed alone. Redaction
   reports carry `catalog_version: 3`. Drafts and memories redacted before this
   release need a look: see the upgrade notes.
-- **Ledgers no longer echo their contents in parse errors**: a YAML syntax
-  error in any `.pm` ledger (tasks, decisions, knowledge, …) is reported as
-  the error type and its line and column, not the offending text, which could
-  quote a secret — including through Lens read tools such as `pm_tasks` and
-  `pm_dashboard`.
+- **Stored data no longer leaks through error messages and logs**
+  (PMSERV-266). A broken record in any `.pm` ledger, `~/.pm/registry.yaml`, a
+  workflow template, a `memory.db` row or a Desktop outbox entry used to raise
+  an error that quoted the stored value (pydantic's `input_value`, the YAML
+  line, or the value of an explicit `!!int` / `!!float` / `!!bool` tag).
+  FastMCP returned that text to the client under fastmcp 3.x and printed it,
+  with every chained exception, on stderr under 3.x and 4.x — through Lens
+  read tools such as `pm_tasks`, `pm_status` and `pm_dashboard` too. The
+  error now names the file, the record's position, its id when it has the
+  usual shape, the invalid fields and pydantic's error types, e.g.
+  `tasks.yaml: ValidationError in record 3 (PMSERV-012): title (string_type)`;
+  a YAML syntax error gives its line and column. Registered tools also turn
+  any parser error that still escapes into such a message.
+- **Prompt-pack templates are rendered in a sandbox** (PMSERV-270): a
+  `.pm/prompt-templates/prompt_pack.html` that came with a repository could
+  run Python (for example through `cycler.__init__.__globals__`) when
+  `pm_prompt_pack(format="html")` or `pmlens prompt-pack --format html` ran.
+  The bundled template renders exactly as before.
 - **Ledgers that YAML aliases inflate are refused**: a ledger whose aliases
   (`*name`) would expand it past four times its size (at least 4 MiB) is not
   read. A few hundred bytes of nested aliases used to grow into tens of
@@ -153,9 +166,21 @@ aliases); Lens 17, or 19 with Desktop outbox writes. Test suite: 2,493 passing.
 - **Redaction ran in quadratic time on long runs without spaces**: the email,
   JWT and GCP service-account patterns retried every character of such a run;
   every pattern now takes time linear in the text.
-- `pm_add_decision` reports an unreadable `decisions.yaml` by exception type
-  and position only; it used to return the exception text, which can quote a
-  secret from the broken line.
+- `pm_add_decision` reports an unreadable `decisions.yaml` by a summary that
+  quotes nothing from the file; it used to return the exception text, which
+  can quote a secret from the broken line.
+- A ledger record that fails validation is reported as a tool error naming the
+  file, record and fields; fastmcp 4 reported it as JSON-RPC -32602 "Invalid
+  request parameters", as if the caller's arguments were wrong (PMSERV-266).
+- `pm_init` keeps only text values for the name, version and description it
+  detects from `package.json`, `pyproject.toml` or `Cargo.toml`; a list,
+  table or number used to stop it with a validation error (PMSERV-266).
+- An empty ledger list written as `tasks:` (null) reads as no records instead
+  of failing; a non-empty value that is not a list is refused with the file
+  and key named, never treated as empty (PMSERV-266).
+- `pm_outbox_merge` reports an outbox entry that cannot become a memory with
+  the warning reason `outbox_entry_invalid` and goes on with the rest
+  (PMSERV-266).
 - `prompt_pack` refuses an output path inside a project's
   `.pm/decision_lineage/` (checked as written and resolved, and again against
   the project before writing); a `decision_lineage` directory outside `.pm/`
