@@ -52,6 +52,7 @@ from filelock import Timeout as FileLockTimeout
 from pydantic import BaseModel
 
 from . import lineage as _lineage
+from .ledger_errors import LedgerReadError, build_record, build_records
 from .lineage import LineageChange, LineageWriteRefused
 from .models import (
     DailyLog,
@@ -164,15 +165,18 @@ def _load_yaml(path: Path) -> dict | list | None:
         data = yaml.safe_load(text)
     except yaml.YAMLError as e:
         # Position only: str(e) quotes the offending line, which can be a secret.
-        raise PmServerError(f"Failed to parse {path.name}: {_lineage.error_summary(e)}") from e
+        # from None: FastMCP logs a tool's traceback with its chained exceptions.
+        summary = _lineage.error_summary(e)
+        raise LedgerReadError(f"Failed to parse {path.name}: {summary}", summary) from None
     limit = max(_EXPANSION_FLOOR, _EXPANSION_FACTOR * len(text))
     try:
         _expanded_size(data, limit)
     except _ExpansionLimitError:
-        raise PmServerError(
-            f"{path.name} grows past {limit} characters once its YAML aliases (*name) "
-            "are expanded; replace the aliases with plain values"
-        ) from None
+        summary = (
+            f"grows past {limit} characters once its YAML aliases (*name) are expanded; "
+            "replace the aliases with plain values"
+        )
+        raise LedgerReadError(f"{path.name} {summary}", summary) from None
     return data
 
 
@@ -396,7 +400,7 @@ def load_project(pm_path: Path) -> Project:
     data = _load_yaml(pm_path / "project.yaml")
     if data is None:
         return Project(name=pm_path.parent.name)
-    return Project(**data)
+    return build_record(Project, data, "project.yaml")
 
 
 def _save_project(pm_path: Path, project: Project) -> None:
@@ -452,7 +456,7 @@ def load_tasks(pm_path: Path) -> list[Task]:
     data = _load_yaml(pm_path / "tasks.yaml")
     if data is None or not isinstance(data, dict) or "tasks" not in data:
         return []
-    return [Task(**t) for t in data["tasks"]]
+    return build_records(Task, data["tasks"], "tasks.yaml", "tasks")
 
 
 def _save_tasks(pm_path: Path, tasks: list[Task]) -> None:
@@ -542,7 +546,7 @@ def load_decisions(pm_path: Path) -> list[Decision]:
     data = _load_yaml(pm_path / "decisions.yaml")
     if data is None or not isinstance(data, dict) or "decisions" not in data:
         return []
-    return [Decision(**d) for d in data["decisions"]]
+    return build_records(Decision, data["decisions"], "decisions.yaml", "decisions")
 
 
 def _save_decisions(pm_path: Path, decisions: list[Decision]) -> None:
@@ -1148,7 +1152,7 @@ def load_milestones(pm_path: Path) -> list[Milestone]:
     data = _load_yaml(pm_path / "milestones.yaml")
     if data is None or not isinstance(data, dict) or "milestones" not in data:
         return []
-    return [Milestone(**m) for m in data["milestones"]]
+    return build_records(Milestone, data["milestones"], "milestones.yaml", "milestones")
 
 
 def _save_milestones(pm_path: Path, milestones: list[Milestone]) -> None:
@@ -1177,7 +1181,7 @@ def load_risks(pm_path: Path) -> list[Risk]:
     data = _load_yaml(pm_path / "risks.yaml")
     if data is None or not isinstance(data, dict) or "risks" not in data:
         return []
-    return [Risk(**r) for r in data["risks"]]
+    return build_records(Risk, data["risks"], "risks.yaml", "risks")
 
 
 def _save_risks(pm_path: Path, risks: list[Risk]) -> None:
@@ -1219,7 +1223,7 @@ def load_knowledge(pm_path: Path) -> list[KnowledgeRecord]:
     data = _load_yaml(pm_path / "knowledge.yaml")
     if data is None or not isinstance(data, dict) or "knowledge" not in data:
         return []
-    return [KnowledgeRecord(**k) for k in data["knowledge"]]
+    return build_records(KnowledgeRecord, data["knowledge"], "knowledge.yaml", "knowledge")
 
 
 def _save_knowledge(pm_path: Path, records: list[KnowledgeRecord]) -> None:
@@ -1288,7 +1292,7 @@ def load_daily_log(pm_path: Path, log_date: _dt.date | None = None) -> DailyLog:
     data = _load_yaml(log_file)
     if data is None:
         return DailyLog(date=log_date)
-    return DailyLog(**data)
+    return build_record(DailyLog, data, f"daily/{log_file.name}")
 
 
 def add_daily_log(
@@ -1316,7 +1320,7 @@ def load_registry(registry_dir: Path | None = None) -> Registry:
     data = _load_yaml(registry_dir / "registry.yaml")
     if data is None:
         return Registry()
-    return Registry(**data)
+    return build_record(Registry, data, "registry.yaml")
 
 
 def _save_registry(registry: Registry, registry_dir: Path | None = None) -> None:
@@ -1401,7 +1405,7 @@ def load_workflows(pm_path: Path) -> list[Workflow]:
     data = _load_yaml(pm_path / "workflows.yaml")
     if data is None or not isinstance(data, dict) or "workflows" not in data:
         return []
-    return [Workflow(**w) for w in data["workflows"]]
+    return build_records(Workflow, data["workflows"], "workflows.yaml", "workflows")
 
 
 def _save_workflows(pm_path: Path, workflows: list[Workflow]) -> None:
@@ -1470,14 +1474,14 @@ def load_workflow_template(name: str, pm_path: Path | None = None) -> WorkflowTe
         if custom_path.exists():
             data = _load_yaml(custom_path)
             if data:
-                return _parse_workflow_template(data)
+                return _parse_workflow_template(data, f"workflow_templates/{custom_path.name}")
 
     # Built-in template
     builtin_path = BUILTIN_TEMPLATES_DIR / f"{name}.yaml"
     if builtin_path.exists():
         data = _load_yaml(builtin_path)
         if data:
-            return _parse_workflow_template(data)
+            return _parse_workflow_template(data, builtin_path.name)
 
     raise PmServerError(f"Workflow template '{name}' not found")
 
@@ -1496,7 +1500,7 @@ def list_workflow_templates(pm_path: Path | None = None) -> list[dict]:
                 seen.add(name)
                 data = _load_yaml(f)
                 if data:
-                    tmpl = _parse_workflow_template(data)
+                    tmpl = _parse_workflow_template(data, f"workflow_templates/{f.name}")
                     templates.append(
                         {
                             "name": name,
@@ -1515,7 +1519,7 @@ def list_workflow_templates(pm_path: Path | None = None) -> list[dict]:
                 continue  # custom overrides built-in
             data = _load_yaml(f)
             if data:
-                tmpl = _parse_workflow_template(data)
+                tmpl = _parse_workflow_template(data, f.name)
                 templates.append(
                     {
                         "name": name,
@@ -1529,12 +1533,25 @@ def list_workflow_templates(pm_path: Path | None = None) -> list[dict]:
     return templates
 
 
-def _parse_workflow_template(data: dict) -> WorkflowTemplate:
-    """Parse raw YAML data into a WorkflowTemplate."""
-    steps = [WorkflowStep(**s) for s in data.get("steps", [])]
-    return WorkflowTemplate(
-        name=data.get("name", ""),
-        description=data.get("description", ""),
-        chain_to=data.get("chain_to"),
-        steps=steps,
+def _parse_workflow_template(data: object, file: str) -> WorkflowTemplate:
+    """Parse raw YAML data into a WorkflowTemplate.
+
+    Args:
+        data: The loaded template document.
+        file: The template's file name, for error messages (which quote nothing
+            from the file; PMSERV-266).
+    """
+    if not isinstance(data, dict):
+        summary = f"the document is not a mapping ({type(data).__name__})"
+        raise LedgerReadError(f"{file}: {summary}", summary)
+    steps = build_records(WorkflowStep, data.get("steps", []), file, "steps")
+    return build_record(
+        WorkflowTemplate,
+        {
+            "name": data.get("name", ""),
+            "description": data.get("description", ""),
+            "chain_to": data.get("chain_to"),
+            "steps": steps,
+        },
+        file,
     )

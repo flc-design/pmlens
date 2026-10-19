@@ -1225,12 +1225,21 @@ def migrate_from_pm_agent():
 
     # 4. CLAUDE.md 内の pm-agent 言及を警告
     if registry_path.exists():
-        import yaml
+        from .lineage import error_summary
+        from .models import PmServerError
+        from .storage import _load_yaml
 
-        data = yaml.safe_load(registry_path.read_text()) or {}
-        projects = data.get("projects", [])
-        for proj in projects:
-            proj_path = proj.get("path", "")
+        try:
+            # The loader checks alias expansion and quotes no file content.
+            data = _load_yaml(registry_path)
+        except PmServerError as exc:
+            print(f"⚠ Could not read {registry_path}: {error_summary(exc)}")
+            data = None
+        projects = data.get("projects", []) if isinstance(data, dict) else []
+        for proj in projects if isinstance(projects, list) else []:
+            proj_path = proj.get("path", "") if isinstance(proj, dict) else ""
+            if not isinstance(proj_path, str) or not proj_path:
+                continue
             claude_md = Path(proj_path) / "CLAUDE.md"
             if claude_md.exists():
                 content = claude_md.read_text()

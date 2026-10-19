@@ -251,7 +251,11 @@ class TestWriteSideAndSurfacing:
         text, codes = self._warnings_text(tmp_path)
 
         assert self._SECRET not in text
-        assert codes["decisions_yaml_unreadable"]["message"].endswith(": ValidationError")
+        # Record position, id and field name, never the value (PMSERV-266).
+        assert codes["decisions_yaml_unreadable"]["message"] == (
+            "decisions.yaml could not be read: "
+            "ValidationError in record 1 (ADR-001): title (string_type)"
+        )
 
     def test_unknown_status_is_cut_and_redacted(self, tmp_path: Path, sample_project):
         pm_path = self._project(tmp_path, sample_project)

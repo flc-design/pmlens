@@ -13,6 +13,7 @@ import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .ledger_errors import LedgerReadError, build_record
 from .models import Memory, MemoryType, SessionSummary
 
 # ─── Tag helpers ────────────────────────────────────
@@ -37,13 +38,22 @@ def _list_to_json(items: list[str]) -> str:
 
 
 def _json_to_list(s: str | None) -> list[str]:
-    """Convert JSON string back to list."""
+    """Convert JSON string back to list (anything that is not a JSON list gives [])."""
     if not s:
         return []
     try:
-        return json.loads(s)
+        value = json.loads(s)
     except (json.JSONDecodeError, TypeError):
         return []
+    return value if isinstance(value, list) else []
+
+
+def _row_label(kind: str, row: sqlite3.Row) -> str:
+    """Name a stored row by its integer id only (its other columns are content)."""
+    row_id = row["id"]
+    if isinstance(row_id, int) and not isinstance(row_id, bool):
+        return f"{kind} {row_id}"
+    return kind
 
 
 # ─── FTS5 query helpers ──────────────────────────
@@ -1077,17 +1087,39 @@ class MemoryStore:
 
     @staticmethod
     def _row_to_memory(row: sqlite3.Row) -> Memory:
-        """Convert a database row to a Memory model."""
-        return Memory(
-            id=row["id"],
-            session_id=row["session_id"],
-            type=MemoryType(row["type"]),
-            content=row["content"],
-            task_id=row["task_id"],
-            decision_id=row["decision_id"],
-            tags=_str_to_tags(row["tags"]),
-            created_at=row["created_at"],
-            project=row["project"],
+        """Convert a database row to a Memory model.
+
+        Raises:
+            LedgerReadError: The row cannot be converted; the message names the
+                row by its id and quotes none of its values (PMSERV-266).
+        """
+        label = _row_label("memory", row)
+        try:
+            memory_type = MemoryType(row["type"])
+        except ValueError:
+            # The enum's own message quotes the stored value.
+            summary = f"{label} has an unknown type"
+            raise LedgerReadError(f"memory.db: {summary}", summary) from None
+        try:
+            tags = _str_to_tags(row["tags"])
+        except (AttributeError, TypeError):
+            summary = f"{label} has tags that are not text"
+            raise LedgerReadError(f"memory.db: {summary}", summary) from None
+        return build_record(
+            Memory,
+            {
+                "id": row["id"],
+                "session_id": row["session_id"],
+                "type": memory_type,
+                "content": row["content"],
+                "task_id": row["task_id"],
+                "decision_id": row["decision_id"],
+                "tags": tags,
+                "created_at": row["created_at"],
+                "project": row["project"],
+            },
+            "memory.db",
+            label=label,
         )
 
     @staticmethod
@@ -1100,18 +1132,23 @@ class MemoryStore:
         """
         updated_at = row["updated_at"] if "updated_at" in row.keys() else None
         branch = (row["branch"] if "branch" in row.keys() else None) or ""
-        return SessionSummary(
-            id=row["id"],
-            session_id=row["session_id"],
-            summary=row["summary"],
-            goals=row["goals"] or "",
-            tasks_done=_json_to_list(row["tasks_done"]),
-            decisions=_json_to_list(row["decisions"]),
-            pending=_json_to_list(row["pending"]),
-            created_at=row["created_at"],
-            updated_at=updated_at or row["created_at"],
-            project=row["project"],
-            branch=branch,
+        return build_record(
+            SessionSummary,
+            {
+                "id": row["id"],
+                "session_id": row["session_id"],
+                "summary": row["summary"],
+                "goals": row["goals"] or "",
+                "tasks_done": _json_to_list(row["tasks_done"]),
+                "decisions": _json_to_list(row["decisions"]),
+                "pending": _json_to_list(row["pending"]),
+                "created_at": row["created_at"],
+                "updated_at": updated_at or row["created_at"],
+                "project": row["project"],
+                "branch": branch,
+            },
+            "memory.db",
+            label=_row_label("session summary", row),
         )
 
     # ─── Global cross-project sync ──────────────────

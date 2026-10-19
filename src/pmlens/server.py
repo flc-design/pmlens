@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import datetime as _dt
 import fnmatch
+import functools
+import inspect
 import json
 import os
 import re
@@ -11,7 +13,10 @@ import uuid
 from collections import Counter
 from pathlib import Path
 
+import yaml
 from fastmcp import FastMCP
+from fastmcp.exceptions import ToolError
+from pydantic import ValidationError
 
 from . import __version__
 from . import lineage as _lineage
@@ -32,6 +37,7 @@ from .draft_store import (
     get_draft_store,
     normalize_source_refs,
 )
+from .ledger_errors import LedgerReadError, build_record, safe_validation_message
 from .lineage import ScrubCache, error_summary, scrub_label
 from .memory import MemoryStore, SearchDiagnostics, _has_pm_server_schema
 from .models import (
@@ -263,9 +269,86 @@ def _tool():
                 if not (PM_DESKTOP_WRITE_ENABLED and tool_name in OUTBOX_WRITE_ALLOWLIST):
                     return fn
         REGISTERED_TOOLS.add(tool_name)
-        return mcp.tool()(fn)
+        mcp.tool()(_content_free_errors(fn))
+        return fn
 
     return decorator
+
+
+def _raw_error_in_chain(exc: BaseException) -> bool:
+    """Whether a pydantic or YAML error is chained to ``exc`` where a traceback shows it."""
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, (ValidationError, yaml.YAMLError)):
+            return True
+        if current.__cause__ is not None:
+            current = current.__cause__
+        elif not current.__suppress_context__:
+            current = current.__context__
+        else:
+            current = None
+    return False
+
+
+def _content_free_message(exc: BaseException) -> str | None:
+    """A message for ``exc`` that quotes no stored content, or None if it needs none."""
+    if isinstance(exc, ValidationError):
+        return safe_validation_message(exc)
+    if isinstance(exc, yaml.YAMLError):
+        return f"A file could not be parsed: {error_summary(exc)}"
+    if not _raw_error_in_chain(exc):
+        return None
+    if isinstance(exc, PmServerError):
+        return str(exc)  # pmlens's own wording; only the chained error is dropped
+    return f"{type(exc).__name__} while reading stored data"
+
+
+def _content_free_errors(fn):
+    """Wrap a tool so stored content never reaches its error text or log (PMSERV-266).
+
+    The ledger loaders raise LedgerReadError, which quotes nothing. This is the
+    safety net for a path that still lets a pydantic ValidationError or a YAML
+    error escape, raised directly or chained: FastMCP sends an exception's text
+    to the client (fastmcp 3.x includes a ValidationError's input_value) and
+    logs its traceback with every chained exception. Such an error becomes a
+    ToolError with a content-free message, raised from None, which FastMCP
+    returns as written and logs without a traceback. Every other exception
+    passes through unchanged. Only the registered tool is wrapped; direct calls
+    (tests, the CLI) still see the original exceptions.
+    """
+
+    def translate(exc: Exception) -> None:
+        message = _content_free_message(exc)
+        if message is not None:
+            raise ToolError(message) from None
+
+    if inspect.iscoroutinefunction(fn):
+
+        @functools.wraps(fn)
+        async def async_wrapper(*args, **kwargs):
+            try:
+                return await fn(*args, **kwargs)
+            except ToolError:
+                raise
+            except Exception as exc:
+                translate(exc)
+                raise
+
+        return async_wrapper
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except ToolError:
+            raise
+        except Exception as exc:
+            translate(exc)
+            raise
+
+    return wrapper
 
 
 def _outbox_host_id() -> str:
@@ -2837,13 +2920,26 @@ def pm_outbox_merge(
                 memory_store = _get_memory_store(project_path)
                 pm_path = _get_pm_path(project_path)
                 project = load_project(pm_path)
-                memory = Memory(
-                    session_id=_current_session_id,
-                    type=_OUTBOX_TYPE_TO_MEMORY_TYPE[row_type],
-                    content=row["content"],
-                    tags=[t.strip() for t in (row["tags"] or "").split(",") if t.strip()],
-                    project=project.name,
-                )
+                tags = row["tags"] if isinstance(row["tags"], str) else ""
+                try:
+                    # The entry is Desktop-written content; its error quotes none of it.
+                    memory = build_record(
+                        Memory,
+                        {
+                            "session_id": _current_session_id,
+                            "type": _OUTBOX_TYPE_TO_MEMORY_TYPE[row_type],
+                            "content": row["content"],
+                            "tags": [t.strip() for t in tags.split(",") if t.strip()],
+                            "project": project.name,
+                        },
+                        "outbox",
+                        label=f"outbox entry {outbox_id}",
+                    )
+                except LedgerReadError as exc:
+                    warnings.append(
+                        {"id": outbox_id, "reason": "outbox_entry_invalid", "detail": str(exc)}
+                    )
+                    continue
                 new_id = memory_store.save(memory)
             except (PmServerError, ProjectNotFoundError) as exc:
                 warnings.append(
