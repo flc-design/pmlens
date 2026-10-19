@@ -280,12 +280,17 @@ def _inside_git_or_pm(root: Path, target: Path, parts: tuple[str, ...]) -> bool:
         guarded.append((info.st_dev, info.st_ino))
     if not guarded:
         return False
+    # Walk up through directories that do not exist yet (the write would
+    # create them) to the nearest existing one; refuse if any is unreadable.
     directory = target.parent
     while directory != root and root in directory.parents:
         try:
             info = os.stat(directory)
+        except (FileNotFoundError, NotADirectoryError):
+            directory = directory.parent
+            continue
         except OSError:
-            return False
+            return True
         if (info.st_dev, info.st_ino) in guarded:
             return True
         directory = directory.parent
@@ -333,7 +338,7 @@ def _backup_rule(loc: _RuleLocation, data: bytes) -> Path:
                 )
             except FileExistsError:
                 continue
-            _finish_backup(fd, data, original)
+            _finish_backup(fd, data, original, path=directory / name)
             return directory / name
         raise OSError(errno.EEXIST, "no free backup name")
     try:
@@ -355,22 +360,36 @@ def _backup_rule(loc: _RuleLocation, data: bytes) -> Path:
     raise OSError(errno.EEXIST, "no free backup name")
 
 
-def _finish_backup(fd: int, data: bytes, original: os.stat_result) -> None:
-    """Write a backup and give it the original's permissions and times, as copy2 did."""
+def _finish_backup(
+    fd: int, data: bytes, original: os.stat_result, *, path: Path | None = None
+) -> None:
+    """Write a backup and give it the original's permissions and times, as copy2 did.
+
+    ``path`` is for platforms without ``fchmod`` / ``utime`` on a descriptor
+    (Windows): the backup is then adjusted by path once it is closed.
+    """
+    mode = stat.S_IMODE(original.st_mode) & 0o777
+    times = (original.st_atime_ns, original.st_mtime_ns)
+    by_fd = hasattr(os, "fchmod") and os.utime in os.supports_fd
     try:
         view = memoryview(data)
         while view:
             view = view[os.write(fd, view) :]
-        if hasattr(os, "fchmod"):
-            os.fchmod(fd, stat.S_IMODE(original.st_mode) & 0o777)
-        os.utime(fd, ns=(original.st_atime_ns, original.st_mtime_ns))
+        if by_fd:
+            os.fchmod(fd, mode)
+            os.utime(fd, ns=times)
     finally:
         os.close(fd)
+    if not by_fd and path is not None:
+        os.chmod(path, mode)
+        os.utime(path, ns=times)
 
 
 def _write_rule(loc: _RuleLocation, content: str, name: str) -> None:
+    """Write ``content`` (LF newlines) with the platform's newlines, as a text-mode write did."""
     try:
-        replace_file_in_dir(loc.root, loc.parts, content.encode("utf-8"))
+        data = content.replace("\n", os.linesep).encode("utf-8")
+        replace_file_in_dir(loc.root, loc.parts, data)
     except FileRefusedError as exc:
         raise RuleFileRefused(f"{name}: {exc}") from None
 

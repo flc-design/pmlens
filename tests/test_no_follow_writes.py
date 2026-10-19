@@ -617,3 +617,66 @@ class TestReviewFixes:
         assert summary.results[0].backup_path.read_bytes() == b"# Team\r\n"
         written = (root / "CLAUDE.md").read_bytes()
         assert written.startswith(b"# Team\n") and b"\r" not in written
+
+
+class TestClosingRoundFixes:
+    @pytest.mark.parametrize("link", ["data/decision_lineage/ADR-001.yaml", "data/a/b/c.md"])
+    def test_a_link_through_missing_directories_into_a_pm_alias_is_refused(self, tmp_path, link):
+        from pmlens.rules import inject_pm_rules
+
+        root = _repo(tmp_path)
+        (root / "data").mkdir()
+        (root / "data" / "tasks.yaml").write_text("tasks: []\n", encoding="utf-8")
+        (root / ".pm").symlink_to("data", target_is_directory=True)
+        (root / "CLAUDE.md").symlink_to(link)
+
+        summary = inject_pm_rules(root, target="claude-code")
+
+        assert summary.results[0].status == "failed"
+        assert sorted(p.name for p in (root / "data").iterdir()) == ["tasks.yaml"]
+
+    def test_backups_work_without_descriptor_utime(self, tmp_path, monkeypatch):
+        # Windows CPython has neither fchmod nor utime on a descriptor.
+        import pmlens.rules as rules
+        import pmlens.utils as utils
+        from pmlens.rules import inject_pm_rules
+
+        monkeypatch.setattr(utils, "_no_dir_fd", lambda: True)
+        monkeypatch.setattr(rules, "_no_dir_fd", lambda: True)
+        monkeypatch.setattr(os, "supports_fd", set())
+        monkeypatch.delattr(os, "fchmod")
+        root = _repo(tmp_path)
+        claude = root / "CLAUDE.md"
+        claude.write_text("# Team\n", encoding="utf-8")
+        claude.chmod(0o640)
+        os.utime(claude, (1_700_000_000, 1_700_000_000))
+
+        summary = inject_pm_rules(root, target="claude-code")
+
+        assert summary.results[0].status == "appended"
+        backup = summary.results[0].backup_path
+        assert stat.S_IMODE(backup.stat().st_mode) == 0o640
+        assert int(backup.stat().st_mtime) == 1_700_000_000
+
+    def test_a_search_only_pm_directory_still_takes_writes(self, tmp_path):
+        pm = _project(tmp_path)
+        add_task(pm, _task(1))
+        pm.chmod(0o300)
+        try:
+            add_task(pm, _task(2))
+        finally:
+            pm.chmod(0o755)
+        assert [t.id for t in load_tasks(pm)] == ["T-001", "T-002"]
+
+    def test_files_get_the_platforms_newlines_as_before(self, tmp_path, monkeypatch):
+        from pmlens.rules import ensure_claudemd
+
+        monkeypatch.setattr(os, "linesep", "\r\n")
+        pm = _project(tmp_path)
+        add_task(pm, _task(1))
+        assert b"\r\n" in (pm / "tasks.yaml").read_bytes()
+        assert [t.id for t in load_tasks(pm)] == ["T-001"]
+        root = _repo(tmp_path)
+        ensure_claudemd(root)
+        data = (root / "CLAUDE.md").read_bytes()
+        assert b"\r\n" in data and b"\r\r" not in data

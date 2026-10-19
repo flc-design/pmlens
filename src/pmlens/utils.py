@@ -244,7 +244,23 @@ def open_dir_below(root: Path, parts: Sequence[str]) -> int:
     if parts:
         _plain_parts(parts)
     root.mkdir(parents=True, exist_ok=True)
-    fd = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0))
+    root_flags = getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        fd = os.open(root, os.O_RDONLY | root_flags)
+    except PermissionError:
+        # Searchable but not listable (mode 0o300): a descriptor for *at()
+        # calls needs search permission only. The root is trusted, so links
+        # are followed here.
+        if not _SEARCH:
+            raise FileRefusedError(
+                "the directory could not be opened (Permission denied)"
+            ) from None
+        try:
+            fd = os.open(root, _SEARCH | root_flags)
+        except OSError:
+            raise FileRefusedError(
+                "the directory could not be opened (Permission denied)"
+            ) from None
     try:
         for part in parts:
             next_fd = _open_or_make_dir(part, fd)

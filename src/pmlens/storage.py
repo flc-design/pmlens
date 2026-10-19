@@ -229,7 +229,8 @@ def _save_yaml(
         return
     parts = path.relative_to(root).parts
     try:
-        replace_file_in_dir(root, parts, text.encode("utf-8"))
+        # The platform's newlines, as the text-mode write before PMSERV-277 did.
+        replace_file_in_dir(root, parts, text.replace("\n", os.linesep).encode("utf-8"))
     except FileRefusedError as exc:
         raise _write_refused("/".join(parts), exc) from None
 
