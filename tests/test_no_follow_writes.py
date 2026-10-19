@@ -789,7 +789,9 @@ class TestDryRoundFixes:
         assert summary.results[0].status == "created"
         assert "pm-server:begin" in (root / "CLAUDE.md").read_text(encoding="utf-8")
 
-    @pytest.mark.parametrize("gitfile", [b"not a gitfile\n", b"gitdir: missing\n", b"\xff\xfe"])
+    @pytest.mark.parametrize(
+        "gitfile", [b"not a gitfile\n", b"\xff\xfe", b"gitdir: a\x00b\n", b"x" * 5000]
+    )
     def test_a_git_file_that_cannot_be_followed_refuses_links(self, tmp_path, gitfile):
         from pmlens.rules import inject_pm_rules
 
@@ -876,3 +878,83 @@ class TestDryRoundFixes:
         with pytest.raises(LedgerWriteRefused, match=r"\.pm/\.locks/tasks\.lock"):
             add_task(pm, _task(2))
         assert victim.read_text(encoding="utf-8") == "precious"
+
+
+class TestDryRound2Fixes:
+    @pytest.mark.parametrize("link", ["store/hooks/pre-commit", "store/config"])
+    def test_a_git_directorys_common_dir_inside_the_project_is_guarded(self, tmp_path, link):
+        from pmlens.rules import inject_pm_rules
+
+        root = _repo(tmp_path)
+        store = root / "store"
+        (store / "hooks").mkdir(parents=True)
+        (store / "config").write_text("[core]\n", encoding="utf-8")
+        (store / "hooks" / "pre-commit").write_text("#!/bin/sh\n", encoding="utf-8")
+        (root / ".git").mkdir()
+        (root / ".git" / "commondir").write_text("../store\n", encoding="utf-8")
+        (root / "CLAUDE.md").symlink_to(link)
+
+        summary = inject_pm_rules(root, target="claude-code")
+
+        assert summary.results[0].status == "failed"
+        assert (store / "config").read_text(encoding="utf-8") == "[core]\n"
+        assert (store / "hooks" / "pre-commit").read_text(encoding="utf-8") == "#!/bin/sh\n"
+
+    def test_a_worktree_whose_main_repository_moved_keeps_its_links(self, tmp_path):
+        from pmlens.rules import inject_pm_rules
+
+        root = _repo(tmp_path)
+        gone = tmp_path / "moved-away" / ".git" / "worktrees" / "wt"
+        (root / ".git").write_text(f"gitdir: {gone}\n", encoding="utf-8")
+        (root / "AGENTS.md").symlink_to("CLAUDE.md")
+
+        summary = inject_pm_rules(root, target="codex")
+
+        assert summary.results[0].status == "created"
+        assert "pm-server:begin" in (root / "CLAUDE.md").read_text(encoding="utf-8")
+
+    @pytest.mark.parametrize("commondir", ["nul", "fifo", "link"])
+    def test_a_commondir_that_cannot_be_read_refuses_links_without_hanging(
+        self, tmp_path, commondir
+    ):
+        import time
+
+        from pmlens.rules import get_rules_status, inject_pm_rules
+
+        root = _repo(tmp_path)
+        (root / "g").mkdir()
+        (root / "docs").mkdir()
+        (root / ".git").write_text("gitdir: g\n", encoding="utf-8")
+        target = root / "g" / "commondir"
+        if commondir == "nul":
+            target.write_bytes(b"x\x00y\n")
+        elif commondir == "fifo":
+            os.mkfifo(target)
+        else:
+            target.symlink_to("/dev/zero")
+        (root / "CLAUDE.md").symlink_to("docs/rules.md")
+
+        started = time.monotonic()
+        get_rules_status(root)
+        summary = inject_pm_rules(root, target="claude-code")
+
+        assert time.monotonic() - started < 2
+        assert summary.results[0].status == "failed"
+        message = summary.results[0].message
+        assert "could not tell where" in message and "into .git" not in message
+        assert list((root / "docs").iterdir()) == []
+
+    def test_an_absolute_link_is_inside_when_the_root_is_spelled_differently(self, tmp_path):
+        from pmlens.rules import inject_pm_rules
+
+        real = tmp_path / "Proj"
+        real.mkdir()
+        if not (tmp_path / "proj").exists():
+            pytest.skip("case-sensitive filesystem")
+        (real / "CLAUDE.md").write_text("# Team\n", encoding="utf-8")
+        (real / "AGENTS.md").symlink_to(real / "CLAUDE.md")
+
+        summary = inject_pm_rules(tmp_path / "proj", target="codex")
+
+        assert summary.results[0].status == "appended"
+        assert "pm-server:begin" in (real / "CLAUDE.md").read_text(encoding="utf-8")

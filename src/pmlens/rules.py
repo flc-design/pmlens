@@ -246,48 +246,75 @@ def _rule_location(path: Path) -> _RuleLocation:
         return _RuleLocation(root, (name,))
     try:
         target = path.resolve(strict=False)
-        rel = target.relative_to(root)
     except (OSError, RuntimeError):
         raise RuleFileRefused(
             f"{name} is a symlink that cannot be resolved; pmlens does not follow it"
         ) from None
-    except ValueError:
+    rel = _relative_inside(target, root)
+    if rel is None:
         raise RuleFileRefused(
             f"{name} is a symlink to a file outside the project, so pmlens does not read or "
             "write through it; replace the link with the file, or point it at a file inside "
             "the project"
-        ) from None
-    if not rel.parts or _inside_git_or_pm(root, target, rel.parts):
-        raise RuleFileRefused(f"{name} is a symlink into .git or .pm; pmlens does not follow it")
+        )
+    into = f"{name} is a symlink into .git or .pm; pmlens does not follow it"
+    if not rel.parts or any(part.casefold() in {".git", ".pm"} for part in rel.parts):
+        raise RuleFileRefused(into)
+    guarded = _guarded_dirs(root)
+    if guarded is None:
+        raise RuleFileRefused(
+            f"{name} is a symlink, and pmlens could not tell where this project's .git and .pm "
+            "are (a dangling link or an unreadable .git file), so it does not follow it"
+        )
+    if _inside_any(target, guarded):
+        raise RuleFileRefused(into)
     return _RuleLocation(root, rel.parts)
 
 
-def _inside_git_or_pm(root: Path, target: Path, parts: tuple[str, ...]) -> bool:
-    """Whether ``target`` (under ``root``) is in the project's .git or .pm.
+def _relative_inside(target: Path, root: Path) -> Path | None:
+    """``target``'s path below ``root``, or None when it is not inside it.
 
-    By name, ignoring case (a case-insensitive filesystem opens ``.GIT/config``
-    as ``.git/config``), and by identity, so a ``.pm`` that is itself a link
-    (``.pm -> data``) or a differently spelled alias is caught too, as is one
-    that is the project root or above it (``.pm -> .``, ``.git -> ..``), which
-    puts every file in the project inside it.
+    By path, and otherwise by the identity of the directory on the way that is
+    the root: a case-insensitive filesystem resolves ``/w/proj`` (as the caller
+    spelled the project) and an absolute link to ``/W/Proj/CLAUDE.md`` to
+    different strings for the same directory.
     """
-    if any(part.casefold() in {".git", ".pm"} for part in parts):
-        return True
-    guarded = _guarded_dirs(root)
-    if guarded is None:
-        return True
-    if not guarded:
-        return False
-    # Walk up from the target's directory through the root to the filesystem
-    # root, past directories that do not exist yet (the write would create
-    # them); refuse if any cannot be checked.
+    try:
+        return target.relative_to(root)
+    except ValueError:
+        pass
+    try:
+        root_info = os.stat(root)
+    except OSError:
+        return None
+    for ancestor in target.parents:
+        try:
+            info = os.stat(ancestor)
+        except (OSError, ValueError):
+            continue
+        if (info.st_dev, info.st_ino) == (root_info.st_dev, root_info.st_ino):
+            return target.relative_to(ancestor)
+    return None
+
+
+def _inside_any(target: Path, guarded: list[tuple[int, int]]) -> bool:
+    """Whether a directory ``target`` is (or would be created) under is guarded.
+
+    The project's .git and .pm are caught by name before this; by identity a
+    ``.pm`` that is itself a link (``.pm -> data``), a differently spelled
+    alias, or one that is the project root or above it (``.pm -> .``,
+    ``.git -> ..``, which puts every file in the project inside it) is caught
+    too. The walk goes from the target's directory to the filesystem root,
+    past directories that do not exist yet (the write would create them), and
+    refuses if one cannot be checked.
+    """
     directory = target.parent
     while True:
         try:
             info = os.stat(directory)
         except (FileNotFoundError, NotADirectoryError):
             pass
-        except OSError:
+        except (OSError, ValueError):
             return True
         else:
             if (info.st_dev, info.st_ino) in guarded:
@@ -297,68 +324,90 @@ def _inside_git_or_pm(root: Path, target: Path, parts: tuple[str, ...]) -> bool:
         directory = directory.parent
 
 
-def _guarded_dirs(root: Path) -> list[tuple[int, int]] | None:
-    """``(st_dev, st_ino)`` of the project's .git and .pm, or None to refuse every link.
-
-    ``.git`` can be a gitfile (``gitdir: <path>``, written by
-    ``--separate-git-dir``, a worktree or a submodule; git never checks one
-    out) naming the real git directory, which may sit inside the project
-    under another name: that directory, and the common directory a worktree's
-    ``commondir`` names, are guarded too. A .git or .pm that is a dangling or
-    looping link, or a gitfile that cannot be read, leaves what to guard
-    unknown, so every followed link is refused.
-    """
-    guarded: list[tuple[int, int]] = []
-    for name in (".git", ".pm"):
-        entry = root / name
-        try:
-            info = os.stat(entry)
-        except FileNotFoundError:
-            if os.path.lexists(entry):
-                return None
-            continue
-        except OSError:
-            return None
-        guarded.append((info.st_dev, info.st_ino))
-        if name == ".git" and stat.S_ISREG(info.st_mode):
-            gitdirs = _gitfile_dirs(root)
-            if gitdirs is None:
-                return None
-            guarded.extend(gitdirs)
-    return guarded
+class _GitDirsUnknownError(Exception):
+    """Which directories the project's git uses cannot be told."""
 
 
 _GITFILE_MAX_BYTES = 4096
 
 
-def _gitfile_dirs(root: Path) -> list[tuple[int, int]] | None:
-    """The git directory a ``.git`` file names, and its common directory."""
+def _guarded_dirs(root: Path) -> list[tuple[int, int]] | None:
+    """``(st_dev, st_ino)`` of the project's .git and .pm, or None to refuse every link.
+
+    Besides ``.git`` itself, the directories git uses for the project are
+    guarded, since either may sit inside the project under another name: the
+    git directory a ``.git`` file names (``gitdir: <path>``, written by
+    ``--separate-git-dir``, a worktree or a submodule; git never checks one
+    out), and the common directory a git directory's ``commondir`` names. A
+    .git or .pm that is a dangling or looping link, or git metadata that
+    cannot be read, leaves what to guard unknown (None). A git directory that
+    does not exist (a worktree whose main repository moved) guards nothing.
+    """
+    guarded: list[tuple[int, int]] = []
     try:
-        raw = read_file_in_dir(root, ".git", _GITFILE_MAX_BYTES)
-        text = raw.decode("utf-8") if raw is not None else ""
-    except (FileRefusedError, UnicodeDecodeError):
+        for name in (".git", ".pm"):
+            info = _stat_existing(root / name)
+            if info is None:
+                continue
+            guarded.append((info.st_dev, info.st_ino))
+            if name == ".git":
+                guarded.extend(_git_dirs(root, info))
+    except _GitDirsUnknownError:
         return None
-    first = text.splitlines()[0] if text else ""
-    if not first.startswith("gitdir:"):
-        return None
-    gitdir = root / first.removeprefix("gitdir:").strip()  # a relative path is from root
-    dirs = [gitdir]
-    try:
-        common = (gitdir / "commondir").read_text(encoding="utf-8").strip()
-    except FileNotFoundError:
-        common = ""
-    except (OSError, UnicodeDecodeError):
-        return None
+    return guarded
+
+
+def _git_dirs(root: Path, info: os.stat_result) -> list[tuple[int, int]]:
+    """The git directory a ``.git`` file names, and the common directory, if any."""
+    if stat.S_ISREG(info.st_mode):
+        line = _git_metadata(root, ".git")
+        if not line.startswith("gitdir:"):
+            raise _GitDirsUnknownError
+        gitdir = root / line.removeprefix("gitdir:").strip()  # a relative path is from root
+        gitdir_info = _stat_existing(gitdir)
+        if gitdir_info is None:
+            return []
+        found = [(gitdir_info.st_dev, gitdir_info.st_ino)]
+    elif stat.S_ISDIR(info.st_mode):
+        gitdir = root / ".git"
+        found = []
+    else:
+        return []
+    common = _git_metadata(gitdir.resolve(), "commondir")
     if common:
-        dirs.append(gitdir / common)
-    found = []
-    for directory in dirs:
-        try:
-            info = os.stat(directory)
-        except OSError:
-            return None
-        found.append((info.st_dev, info.st_ino))
+        common_info = _stat_existing(gitdir / common)
+        if common_info is not None:
+            found.append((common_info.st_dev, common_info.st_ino))
     return found
+
+
+def _git_metadata(directory: Path, name: str) -> str:
+    """The first line of a small git metadata file, or "" when there is none.
+
+    Read like a rule file (no link, no FIFO, a size cap), since a project that
+    did not come from ``git clone`` can supply it.
+    """
+    try:
+        raw = read_file_in_dir(directory, name, _GITFILE_MAX_BYTES)
+        text = raw.decode("utf-8") if raw is not None else ""
+    except (FileRefusedError, OSError, UnicodeDecodeError):
+        raise _GitDirsUnknownError from None
+    line = text.splitlines()[0].strip() if text.strip() else ""
+    if "\x00" in line:
+        raise _GitDirsUnknownError
+    return line
+
+
+def _stat_existing(path: Path) -> os.stat_result | None:
+    """``os.stat(path)``, or None when nothing is there; a dangling link is unknowable."""
+    try:
+        return os.stat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        if os.path.lexists(path):
+            raise _GitDirsUnknownError from None
+        return None
+    except (OSError, ValueError):
+        raise _GitDirsUnknownError from None
 
 
 def _read_rule(loc: _RuleLocation, name: str) -> bytes | None:

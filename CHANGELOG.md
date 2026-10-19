@@ -11,7 +11,7 @@ as accepted, like every lifecycle change, returns a warning to pass on to the
 user.
 
 MCP tool count: 48 names for 46 operations in full mode (the two content tool
-aliases); Lens 17, or 19 with Desktop outbox writes. Test suite: 2,683 passing.
+aliases); Lens 17, or 19 with Desktop outbox writes. Test suite: 2,691 passing.
 
 **Upgrade notes.**
 
