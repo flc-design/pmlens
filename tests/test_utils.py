@@ -520,18 +520,28 @@ class TestGetUtilsFingerprint:
         assert fp["stale"] is False
 
 
-# ─── read_file_in_dir (PMSERV-270 / PMSERV-271) ─────────────────────
+# ─── read_file_in_dir / write_file_in_dir (PMSERV-270 / PMSERV-271) ───────
 
 
 class TestReadFileInDir:
-    def test_reads_a_regular_file(self, tmp_path):
+    def test_reads_a_regular_file_and_one_in_a_subdirectory(self, tmp_path):
         from pmlens.utils import read_file_in_dir
 
         (tmp_path / "a.yaml").write_bytes(b"x: 1\n")
+        (tmp_path / "sub").mkdir()
+        (tmp_path / "sub" / "b.html").write_bytes(b"b")
         assert read_file_in_dir(tmp_path, "a.yaml", 100) == b"x: 1\n"
+        assert read_file_in_dir(tmp_path, ["sub", "b.html"], 100) == b"b"
 
-    def test_refuses_a_symlinked_file_and_a_symlinked_directory(self, tmp_path):
+    def test_missing_is_none(self, tmp_path):
         from pmlens.utils import read_file_in_dir
+
+        assert read_file_in_dir(tmp_path, "missing.yaml", 100) is None
+        assert read_file_in_dir(tmp_path, ["nosub", "x"], 100) is None
+        assert read_file_in_dir(tmp_path / "nodir", "x", 100) is None
+
+    def test_refuses_symlinks_anywhere_on_the_way(self, tmp_path):
+        from pmlens.utils import FileRefusedError, read_file_in_dir
 
         outside = tmp_path / "outside"
         outside.mkdir()
@@ -539,24 +549,63 @@ class TestReadFileInDir:
         inside = tmp_path / "inside"
         inside.mkdir()
         (inside / "link.yaml").symlink_to(outside / "secret.yaml")
+        (inside / "linked_sub").symlink_to(outside, target_is_directory=True)
         (tmp_path / "linked_dir").symlink_to(outside, target_is_directory=True)
-        assert read_file_in_dir(inside, "link.yaml", 100) is None
-        assert read_file_in_dir(tmp_path / "linked_dir", "secret.yaml", 100) is None
+        for directory, name in (
+            (inside, "link.yaml"),
+            (inside, ["linked_sub", "secret.yaml"]),
+            (tmp_path / "linked_dir", "secret.yaml"),
+        ):
+            with pytest.raises(FileRefusedError):
+                read_file_in_dir(directory, name, 100)
 
-    @pytest.mark.parametrize("name", ["", ".", "..", "a/b.yaml", "../a.yaml"])
-    def test_refuses_names_that_are_not_plain_file_names(self, tmp_path, name):
-        from pmlens.utils import read_file_in_dir
+    @pytest.mark.parametrize("name", ["", ".", "..", "a/b.yaml", "../a.yaml", ["a", ".."], []])
+    def test_refuses_names_that_are_not_plain(self, tmp_path, name):
+        from pmlens.utils import FileRefusedError, read_file_in_dir
 
         (tmp_path / "a.yaml").write_bytes(b"x")
-        assert read_file_in_dir(tmp_path, name, 100) is None
+        with pytest.raises(FileRefusedError):
+            read_file_in_dir(tmp_path, name, 100)
 
     def test_refuses_a_fifo_without_blocking_and_an_oversized_file(self, tmp_path):
         import os
 
-        from pmlens.utils import read_file_in_dir
+        from pmlens.utils import FileRefusedError, read_file_in_dir
 
         os.mkfifo(tmp_path / "pipe.yaml")
-        assert read_file_in_dir(tmp_path, "pipe.yaml", 100) is None
         (tmp_path / "big.yaml").write_bytes(b"x" * 101)
-        assert read_file_in_dir(tmp_path, "big.yaml", 100) is None
-        assert read_file_in_dir(tmp_path, "missing.yaml", 100) is None
+        with pytest.raises(FileRefusedError, match="not a regular file"):
+            read_file_in_dir(tmp_path, "pipe.yaml", 100)
+        with pytest.raises(FileRefusedError, match="larger than 100 bytes"):
+            read_file_in_dir(tmp_path, "big.yaml", 100)
+
+
+class TestWriteFileInDir:
+    def test_creates_the_directory_and_writes(self, tmp_path):
+        from pmlens.utils import write_file_in_dir
+
+        write_file_in_dir(tmp_path, "exports", "a.html", b"new")
+        assert (tmp_path / "exports" / "a.html").read_bytes() == b"new"
+        assert [p.name for p in (tmp_path / "exports").iterdir()] == ["a.html"]
+
+    def test_replaces_a_symlinked_file_instead_of_writing_through_it(self, tmp_path):
+        from pmlens.utils import write_file_in_dir
+
+        victim = tmp_path / "victim_rc"
+        victim.write_text("ORIGINAL", encoding="utf-8")
+        (tmp_path / "exports").mkdir()
+        (tmp_path / "exports" / "a.html").symlink_to(victim)
+        write_file_in_dir(tmp_path, "exports", "a.html", b"new")
+        assert victim.read_text(encoding="utf-8") == "ORIGINAL"
+        assert not (tmp_path / "exports" / "a.html").is_symlink()
+        assert (tmp_path / "exports" / "a.html").read_bytes() == b"new"
+
+    def test_refuses_a_symlinked_directory(self, tmp_path):
+        from pmlens.utils import FileRefusedError, write_file_in_dir
+
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (tmp_path / "exports").symlink_to(outside, target_is_directory=True)
+        with pytest.raises(FileRefusedError):
+            write_file_in_dir(tmp_path, "exports", "a.html", b"new")
+        assert list(outside.iterdir()) == []

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import os
 import shutil
 import stat
 import tempfile
+from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 
@@ -51,53 +53,128 @@ def _is_project_pm_dir(pm_dir: Path) -> bool:
     return pm_dir.is_dir() and (pm_dir / "project.yaml").exists()
 
 
-def read_file_in_dir(directory: Path, filename: str, max_bytes: int) -> bytes | None:
-    """Read ``directory/filename`` once, following no symlink at either level.
+class FileRefusedError(Exception):
+    """A file that exists but is not read or written; the message is fixed text.
+
+    Raised for a symlink (the file or a directory on the way), something that
+    is not a regular file or directory, a file larger than the limit, or a
+    name that is not a plain relative path.
+    """
+
+
+_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_DIR_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | _NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+
+
+def _plain_parts(name: str | Sequence[str]) -> list[str]:
+    parts = [name] if isinstance(name, str) else list(name)
+    for part in parts:
+        if (
+            not part
+            or part in {".", ".."}
+            or "/" in part
+            or os.sep in part
+            or (os.altsep and os.altsep in part)
+            or "\x00" in part
+        ):
+            raise FileRefusedError("the name is not a plain relative path")
+    if not parts:
+        raise FileRefusedError("the name is not a plain relative path")
+    return parts
+
+
+def _no_dir_fd() -> bool:
+    return not (os.open in os.supports_dir_fd and hasattr(os, "O_DIRECTORY") and _NOFOLLOW)
+
+
+def _open_dir_nofollow(path: Path | str, dir_fd: int | None = None) -> int | None:
+    """Open a directory without following a symlink at its last component.
+
+    Returns None when it does not exist; raises FileRefusedError when it is a link
+    or not a directory.
+    """
+    try:
+        return os.open(path, _DIR_FLAGS, dir_fd=dir_fd)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        if exc.errno in {errno.ELOOP, errno.ENOTDIR, errno.EMLINK}:
+            raise FileRefusedError("a symlink or not a directory") from None
+        raise FileRefusedError("the directory could not be opened") from None
+
+
+def read_file_in_dir(directory: Path, name: str | Sequence[str], max_bytes: int) -> bytes | None:
+    """Read a file under ``directory`` once, following no symlink on the way.
 
     For files a repository supplies (workflow templates, prompt-pack templates):
     a symlink there could point at any file the server can read, and a check on
     the path followed by a separate open can be raced by swapping the path in
-    between (PMSERV-270, PMSERV-271). The directory is opened with
-    ``O_NOFOLLOW | O_DIRECTORY`` and the file relative to it with
+    between (PMSERV-270, PMSERV-271). ``directory``, each subdirectory in
+    ``name`` and the file are opened in turn relative to the previous one with
     ``O_NOFOLLOW``, and the file is checked on its descriptor. Containment is
     by path: a hard link needs write access to the project and is not refused.
     Where ``os.open`` takes no ``dir_fd`` (Windows), symlinks are refused by a
     check before the open instead, which is not atomic.
 
     Args:
-        directory: The directory the file must be in.
-        filename: A single file name; anything with a separator is refused.
+        directory: The directory the file must be under.
+        name: The file name, or its path below ``directory`` as parts.
         max_bytes: The largest file accepted.
 
     Returns:
-        The file's bytes, or None when it is missing, a symlink (the file or the
-        directory), not a regular file, larger than ``max_bytes``, or the name
-        is not a plain file name.
+        The file's bytes, or None when it (or a directory on the way) does not
+        exist.
+
+    Raises:
+        FileRefusedError: It exists but is a symlink (or a directory on the way is),
+            is not a regular file, is larger than ``max_bytes``, or ``name`` is
+            not a plain relative path.
     """
-    if not filename or filename in {".", ".."} or "/" in filename or os.sep in filename:
-        return None
-    if os.altsep and os.altsep in filename:
-        return None
-    nofollow = getattr(os, "O_NOFOLLOW", 0)
-    flags = os.O_RDONLY | nofollow | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
-    try:
-        if os.open in os.supports_dir_fd and hasattr(os, "O_DIRECTORY") and nofollow:
-            dir_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | nofollow)
-            try:
-                fd = os.open(filename, flags, dir_fd=dir_fd)
-            finally:
+    parts = _plain_parts(name)
+    flags = os.O_RDONLY | _NOFOLLOW | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
+    if _no_dir_fd():
+        path = directory
+        for part in parts:
+            path = path / part
+            if path.is_symlink():
+                raise FileRefusedError("a symlink")
+        if directory.is_symlink():
+            raise FileRefusedError("a symlink")
+        try:
+            fd = os.open(path, flags)
+        except FileNotFoundError:
+            return None
+        except OSError:
+            raise FileRefusedError("the file could not be opened") from None
+    else:
+        dir_fd = _open_dir_nofollow(directory)
+        if dir_fd is None:
+            return None
+        try:
+            for part in parts[:-1]:
+                next_fd = _open_dir_nofollow(part, dir_fd=dir_fd)
                 os.close(dir_fd)
-        else:
-            if directory.is_symlink() or (directory / filename).is_symlink():
+                dir_fd = next_fd
+                if dir_fd is None:
+                    return None
+            try:
+                fd = os.open(parts[-1], flags, dir_fd=dir_fd)
+            except FileNotFoundError:
                 return None
-            fd = os.open(directory / filename, flags)
-    except OSError:
-        return None
+            except OSError as exc:
+                if exc.errno in {errno.ELOOP, errno.EMLINK}:
+                    raise FileRefusedError("a symlink") from None
+                raise FileRefusedError("the file could not be opened") from None
+        finally:
+            if dir_fd is not None:
+                os.close(dir_fd)
     chunks: list[bytes] = []
     try:
         info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode) or info.st_size > max_bytes:
-            return None
+        if not stat.S_ISREG(info.st_mode):
+            raise FileRefusedError("not a regular file")
+        if info.st_size > max_bytes:
+            raise FileRefusedError(f"larger than {max_bytes} bytes")
         remaining = max_bytes + 1
         while remaining > 0:
             chunk = os.read(fd, remaining)
@@ -106,11 +183,68 @@ def read_file_in_dir(directory: Path, filename: str, max_bytes: int) -> bytes | 
             chunks.append(chunk)
             remaining -= len(chunk)
     except OSError:
-        return None
+        raise FileRefusedError("the file could not be read") from None
     finally:
         os.close(fd)
     data = b"".join(chunks)
-    return data if len(data) <= max_bytes else None
+    if len(data) > max_bytes:
+        raise FileRefusedError(f"larger than {max_bytes} bytes")
+    return data
+
+
+def write_file_in_dir(parent: Path, dirname: str, filename: str, data: bytes) -> None:
+    """Write ``parent/dirname/filename`` without following a symlink.
+
+    For pmlens's own output inside a project (``.pm/exports``): a repository
+    can ship that directory or the file as a symlink, and writing through it
+    would overwrite any file the user can write (PMSERV-270 review). The
+    directory is created if missing, refused if it is a link, and the file is
+    written to a temporary name and renamed over the final one, so a link
+    there is replaced, never written through. ``parent`` itself is trusted.
+
+    Raises:
+        FileRefusedError: ``dirname`` is a symlink or not a directory, or a name is
+            not plain.
+        OSError: The write failed.
+    """
+    _plain_parts([dirname, filename])
+    if _no_dir_fd():
+        directory = parent / dirname
+        if directory.is_symlink():
+            raise FileRefusedError("a symlink or not a directory")
+        directory.mkdir(parents=True, exist_ok=True)
+        _atomic_write_text(directory / filename, data.decode("utf-8"))
+        return
+    parent.mkdir(parents=True, exist_ok=True)
+    parent_fd = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        dir_fd = _open_dir_nofollow(dirname, dir_fd=parent_fd)
+        if dir_fd is None:
+            try:
+                os.mkdir(dirname, 0o755, dir_fd=parent_fd)
+            except FileExistsError:
+                pass
+            dir_fd = _open_dir_nofollow(dirname, dir_fd=parent_fd)
+            if dir_fd is None:
+                raise FileRefusedError("the directory could not be created")
+    finally:
+        os.close(parent_fd)
+    try:
+        temp = f".{filename}.{os.getpid()}.{os.urandom(4).hex()}.tmp"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+        fd = os.open(temp, flags, 0o644, dir_fd=dir_fd)
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(data)
+            os.replace(temp, filename, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+        except BaseException:
+            try:
+                os.unlink(temp, dir_fd=dir_fd)
+            except OSError:
+                pass
+            raise
+    finally:
+        os.close(dir_fd)
 
 
 def _pick_from_registry() -> Path | None:

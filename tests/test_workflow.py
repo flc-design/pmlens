@@ -345,21 +345,53 @@ class TestWorkflowTemplates:
         custom_dir = tmp_pm_path / "workflow_templates"
         custom_dir.mkdir()
         (custom_dir / "linked.yaml").symlink_to(target)
-        with pytest.raises(PmServerError, match="not found"):
-            load_workflow_template("linked", tmp_pm_path)
-        assert "linked" not in [t["name"] for t in list_workflow_templates(tmp_pm_path)]
+        # Refused out loud, never silently replaced by a built-in of that name.
+        for read in (
+            lambda: load_workflow_template("linked", tmp_pm_path),
+            lambda: list_workflow_templates(tmp_pm_path),
+        ):
+            with pytest.raises(PmServerError, match="a symlink; it is not read") as caught:
+                read()
+            assert "OUTSIDE-MARKER" not in str(caught.value)
 
     def test_a_symlinked_template_directory_holds_no_templates(self, tmp_path, tmp_pm_path):
         # Every file in the link's target resolved "inside" the linked directory.
         target = self._outside_template(tmp_path)
         (tmp_pm_path / "workflow_templates").symlink_to(target.parent, target_is_directory=True)
-        with pytest.raises(PmServerError, match="not found"):
-            load_workflow_template("creds", tmp_pm_path)
-        assert "creds" not in [t["name"] for t in list_workflow_templates(tmp_pm_path)]
-        # Built-in templates are unaffected.
-        assert load_workflow_template("development", tmp_pm_path).steps
+        # Refused out loud: a built-in of the same name would silently replace
+        # the project's own template otherwise.
+        for read in (
+            lambda: load_workflow_template("creds", tmp_pm_path),
+            lambda: load_workflow_template("development", tmp_pm_path),
+            lambda: list_workflow_templates(tmp_pm_path),
+        ):
+            with pytest.raises(PmServerError, match="replace it with a directory") as caught:
+                read()
+            assert "OUTSIDE-MARKER" not in str(caught.value)
 
-    @pytest.mark.parametrize("name", ["my.flow", "my_flow-2", "検証フロー"])
+    def test_a_template_over_the_size_cap_is_refused_not_replaced(self, tmp_pm_path):
+        custom_dir = tmp_pm_path / "workflow_templates"
+        custom_dir.mkdir()
+        big = {"name": "development", "description": "x" * (1024 * 1024), "steps": []}
+        (custom_dir / "development.yaml").write_text(yaml.safe_dump(big), encoding="utf-8")
+        with pytest.raises(PmServerError, match="larger than"):
+            load_workflow_template("development", tmp_pm_path)
+
+    def test_built_in_templates_installed_as_symlinks_still_load(self, tmp_path, monkeypatch):
+        # uv --link-mode symlink installs package files as links into a cache.
+        import pmlens.storage as storage
+
+        linked = tmp_path / "linked_builtin"
+        linked.mkdir()
+        for f in storage.BUILTIN_TEMPLATES_DIR.glob("*.yaml"):
+            (linked / f.name).symlink_to(f)
+        monkeypatch.setattr(storage, "BUILTIN_TEMPLATES_DIR", linked)
+        listed = {t["name"] for t in list_workflow_templates()}
+        assert "development" in listed
+        for name in listed:
+            assert load_workflow_template(name).name
+
+    @pytest.mark.parametrize("name", ["my.flow", "my_flow-2", "検証フロー", "my flow"])
     def test_plain_names_still_load(self, tmp_pm_path, name):
         custom_dir = tmp_pm_path / "workflow_templates"
         custom_dir.mkdir()

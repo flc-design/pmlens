@@ -1264,3 +1264,72 @@ class TestOverrideSymlinks:
 
         assert text == "OVERRIDE 1"
         assert not any(w.startswith("prompt_template_override_ignored") for w in res["warnings"])
+
+    def test_an_include_from_a_subdirectory_still_works(self, tmp_path):
+        pm_path, _ = self._pack(tmp_path)
+        override = pm_path / "prompt-templates"
+        (override / "partials").mkdir(parents=True)
+        (override / "partials" / "h.html").write_text("PARTIAL-OK", encoding="utf-8")
+        (override / "prompt_pack.html").write_text(
+            '{% include "partials/h.html" %} {{ task_count }}', encoding="utf-8"
+        )
+
+        res, text = self._render(pm_path)
+
+        assert text == "PARTIAL-OK 1"
+        assert res["warnings"] == []
+
+    def test_an_include_through_a_symlinked_subdirectory_is_refused(self, tmp_path):
+        from jinja2.exceptions import TemplateNotFound
+
+        self._secret(tmp_path)
+        pm_path, _ = self._pack(tmp_path)
+        override = pm_path / "prompt-templates"
+        override.mkdir()
+        (override / "partials").symlink_to(tmp_path / "outside", target_is_directory=True)
+        (override / "prompt_pack.html").write_text(
+            '{% include "partials/secret.html" %}', encoding="utf-8"
+        )
+        with pytest.raises(TemplateNotFound):
+            self._render(pm_path)
+
+    def test_an_override_that_is_not_utf8_is_reported(self, tmp_path):
+        pm_path, _ = self._pack(tmp_path)
+        override = pm_path / "prompt-templates"
+        override.mkdir()
+        (override / "prompt_pack.html").write_bytes("見出し".encode("shift_jis"))
+
+        res, text = self._render(pm_path)
+
+        assert "<!doctype html>" in text.lower()
+        assert any(w.startswith("prompt_template_override_ignored") for w in res["warnings"])
+
+    def test_a_symlinked_export_file_is_replaced_not_written_through(self, tmp_path):
+        pm_path, _ = self._pack(tmp_path)
+        victim = tmp_path / "victim_rc"
+        victim.write_text("ORIGINAL", encoding="utf-8")
+        exports = pm_path / "exports"
+        exports.mkdir(exist_ok=True)
+        (exports / "prompt-pack-tag-x.html").symlink_to(victim)
+
+        res, text = self._render(pm_path)
+
+        assert res["status"] == "ok"
+        assert victim.read_text(encoding="utf-8") == "ORIGINAL"
+        assert not (exports / "prompt-pack-tag-x.html").is_symlink()
+        assert "<!doctype html>" in text.lower()
+
+    def test_a_symlinked_exports_directory_is_refused(self, tmp_path):
+        pm_path, _ = self._pack(tmp_path)
+        outside = tmp_path / "outside_dir"
+        outside.mkdir()
+        exports = pm_path / "exports"
+        if exports.exists():
+            exports.rmdir()
+        exports.symlink_to(outside, target_is_directory=True)
+
+        res = run_prompt_pack(pm_path, filter_tag="x", format="md")
+
+        assert res["status"] == "error"
+        assert ".pm/exports is a symlink" in res["message"]
+        assert list(outside.iterdir()) == []

@@ -76,7 +76,7 @@ from .models import (
     WorkflowStep,
     WorkflowTemplate,
 )
-from .utils import _atomic_write_text, read_file_in_dir
+from .utils import FileRefusedError, _atomic_write_text, read_file_in_dir
 
 PM_DIR = ".pm"
 GLOBAL_PM_DIR = Path.home() / ".pm"
@@ -1473,9 +1473,9 @@ def next_workflow_number(pm_path: Path) -> int:
 # A workflow template is named by its file stem. The name is joined into a
 # path, so it may not carry a path (PMSERV-271): "/abs/creds" or "../x" read
 # any *.yaml on disk and returned its text. Letters, digits, '.', '_' and '-'
-# only, starting with a letter or digit, so it cannot be "..", absolute or
-# contain a separator.
-_TEMPLATE_NAME_RE = re.compile(r"[^\W_][\w.-]{0,63}")
+# and spaces only, starting with a letter or digit, so it cannot be "..",
+# absolute or contain a separator.
+_TEMPLATE_NAME_RE = re.compile(r"[^\W_][\w .-]{0,63}")
 
 
 # A template file larger than this is not a template.
@@ -1483,27 +1483,50 @@ _TEMPLATE_MAX_BYTES = 1024 * 1024
 
 
 def _custom_templates_dir(pm_path: Path) -> Path | None:
-    """``.pm/workflow_templates`` if it is a real directory inside the project.
+    """``.pm/workflow_templates``, or None when the project has none.
 
     A symlinked directory would make every file in its target count as inside
-    it (PMSERV-271), so it holds no custom templates.
+    it (PMSERV-271), so it is refused, as is one outside the project.
+
+    Raises:
+        LedgerReadError: The directory exists but is a symlink, not a
+            directory, or outside the project.
     """
     directory = pm_path / "workflow_templates"
     try:
-        if directory.is_symlink() or not directory.is_dir():
+        if not directory.is_symlink() and not directory.exists():
             return None
-        return directory if directory.resolve().is_relative_to(pm_path.resolve()) else None
+        usable = (
+            not directory.is_symlink()
+            and directory.is_dir()
+            and directory.resolve().is_relative_to(pm_path.resolve())
+        )
     except OSError:
-        return None
+        usable = False
+    if not usable:
+        summary = (
+            "a symlink, not a directory or outside the project, so its templates are not "
+            "read; replace it with a directory"
+        )
+        raise LedgerReadError(f"workflow_templates is {summary}", summary)
+    return directory
 
 
 def _read_template(directory: Path, name: str, file: str) -> dict | list | None:
-    """Parse ``directory/{name}.yaml``, or None when there is no usable file there.
+    """Parse ``directory/{name}.yaml``, or None when there is no such file.
 
     The file is read once without following a symlink (utils.read_file_in_dir),
     so neither a link nor a swap after a check can redirect it elsewhere.
+
+    Raises:
+        LedgerReadError: The file exists but is a symlink, not a regular file,
+            larger than the limit, not UTF-8 or not valid YAML.
     """
-    raw = read_file_in_dir(directory, f"{name}.yaml", _TEMPLATE_MAX_BYTES)
+    try:
+        raw = read_file_in_dir(directory, f"{name}.yaml", _TEMPLATE_MAX_BYTES)
+    except FileRefusedError as exc:
+        summary = f"{exc}; it is not read"
+        raise LedgerReadError(f"{file}: {summary}", summary) from None
     if raw is None:
         return None
     try:
@@ -1527,7 +1550,7 @@ def load_workflow_template(name: str, pm_path: Path | None = None) -> WorkflowTe
     """
     if not isinstance(name, str) or not _TEMPLATE_NAME_RE.fullmatch(name):
         raise PmServerError(
-            "A workflow template name is letters, digits, '.', '_' or '-' "
+            "A workflow template name is letters, digits, spaces, '.', '_' or '-' "
             "(no path); see pm_workflow_templates"
         )
     # Custom template
@@ -1538,10 +1561,12 @@ def load_workflow_template(name: str, pm_path: Path | None = None) -> WorkflowTe
         if data:
             return _parse_workflow_template(data, file)
 
-    # Built-in template
-    data = _read_template(BUILTIN_TEMPLATES_DIR, name, f"{name}.yaml")
+    # Built-in template: package data, not a file a repository supplies, read
+    # as installed (an installer may lay it down as a symlink into a cache).
+    builtin_path = BUILTIN_TEMPLATES_DIR / f"{name}.yaml"
+    data = _load_yaml(builtin_path)
     if data:
-        return _parse_workflow_template(data, f"{name}.yaml")
+        return _parse_workflow_template(data, builtin_path.name)
 
     raise PmServerError(f"Workflow template '{name}' not found")
 
@@ -1563,7 +1588,7 @@ def list_workflow_templates(pm_path: Path | None = None) -> list[dict]:
             file = f"workflow_templates/{f.name}"
             data = _read_template(custom_dir, name, file)
             if data is None:
-                continue  # a symlink, or not a regular file
+                continue  # removed since the directory was listed
             seen.add(name)
             if data:
                 tmpl = _parse_workflow_template(data, file)

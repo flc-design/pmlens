@@ -44,7 +44,7 @@ from . import safe_yaml
 from .memory import MemoryStore, _has_pm_server_schema
 from .models import Decision, Memory, MemoryType, Project, SuggestedModel, Task, TaskStatus
 from .storage import load_decisions, load_project, load_tasks
-from .utils import read_file_in_dir
+from .utils import FileRefusedError, read_file_in_dir, write_file_in_dir
 
 # Built-in template dir (shared with dashboard). The two-layer override adds the
 # project's ``.pm/prompt-templates/`` in front of this at render time.
@@ -354,9 +354,9 @@ class _OverrideLoader(BaseLoader):
     jinja2's FileSystemLoader follows symlinks, so a repository could ship
     ``prompt_pack.html`` (or a file it includes) as a link to any file the
     server can read, and its text would land in the exported pack (PMSERV-270).
-    Each template is a plain file name read once by ``read_file_in_dir``; a
-    link, a subdirectory path or anything else is "not found", so the bundled
-    template is used instead.
+    Each template, subdirectories included, is read once by
+    ``read_file_in_dir``; a link anywhere on the way, a file that is not a
+    regular UTF-8 file or one over the size cap is "not found".
     """
 
     def __init__(self, directory: Path) -> None:
@@ -365,18 +365,17 @@ class _OverrideLoader(BaseLoader):
     def get_source(
         self, environment: Environment, template: str
     ) -> tuple[str, str | None, Callable[[], bool]]:
-        pieces = split_template_path(template)
-        raw = (
-            read_file_in_dir(self.directory, pieces[0], _OVERRIDE_MAX_BYTES)
-            if len(pieces) == 1
-            else None
-        )
-        if raw is None:
-            raise TemplateNotFound(template)
         try:
-            source = raw.decode("utf-8")
-        except UnicodeDecodeError:
-            raise TemplateNotFound(template) from None
+            raw = read_file_in_dir(
+                self.directory, split_template_path(template), _OVERRIDE_MAX_BYTES
+            )
+            source = raw.decode("utf-8") if raw is not None else None
+        except (FileRefusedError, UnicodeDecodeError):
+            source = None
+        if source is None:
+            # prompt_pack.html falls back to the bundled template (and
+            # run_prompt_pack warns); an include that is refused fails.
+            raise TemplateNotFound(template)
         return source, None, lambda: False
 
 
@@ -384,8 +383,8 @@ def override_ignored(pm_path: Path | None) -> bool:
     """Whether ``.pm/prompt-templates/prompt_pack.html`` exists but is not used.
 
     True for a symlink (the file or its directory), something that is not a
-    regular file, or a directory outside the project; the bundled template is
-    rendered instead.
+    regular UTF-8 file, one over the size cap, or a directory outside the
+    project; the bundled template is rendered instead.
     """
     if pm_path is None:
         return False
@@ -399,7 +398,14 @@ def override_ignored(pm_path: Path | None) -> bool:
     directory = _override_dir(pm_path)
     if directory is None:
         return True
-    return read_file_in_dir(directory, _PROMPT_PACK_TEMPLATE, _OVERRIDE_MAX_BYTES) is None
+    try:
+        raw = read_file_in_dir(directory, _PROMPT_PACK_TEMPLATE, _OVERRIDE_MAX_BYTES)
+        if raw is None:
+            return False
+        raw.decode("utf-8")
+    except (FileRefusedError, UnicodeDecodeError):
+        return True
+    return False
 
 
 def _prompt_pack_env(pm_path: Path | None) -> ImmutableSandboxedEnvironment:
@@ -750,11 +756,26 @@ def run_prompt_pack(
     if format == "html" and override_ignored(pm_path):
         warnings.append(
             "prompt_template_override_ignored: .pm/prompt-templates/prompt_pack.html is a "
-            "symlink, not a regular file, or outside the project, so the bundled template "
-            "was used"
+            "symlink, not a regular UTF-8 file, too large, or outside the project, so the "
+            "bundled template was used"
         )
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text(content, encoding="utf-8")
+    if out_path:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(content, encoding="utf-8")
+    else:
+        # The default destination is inside the project, which a repository
+        # controls: .pm/exports or the file may be a symlink, and writing
+        # through it would overwrite any file the user can write.
+        try:
+            write_file_in_dir(pm_path, "exports", dest.name, content.encode("utf-8"))
+        except FileRefusedError:
+            return {
+                "status": "error",
+                "message": (
+                    "refusing to write the prompt pack: .pm/exports is a symlink or not a "
+                    "directory; remove it or pass out_path"
+                ),
+            }
 
     return {
         "status": "ok",
