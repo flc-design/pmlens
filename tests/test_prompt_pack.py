@@ -1331,7 +1331,8 @@ class TestOverrideSymlinks:
         res = run_prompt_pack(pm_path, filter_tag="x", format="md")
 
         assert res["status"] == "error"
-        assert ".pm/exports is a symlink" in res["message"]
+        assert res["message"].startswith("refusing to write the prompt pack to .pm/exports/")
+        assert "a symlink or not a directory" in res["message"]
         assert list(outside.iterdir()) == []
 
     def test_a_re_export_rewrites_the_file_in_place_like_a_plain_write(self, tmp_path):

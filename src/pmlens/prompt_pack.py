@@ -772,8 +772,8 @@ def run_prompt_pack(
             return {
                 "status": "error",
                 "message": (
-                    f"refusing to write the prompt pack: .pm/exports is {exc}; fix it or "
-                    "pass out_path"
+                    f"refusing to write the prompt pack to .pm/exports/{dest.name}: {exc}; "
+                    "fix it or pass out_path"
                 ),
             }
         except OSError as exc:  # a directory at the name, a read-only file, a full disk

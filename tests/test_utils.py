@@ -609,3 +609,48 @@ class TestWriteFileInDir:
         with pytest.raises(FileRefusedError):
             write_file_in_dir(tmp_path, "exports", "a.html", b"new")
         assert list(outside.iterdir()) == []
+
+    def test_a_fifo_swapped_in_after_the_check_is_refused_without_blocking(
+        self, tmp_path, monkeypatch
+    ):
+        import os
+
+        import pmlens.utils as utils
+        from pmlens.utils import FileRefusedError, write_file_in_dir
+
+        write_file_in_dir(tmp_path, "exports", "a.html", b"old")
+        real_stat = os.stat
+
+        def stat_then_swap(path, *args, **kwargs):
+            result = real_stat(path, *args, **kwargs)
+            if path == "a.html":
+                os.unlink(tmp_path / "exports" / "a.html")
+                os.mkfifo(tmp_path / "exports" / "a.html")
+            return result
+
+        monkeypatch.setattr(utils.os, "stat", stat_then_swap)
+        with pytest.raises(FileRefusedError, match="changed while it was being written"):
+            write_file_in_dir(tmp_path, "exports", "a.html", b"new")
+
+    def test_a_file_swapped_after_the_check_is_refused(self, tmp_path, monkeypatch):
+        import os
+
+        import pmlens.utils as utils
+        from pmlens.utils import FileRefusedError, write_file_in_dir
+
+        decoy = tmp_path / "decoy"
+        decoy.write_text("ORIGINAL", encoding="utf-8")
+        write_file_in_dir(tmp_path, "exports", "a.html", b"old")
+        real_stat = os.stat
+
+        def stat_then_swap(path, *args, **kwargs):
+            result = real_stat(path, *args, **kwargs)
+            if path == "a.html":
+                os.unlink(tmp_path / "exports" / "a.html")
+                os.symlink(decoy, tmp_path / "exports" / "a.html")
+            return result
+
+        monkeypatch.setattr(utils.os, "stat", stat_then_swap)
+        with pytest.raises(FileRefusedError, match="changed while it was being written"):
+            write_file_in_dir(tmp_path, "exports", "a.html", b"new")
+        assert decoy.read_text(encoding="utf-8") == "ORIGINAL"

@@ -241,10 +241,13 @@ def write_file_in_dir(parent: Path, dirname: str, filename: str, data: bytes) ->
         except FileNotFoundError:
             existing = None
         if existing is not None and stat.S_ISREG(existing.st_mode):
+            # O_NONBLOCK: a FIFO swapped in after the stat fails at once
+            # (ENXIO) instead of waiting for a reader; a regular file ignores it.
+            nonblock = getattr(os, "O_NONBLOCK", 0)
             try:
-                fd = os.open(filename, os.O_WRONLY | _NOFOLLOW | cloexec, dir_fd=dir_fd)
+                fd = os.open(filename, os.O_WRONLY | _NOFOLLOW | nonblock | cloexec, dir_fd=dir_fd)
             except OSError as exc:
-                if exc.errno in {errno.ELOOP, errno.EMLINK}:
+                if exc.errno in {errno.ELOOP, errno.EMLINK, errno.ENXIO}:
                     raise FileRefusedError("the file changed while it was being written") from None
                 raise
             try:
