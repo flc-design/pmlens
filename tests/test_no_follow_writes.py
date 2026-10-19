@@ -1356,3 +1356,54 @@ class TestDryRound7Fixes:
             assert store.db_path == real.resolve() / "drafts.db"
         finally:
             clear_draft_store()
+
+
+class TestRound8Fixes:
+    @pytest.mark.parametrize("target", ["drafts.db", "memory.db-wal", "daily/2099-01-01.yaml"])
+    def test_an_out_path_leading_into_pm_outside_exports_is_refused(self, tmp_path, target):
+        from pmlens.draft_store import DraftStore
+
+        pm = _project(tmp_path)
+        add_task(pm, _task(1))
+        DraftStore(pm / "drafts.db").close()
+        before = (pm / "drafts.db").read_bytes()
+        (pm.parent / "PROMPT.md").symlink_to(f".pm/{target}")
+
+        result = srv.pm_prompt_pack(
+            project_path=str(pm.parent), out_path=str(pm.parent / "PROMPT.md")
+        )
+
+        assert result["status"] == "error"
+        assert ".pm/exports" in result["message"]
+        assert (pm / "drafts.db").read_bytes() == before
+        if target != "drafts.db":
+            assert not (pm / target).exists()
+
+    def test_a_literal_out_path_in_pm_outside_exports_is_refused(self, tmp_path):
+        pm = _project(tmp_path)
+        add_task(pm, _task(1))
+
+        result = srv.pm_prompt_pack(project_path=str(pm.parent), out_path=str(pm / "notes.md"))
+
+        assert result["status"] == "error"
+        assert not (pm / "notes.md").exists()
+
+    def test_an_unreadable_memory_row_is_not_reported_as_a_refused_store(self, tmp_path):
+        import sqlite3
+
+        from pmlens.memory import MemoryStore
+        from pmlens.models import Memory, PmServerError
+        from pmlens.prompt_pack import run_prompt_pack
+
+        pm = _project(tmp_path)
+        add_task(pm, _task(1))
+        store = MemoryStore(pm / "memory.db", global_db_path=None)
+        store.save(Memory(session_id="s", content="caution", project="p", task_id="T-001"))
+        store.close()
+        conn = sqlite3.connect(pm / "memory.db")
+        conn.execute("UPDATE memories SET type = 'bogus'")
+        conn.commit()
+        conn.close()
+
+        with pytest.raises(PmServerError, match="unknown type"):
+            run_prompt_pack(pm)

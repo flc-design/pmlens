@@ -42,17 +42,9 @@ from jinja2.loaders import split_template_path
 from jinja2.sandbox import ImmutableSandboxedEnvironment
 
 from . import safe_yaml
+from .ledger_errors import LedgerWriteRefused
 from .memory import MemoryStore, _has_pm_server_schema
-from .models import (
-    Decision,
-    Memory,
-    MemoryType,
-    PmServerError,
-    Project,
-    SuggestedModel,
-    Task,
-    TaskStatus,
-)
+from .models import Decision, Memory, MemoryType, Project, SuggestedModel, Task, TaskStatus
 from .storage import load_decisions, load_project, load_tasks
 from .utils import FileRefusedError, read_file_in_dir, write_file_below, write_file_in_dir
 
@@ -744,16 +736,17 @@ def run_prompt_pack(
     # cautions (never create it, never raise OperationalError on a bare SELECT).
     memories_by_task: dict[str, list[Memory]] = {}
     mem_db = pm_path / "memory.db"
+    store = None
     try:
         if mem_db.exists() and _has_pm_server_schema(mem_db):
             store = MemoryStore(mem_db, readonly=True)
-            try:
-                memories_by_task = {t.id: store.get_by_task(t.id) for t in selected}
-            finally:
-                store.close()
-    except PmServerError as exc:  # a refused store (a symlink in .pm): no cautions
-        memories_by_task = {}
+    except LedgerWriteRefused as exc:  # a refused store (a symlink in .pm): no cautions
         warnings.append(f"memory_store_refused: {exc}; the pack has no memory cautions")
+    if store is not None:
+        try:
+            memories_by_task = {t.id: store.get_by_task(t.id) for t in selected}
+        finally:
+            store.close()
 
     decisions_by_id = {d.id: d for d in decisions}
     filter_label = _describe_prompt_pack_filter(filter_tag, filter_phase, filter_priority, task_ids)
@@ -811,17 +804,16 @@ def run_prompt_pack(
     # directory or the file there may be a symlink, and writing through it
     # would overwrite any file the user can write (PMSERV-270, PMSERV-277).
     in_pm = ("exports", dest.name) if not out_path else _parts_inside_pm(dest, pm_path)
-    if in_pm and (
-        in_pm[-1].casefold() in _PROMPT_PACK_RESERVED_NAMES
-        or in_pm[0].casefold() in _PROMPT_PACK_RESERVED_DIRS
-    ):
-        # out_path named a link (PROMPT.md -> .pm/tasks.yaml) that the name
-        # check above could not see through.
+    if in_pm is not None and (len(in_pm) < 2 or in_pm[0].casefold() != "exports"):
+        # Inside .pm only exports/ is the pack's: everything else there is
+        # pmlens's data (ledgers, stores and their sidecars, daily logs,
+        # templates), which out_path, or a link it names (PROMPT.md ->
+        # .pm/drafts.db), must not overwrite.
         return {
             "status": "error",
             "message": (
-                f"refusing to write a prompt pack over .pm/{'/'.join(in_pm)}, which out_path "
-                "leads to; choose a different out_path"
+                f"refusing to write a prompt pack to .pm/{'/'.join(in_pm)}: inside .pm, packs "
+                "go under .pm/exports; choose an out_path there or outside .pm"
             ),
         }
     if in_pm is None:
