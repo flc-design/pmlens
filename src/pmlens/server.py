@@ -9,6 +9,7 @@ import inspect
 import json
 import os
 import re
+import stat
 import uuid
 from collections import Counter
 from collections.abc import Callable
@@ -534,9 +535,17 @@ def _db_stamp(db_path: Path) -> tuple[bool, int, int, int]:
     project has no memory until the server restarts.
     """
     try:
-        st = db_path.stat()
-        with db_path.open("rb") as fh:
-            header = fh.read(28)
+        # Not followed and never blocking: a repository can ship memory.db as a
+        # symlink or a FIFO, and open() on a FIFO waits for a writer (PMSERV-277).
+        st = os.lstat(db_path)
+        if not stat.S_ISREG(st.st_mode):
+            return (False, 0, 0, 0)
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        fd = os.open(db_path, flags | getattr(os, "O_CLOEXEC", 0))
+        try:
+            header = os.read(fd, 28)
+        finally:
+            os.close(fd)
     except OSError:
         return (False, 0, 0, 0)
     counter = int.from_bytes(header[24:28], "big") if len(header) >= 28 else 0
@@ -790,12 +799,61 @@ def pm_init(project_path: str | None = None, project_name: str | None = None) ->
 
     claudemd_result = ensure_claudemd(root)
 
-    return {
+    result = {
         "status": "initialized",
         "path": str(root),
         "project": project.model_dump(mode="json"),
         "claudemd": claudemd_result,
     }
+    linked = _pm_symlink_warning(pm_path)
+    if linked is not None:
+        result["warnings"] = [linked]
+    return result
+
+
+# Entries in .pm pmlens writes; a symlink at any of them is refused on write
+# (PMSERV-277). The names are fixed, so listing them quotes nothing.
+_PM_WRITE_ENTRIES = (
+    ".locks",
+    "daily",
+    "decision_lineage",
+    "exports",
+    "memory.db",
+    "drafts.db",
+    "x_drafts.db",
+    "project.yaml",
+    "tasks.yaml",
+    "decisions.yaml",
+    "knowledge.yaml",
+    "workflows.yaml",
+    "milestones.yaml",
+    "risks.yaml",
+)
+
+
+def _pm_symlink_warning(pm_path: Path) -> dict | None:
+    """A warning naming the entries in .pm that are symlinks, or None."""
+    linked = []
+    for name in _PM_WRITE_ENTRIES:
+        try:
+            if (pm_path / name).is_symlink():
+                linked.append(name)
+        except OSError:
+            continue
+    if not linked:
+        return None
+    return _build_warning(
+        level="warning",
+        code="symlinks_in_pm_refused",
+        message=(
+            "These entries in .pm are symlinks, and pmlens does not write through them: "
+            + ", ".join(linked)
+        ),
+        remediation=(
+            "Replace each link with the real file or directory. To keep the data elsewhere or "
+            "share it, make .pm itself the symlink instead."
+        ),
+    )
 
 
 @_tool()
@@ -886,7 +944,20 @@ def pm_status(project_path: str | None = None) -> dict:
         drafts_pending: int | None = 0
         try:
             draft_db = default_draft_db_path(pm_path)
-            if draft_db.exists():
+            if draft_db.is_symlink() or (draft_db.exists() and not draft_db.is_file()):
+                # Never opened: SQLite would follow the link (PMSERV-277).
+                drafts_pending = None
+                status_warnings.append(
+                    {
+                        "code": "draft_store_refused",
+                        "remediation": (
+                            f".pm/{draft_db.name} is a symlink or not a regular file, so pmlens "
+                            "does not open it. Replace it with the real database or remove it "
+                            "(to move or share drafts, make .pm itself the symlink)."
+                        ),
+                    }
+                )
+            elif draft_db.exists():
                 drafts_pending = get_draft_store(draft_db).get_pending_count()
         except DraftStoreConflictError as exc:
             drafts_pending = None  # Unknown, not an empty queue.
@@ -957,6 +1028,9 @@ def pm_status(project_path: str | None = None) -> dict:
         status_warnings.append(hook_warning)
 
     status_warnings.extend(_decision_ledger_warnings(pm_path))
+    linked = _pm_symlink_warning(pm_path)
+    if linked is not None:
+        status_warnings.append(linked)
 
     return {
         "project": {

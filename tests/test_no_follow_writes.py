@@ -164,3 +164,134 @@ def test_the_tool_reports_the_refusal_without_raising_raw_os_errors(tmp_path):
     message = str(caught.value)
     assert message.startswith("refusing to write .pm/.locks")
     assert "make .pm itself the symlink" in message
+
+
+# ─── SQLite stores (memory.db, drafts.db) ────────────
+
+
+def _sqlite_file(path: Path) -> bytes:
+    import sqlite3
+    from contextlib import closing
+
+    with closing(sqlite3.connect(path)) as conn, conn:
+        conn.execute("CREATE TABLE victim (x TEXT)")
+        conn.execute("INSERT INTO victim VALUES ('precious')")
+    return path.read_bytes()
+
+
+class TestSqliteStores:
+    def test_a_dangling_memory_db_link_is_refused_and_creates_nothing(self, tmp_path):
+        from pmlens.memory import MemoryStore
+
+        pm = _project(tmp_path)
+        target = _outside(tmp_path) / "loot.db"
+        (pm / "memory.db").symlink_to(target)
+
+        with pytest.raises(LedgerWriteRefused, match=r"\.pm/memory\.db"):
+            MemoryStore(pm / "memory.db", global_db_path=None)
+
+        assert not target.exists()
+        assert sorted(p.name for p in target.parent.iterdir()) == []
+
+    def test_a_memory_db_link_to_another_database_is_refused(self, tmp_path):
+        from pmlens.memory import MemoryStore
+
+        pm = _project(tmp_path)
+        other = _outside(tmp_path) / "other.db"
+        before = _sqlite_file(other)
+        (pm / "memory.db").symlink_to(other)
+
+        with pytest.raises(LedgerWriteRefused):
+            MemoryStore(pm / "memory.db", global_db_path=None)
+        with pytest.raises(LedgerWriteRefused):
+            MemoryStore(pm / "memory.db", global_db_path=None, readonly=True)
+
+        assert other.read_bytes() == before
+
+    def test_a_symlinked_sidecar_is_refused(self, tmp_path):
+        from pmlens.memory import MemoryStore
+
+        pm = _project(tmp_path)
+        MemoryStore(pm / "memory.db", global_db_path=None).close()
+        victim = _outside(tmp_path) / "victim"
+        victim.write_text("precious", encoding="utf-8")
+        for sidecar in ("memory.db-wal", "memory.db-shm"):
+            (pm / sidecar).unlink(missing_ok=True)
+        (pm / "memory.db-wal").symlink_to(victim)
+
+        with pytest.raises(LedgerWriteRefused, match="-wal"):
+            MemoryStore(pm / "memory.db", global_db_path=None)
+        assert victim.read_text(encoding="utf-8") == "precious"
+
+    def test_a_link_swapped_in_after_the_check_is_caught_by_sqlite_itself(
+        self, tmp_path, monkeypatch
+    ):
+        import pmlens.safe_sqlite as safe_sqlite
+        from pmlens.utils import FileRefusedError
+
+        pm = _project(tmp_path)
+        other = _outside(tmp_path) / "other.db"
+        before = _sqlite_file(other)
+        (pm / "memory.db").symlink_to(other)
+        decoy = os.stat(other)  # what a check before the swap would have seen
+        monkeypatch.setattr(
+            safe_sqlite, "_lstat_at", lambda name, fd, d: decoy if name == "memory.db" else None
+        )
+
+        with pytest.raises(FileRefusedError, match="changed while it was being opened"):
+            safe_sqlite.connect_store(pm / "memory.db")
+        assert other.read_bytes() == before
+
+    def test_regular_stores_and_a_symlinked_pm_still_work(self, tmp_path):
+        from pmlens.memory import MemoryStore
+        from pmlens.models import Memory
+
+        real = tmp_path / "synced" / "pm"
+        real.mkdir(parents=True)
+        root = tmp_path / "proj"
+        root.mkdir()
+        (root / ".pm").symlink_to(real, target_is_directory=True)
+        store = MemoryStore(root / ".pm" / "memory.db", global_db_path=None)
+        try:
+            store.save(Memory(session_id="s", content="kept", project="p"))
+            assert [m.content for m in store.get_recent(limit=5)] == ["kept"]
+        finally:
+            store.close()
+        assert (real / "memory.db").is_file()
+
+    def test_a_dangling_drafts_db_link_is_refused_and_creates_nothing(self, tmp_path):
+        from pmlens.draft_store import DraftStore
+        from pmlens.models import PmServerError
+
+        pm = _project(tmp_path)
+        target = _outside(tmp_path) / "stolen.db"
+        (pm / "drafts.db").symlink_to(target)
+
+        with pytest.raises(PmServerError, match=r"\.pm/drafts\.db"):
+            DraftStore(pm / "drafts.db")
+        assert not target.exists()
+
+    def test_pm_status_reports_linked_stores_without_opening_them(self, tmp_path):
+        pm = _project(tmp_path)
+        outside = _outside(tmp_path)
+        target = outside / "stolen.db"
+        (pm / "drafts.db").symlink_to(target)
+        (pm / "memory.db").symlink_to(outside / "mem.db")
+
+        status = srv.pm_status(project_path=str(pm.parent))
+
+        codes = {w["code"]: w for w in status["warnings"]}
+        assert "draft_store_refused" in codes
+        assert "memory.db" in codes["symlinks_in_pm_refused"]["message"]
+        assert "drafts.db" in codes["symlinks_in_pm_refused"]["message"]
+        assert status["diagnostics"]["x_drafts_pending"] is None
+        assert not target.exists()
+
+    def test_the_lens_stamp_does_not_block_on_a_fifo(self, tmp_path):
+        import time
+
+        pm = _project(tmp_path)
+        os.mkfifo(pm / "memory.db")
+        started = time.monotonic()
+        assert srv._db_stamp(pm / "memory.db") == (False, 0, 0, 0)
+        assert time.monotonic() - started < 2

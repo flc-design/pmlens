@@ -33,6 +33,9 @@ from pathlib import Path
 from typing import Literal
 
 from .memory import _apply_pragmas
+from .models import PmServerError
+from .safe_sqlite import connect_store
+from .utils import FileRefusedError
 
 # Frozen enums. SQLite cannot ALTER a CHECK constraint and there is no
 # migration framework (user_version pinned at 1), so the value sets below are
@@ -178,6 +181,28 @@ END;
 """
 
 
+def _open_store(db_path: Path, *, create: bool) -> tuple[sqlite3.Connection, bool]:
+    """Open the draft database, refusing a symlink at it or its sidecars (PMSERV-277).
+
+    A dangling ``.pm/drafts.db`` link used to make SQLite create the target
+    anywhere and write unredacted ``raw_content`` into it.
+
+    Raises:
+        PmServerError: The database (or a sidecar) is a symlink or not a
+            regular file, or it is missing when it may not be created.
+    """
+    try:
+        opened = connect_store(db_path, create=create)
+    except FileRefusedError as exc:
+        raise PmServerError(
+            f"refusing to open .pm/{db_path.name}: {exc}; pmlens does not open symlinks "
+            "inside .pm (to move or share the data, make .pm itself the symlink)"
+        ) from None
+    if opened is None:
+        raise PmServerError(f".pm/{db_path.name} disappeared while it was in use")
+    return opened
+
+
 def _ensure_schema(db_path: Path) -> None:
     """Create the x_drafts schema if missing.
 
@@ -186,8 +211,7 @@ def _ensure_schema(db_path: Path) -> None:
     non-existence and apply it first. Mirrors ``outbox._ensure_schema``.
     """
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    is_new = not db_path.exists()
-    conn = sqlite3.connect(str(db_path), check_same_thread=False)
+    conn, is_new = _open_store(db_path, create=True)
     try:
         if is_new:
             conn.execute("PRAGMA page_size = 8192")
@@ -226,8 +250,12 @@ class DraftStore:
         _ensure_schema(self.db_path)
 
     def _connect(self) -> sqlite3.Connection:
-        """Open a short-lived RW connection with WAL pragmas applied."""
-        conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+        """Open a short-lived RW connection with WAL pragmas applied.
+
+        Reopened for every write, so the symlink check runs every time:
+        ``raw_content`` is written on these connections (PMSERV-277).
+        """
+        conn, _ = _open_store(self.db_path, create=False)
         conn.row_factory = sqlite3.Row
         _apply_pragmas(conn)
         return conn
