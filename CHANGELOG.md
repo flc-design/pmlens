@@ -11,7 +11,7 @@ as accepted, like every lifecycle change, returns a warning to pass on to the
 user.
 
 MCP tool count: 48 names for 46 operations in full mode (the two content tool
-aliases); Lens 17, or 19 with Desktop outbox writes. Test suite: 2,691 passing.
+aliases); Lens 17, or 19 with Desktop outbox writes. Test suite: 2,703 passing.
 
 **Upgrade notes.**
 
@@ -163,9 +163,10 @@ aliases); Lens 17, or 19 with Desktop outbox writes. Test suite: 2,691 passing.
   written through it to any file the user can write. A link at the file is
   now replaced, and a symlinked `.pm/exports` is refused; an existing export
   is rewritten in place as before, keeping its permissions, group and ACL,
-  and a read-only one is not replaced. An explicit `out_path` is written as
-  before. A write that fails returns `status: error` with the reason instead
-  of raising.
+  and a read-only one is not replaced. An explicit `out_path` inside `.pm`
+  (such as `.pm/exports/mine.md`) is written the same way, following no
+  link below `.pm`; one elsewhere is written as before. A write that fails
+  returns `status: error` with the reason instead of raising.
 - **Writes no longer follow symlinks a repository ships in `.pm/` or as a
   rule file** (PMSERV-277). git checks symlinks out as links, and pmlens
   wrote through them: a dangling `.pm/.locks/.gitignore` link created its

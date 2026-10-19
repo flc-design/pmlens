@@ -958,3 +958,142 @@ class TestDryRound2Fixes:
 
         assert summary.results[0].status == "appended"
         assert "pm-server:begin" in (real / "CLAUDE.md").read_text(encoding="utf-8")
+
+
+class TestDryRound3Fixes:
+    @pytest.mark.parametrize(
+        ("gitfile", "gitdir"),
+        [("gitdir: gd \n", "gd "), ("gitdir:  gd\n", " gd"), ("gitdir: gd\x0cX\r\n", "gd\x0cX")],
+    )
+    def test_a_gitfile_is_parsed_as_git_does(self, tmp_path, gitfile, gitdir):
+        from pmlens.rules import ensure_claudemd
+
+        root = _repo(tmp_path)
+        (root / gitdir).mkdir()
+        config = root / gitdir / "config"
+        config.write_text("[core]\n", encoding="utf-8")
+        (root / ".git").write_text(gitfile, encoding="utf-8", newline="")
+        (root / "CLAUDE.md").symlink_to(f"{gitdir}/config")
+
+        assert ensure_claudemd(root).startswith("left CLAUDE.md unchanged")
+        assert config.read_text(encoding="utf-8") == "[core]\n"
+
+    def test_a_commondir_is_parsed_as_git_does(self, tmp_path):
+        from pmlens.rules import ensure_claudemd
+
+        root = _repo(tmp_path)
+        (root / "cd ").mkdir()
+        config = root / "cd " / "config"
+        config.write_text("[core]\n", encoding="utf-8")
+        (root / ".git").mkdir()
+        (root / ".git" / "commondir").write_text("../cd \n", encoding="utf-8")
+        (root / "CLAUDE.md").symlink_to("cd /config")
+
+        assert ensure_claudemd(root).startswith("left CLAUDE.md unchanged")
+        assert config.read_text(encoding="utf-8") == "[core]\n"
+
+    def test_a_git_link_to_a_gitfile_is_read_through(self, tmp_path):
+        from pmlens.rules import inject_pm_rules
+
+        outside = _outside(tmp_path)
+        (outside / "store.git").mkdir()
+        (outside / "gitfile").write_text(f"gitdir: {outside / 'store.git'}\n", encoding="utf-8")
+        root = _repo(tmp_path)
+        (root / ".git").symlink_to(outside / "gitfile")
+        (root / "AGENTS.md").symlink_to("CLAUDE.md")
+
+        summary = inject_pm_rules(root, target="codex")
+
+        assert summary.results[0].status == "created"
+
+    def test_a_git_link_to_a_gitfile_still_guards_its_gitdir(self, tmp_path):
+        from pmlens.rules import inject_pm_rules
+
+        outside = _outside(tmp_path)
+        root = _repo(tmp_path)
+        (root / "gd").mkdir()
+        (root / "gd" / "config").write_text("[core]\n", encoding="utf-8")
+        (outside / "gitfile").write_text(f"gitdir: {root / 'gd'}\n", encoding="utf-8")
+        (root / ".git").symlink_to(outside / "gitfile")
+        (root / "CLAUDE.md").symlink_to("gd/config")
+
+        summary = inject_pm_rules(root, target="claude-code")
+
+        assert summary.results[0].status == "failed"
+        assert (root / "gd" / "config").read_text(encoding="utf-8") == "[core]\n"
+
+    @pytest.mark.parametrize(
+        ("link", "expected"),
+        [("a/x", "could not be checked"), (".", "the project directory itself")],
+    )
+    def test_refusals_say_why(self, tmp_path, link, expected):
+        from pmlens.rules import inject_pm_rules
+
+        root = _repo(tmp_path)
+        (root / ".pm").mkdir()
+        (root / "a").symlink_to("b")
+        (root / "b").symlink_to("a")
+        (root / "CLAUDE.md").symlink_to(link)
+
+        summary = inject_pm_rules(root, target="claude-code")
+
+        message = summary.results[0].message
+        assert summary.results[0].status == "failed"
+        assert expected in message and "into .git" not in message
+
+
+class TestPromptPackOutPathInPm:
+    def _project_with_task(self, tmp_path: Path) -> Path:
+        pm = _project(tmp_path)
+        add_task(pm, _task(1))
+        return pm
+
+    def test_a_relative_out_path_through_a_linked_exports_is_refused(self, tmp_path, monkeypatch):
+        pm = self._project_with_task(tmp_path)
+        outside = _outside(tmp_path)
+        (pm / "exports").symlink_to(outside, target_is_directory=True)
+        monkeypatch.chdir(pm.parent)
+
+        result = srv.pm_prompt_pack(project_path=str(pm.parent), out_path=".pm/exports/mine.md")
+
+        assert result["status"] == "error"
+        assert ".pm/exports/mine.md" in result["message"]
+        assert list(outside.iterdir()) == []
+
+    def test_an_absolute_out_path_onto_a_linked_file_is_refused(self, tmp_path):
+        pm = self._project_with_task(tmp_path)
+        victim = _outside(tmp_path) / "victim.txt"
+        victim.write_text("ORIGINAL", encoding="utf-8")
+        (pm / "exports").mkdir()
+        (pm / "exports" / "pack.md").symlink_to(victim)
+
+        result = srv.pm_prompt_pack(
+            project_path=str(pm.parent), out_path=str(pm / "exports" / "pack.md")
+        )
+
+        assert result["status"] == "error"
+        assert victim.read_text(encoding="utf-8") == "ORIGINAL"
+
+    def test_an_out_path_through_a_link_to_pm_is_refused(self, tmp_path):
+        pm = self._project_with_task(tmp_path)
+        outside = _outside(tmp_path)
+        (pm / "exports").symlink_to(outside, target_is_directory=True)
+        alias = tmp_path / "alias"
+        alias.symlink_to(pm, target_is_directory=True)
+
+        result = srv.pm_prompt_pack(
+            project_path=str(pm.parent), out_path=str(alias / "exports" / "x.md")
+        )
+
+        assert result["status"] == "error"
+        assert list(outside.iterdir()) == []
+
+    def test_out_paths_in_pm_and_outside_still_work(self, tmp_path):
+        pm = self._project_with_task(tmp_path)
+        inside = pm / "exports" / "nested" / "mine.md"
+        elsewhere = _outside(tmp_path) / "deep" / "pack.md"
+
+        for dest in (inside, elsewhere):
+            result = srv.pm_prompt_pack(project_path=str(pm.parent), out_path=str(dest))
+            assert result["status"] == "ok", result
+            assert "T-001" in dest.read_text(encoding="utf-8")

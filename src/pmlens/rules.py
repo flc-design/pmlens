@@ -257,8 +257,12 @@ def _rule_location(path: Path) -> _RuleLocation:
             "write through it; replace the link with the file, or point it at a file inside "
             "the project"
         )
+    if not rel.parts:
+        raise RuleFileRefused(
+            f"{name} is a symlink to the project directory itself; pmlens does not follow it"
+        )
     into = f"{name} is a symlink into .git or .pm; pmlens does not follow it"
-    if not rel.parts or any(part.casefold() in {".git", ".pm"} for part in rel.parts):
+    if any(part.casefold() in {".git", ".pm"} for part in rel.parts):
         raise RuleFileRefused(into)
     guarded = _guarded_dirs(root)
     if guarded is None:
@@ -266,7 +270,15 @@ def _rule_location(path: Path) -> _RuleLocation:
             f"{name} is a symlink, and pmlens could not tell where this project's .git and .pm "
             "are (a dangling link or an unreadable .git file), so it does not follow it"
         )
-    if _inside_any(target, guarded):
+    try:
+        inside = _inside_any(target, guarded)
+    except OSError as exc:
+        reason = os.strerror(exc.errno) if exc.errno else type(exc).__name__
+        raise RuleFileRefused(
+            f"{name} is a symlink whose target could not be checked ({reason}); pmlens does "
+            "not follow it"
+        ) from None
+    if inside:
         raise RuleFileRefused(into)
     return _RuleLocation(root, rel.parts)
 
@@ -305,8 +317,11 @@ def _inside_any(target: Path, guarded: list[tuple[int, int]]) -> bool:
     alias, or one that is the project root or above it (``.pm -> .``,
     ``.git -> ..``, which puts every file in the project inside it) is caught
     too. The walk goes from the target's directory to the filesystem root,
-    past directories that do not exist yet (the write would create them), and
-    refuses if one cannot be checked.
+    past directories that do not exist yet (the write would create them).
+
+    Raises:
+        OSError: A directory on the way could not be checked (a link loop, a
+            name too long, no permission).
     """
     directory = target.parent
     while True:
@@ -314,8 +329,8 @@ def _inside_any(target: Path, guarded: list[tuple[int, int]]) -> bool:
             info = os.stat(directory)
         except (FileNotFoundError, NotADirectoryError):
             pass
-        except (OSError, ValueError):
-            return True
+        except ValueError:
+            raise OSError(errno.EINVAL, os.strerror(errno.EINVAL)) from None
         else:
             if (info.st_dev, info.st_ino) in guarded:
                 return True
@@ -358,12 +373,23 @@ def _guarded_dirs(root: Path) -> list[tuple[int, int]] | None:
 
 
 def _git_dirs(root: Path, info: os.stat_result) -> list[tuple[int, int]]:
-    """The git directory a ``.git`` file names, and the common directory, if any."""
+    """The git directory a ``.git`` file names, and the common directory, if any.
+
+    Parsed as git does, so the directory guarded is the one git uses: a
+    ``.git`` file is ``gitdir: <path>`` and the rest of the file is the path
+    (relative to the directory holding ``.git``) up to trailing CR / LF;
+    ``commondir`` likewise, relative to the git directory. A ``.git`` that is
+    a link to a gitfile (git follows it) is read through the link.
+    """
     if stat.S_ISREG(info.st_mode):
-        line = _git_metadata(root, ".git")
-        if not line.startswith("gitdir:"):
+        try:
+            gitfile = (root / ".git").resolve(strict=True)
+        except (OSError, RuntimeError):
+            raise _GitDirsUnknownError from None
+        value = _git_metadata(gitfile.parent, gitfile.name)
+        if not value.startswith("gitdir: "):
             raise _GitDirsUnknownError
-        gitdir = root / line.removeprefix("gitdir:").strip()  # a relative path is from root
+        gitdir = root / value.removeprefix("gitdir: ")
         gitdir_info = _stat_existing(gitdir)
         if gitdir_info is None:
             return []
@@ -382,20 +408,22 @@ def _git_dirs(root: Path, info: os.stat_result) -> list[tuple[int, int]]:
 
 
 def _git_metadata(directory: Path, name: str) -> str:
-    """The first line of a small git metadata file, or "" when there is none.
+    """A small git metadata file's content without trailing CR / LF, or "" if none.
 
-    Read like a rule file (no link, no FIFO, a size cap), since a project that
-    did not come from ``git clone`` can supply it.
+    git strips nothing else, so neither is anything stripped here: a path with
+    a trailing space or a form feed in it names that directory. Read like a
+    rule file (no link, no FIFO, a size cap), since a project that did not
+    come from ``git clone`` can supply it.
     """
     try:
         raw = read_file_in_dir(directory, name, _GITFILE_MAX_BYTES)
         text = raw.decode("utf-8") if raw is not None else ""
     except (FileRefusedError, OSError, UnicodeDecodeError):
         raise _GitDirsUnknownError from None
-    line = text.splitlines()[0].strip() if text.strip() else ""
-    if "\x00" in line:
+    value = text.rstrip("\r\n")
+    if "\x00" in value:
         raise _GitDirsUnknownError
-    return line
+    return value
 
 
 def _stat_existing(path: Path) -> os.stat_result | None:
