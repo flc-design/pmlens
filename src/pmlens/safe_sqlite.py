@@ -85,9 +85,9 @@ def connect_store(
         the file is missing and nothing may be created.
 
     Raises:
-        FileRefusedError: The file, or a ``-wal`` / ``-shm`` / ``-journal``
-            next to it, is a symlink or not a regular file, or SQLite opened a
-            different file than the one checked.
+        FileRefusedError: The file, or (for a read-write open) a ``-wal`` /
+            ``-shm`` / ``-journal`` next to it, is a symlink or not a regular
+            file, or SQLite opened a different file than the one checked.
         sqlite3.Error: SQLite could not open it.
     """
     directory = path.parent.resolve()
@@ -97,9 +97,16 @@ def connect_store(
     dir_fd = None if _no_dir_fd() else open_trusted_dir(directory)
     try:
         info = _lstat_at(name, dir_fd, directory)
+        if info is None and (readonly or not create):
+            return None
+        if not readonly:
+            # Checked before the store is created, so a refusal leaves nothing
+            # behind. A read-only (immutable) open never touches the sidecars.
+            for suffix in _SIDECARS:
+                sidecar = _lstat_at(name + suffix, dir_fd, directory)
+                if sidecar is not None:
+                    _refuse_unless_regular(sidecar, f"its {suffix} file")
         if info is None:
-            if readonly or not create:
-                return None
             flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | _NOFOLLOW | _CLOEXEC
             try:
                 if dir_fd is None:  # pragma: no cover - Windows
@@ -116,10 +123,6 @@ def connect_store(
                     ) from None
         if info is not None:
             _refuse_unless_regular(info, "the database file")
-        for suffix in _SIDECARS:
-            sidecar = _lstat_at(name + suffix, dir_fd, directory)
-            if sidecar is not None:
-                _refuse_unless_regular(sidecar, f"its {suffix} file")
     finally:
         if dir_fd is not None:
             os.close(dir_fd)

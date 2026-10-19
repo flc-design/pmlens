@@ -1285,3 +1285,74 @@ class TestDryRound6Fixes:
 
         assert result["status"] == "error"
         assert (pm / ledger).read_bytes() == before
+
+
+class TestDryRound7Fixes:
+    @pytest.mark.parametrize(("db", "sidecar"), [("memory.db", "-wal"), ("drafts.db", "-shm")])
+    def test_a_refused_store_leaves_no_new_file_behind(self, tmp_path, db, sidecar):
+        from pmlens.draft_store import DraftStore
+        from pmlens.memory import MemoryStore
+        from pmlens.models import PmServerError
+
+        pm = _project(tmp_path)
+        (pm / f"{db}{sidecar}").symlink_to(_outside(tmp_path) / "nowhere")
+
+        with pytest.raises(PmServerError, match=sidecar):
+            if db == "memory.db":
+                MemoryStore(pm / db, global_db_path=None)
+            else:
+                DraftStore(pm / db)
+        assert not (pm / db).exists()
+
+    def test_a_read_only_open_ignores_sidecars_it_never_touches(self, tmp_path):
+        from pmlens.memory import MemoryStore
+        from pmlens.models import Memory
+
+        pm = _project(tmp_path)
+        store = MemoryStore(pm / "memory.db", global_db_path=None)
+        store.save(Memory(session_id="s", content="kept", project="p"))
+        store.close()
+        for name in ("memory.db-wal", "memory.db-shm"):
+            (pm / name).unlink(missing_ok=True)
+        (pm / "memory.db-wal").symlink_to(_outside(tmp_path) / "nowhere")
+
+        ro = MemoryStore(pm / "memory.db", global_db_path=None, readonly=True)
+        try:
+            assert [m.content for m in ro.get_recent(limit=5)] == ["kept"]
+        finally:
+            ro.close()
+        assert not (tmp_path / "outside" / "nowhere").exists()
+
+    def test_a_refused_memory_store_costs_the_pack_its_cautions_not_the_export(self, tmp_path):
+        from click.testing import CliRunner
+
+        from pmlens.__main__ import cli
+        from pmlens.memory import MemoryStore
+
+        pm = _project(tmp_path)
+        add_task(pm, _task(1))
+        other = _outside(tmp_path) / "other.db"
+        MemoryStore(other, global_db_path=None).close()
+        (pm / "memory.db").symlink_to(other)
+
+        result = srv.pm_prompt_pack(project_path=str(pm.parent))
+        assert result["status"] == "ok", result
+        assert any(w.startswith("memory_store_refused") for w in result["warnings"])
+
+        (pm / "tasks.yaml").write_text("tasks: [\n", encoding="utf-8")
+        run = CliRunner().invoke(cli, ["prompt-pack", "--project", str(pm.parent)])
+        assert run.exit_code == 1
+        assert "Error:" in run.output and "Traceback" not in run.output
+        assert not isinstance(run.exception, Exception) or isinstance(run.exception, SystemExit)
+
+    def test_a_cached_draft_store_writes_to_the_resolved_directory(self, tmp_path):
+        from pmlens.draft_store import clear_draft_store, get_draft_store
+
+        real = tmp_path / "real"
+        real.mkdir()
+        (tmp_path / "alias").symlink_to(real, target_is_directory=True)
+        try:
+            store = get_draft_store(tmp_path / "alias" / "drafts.db")
+            assert store.db_path == real.resolve() / "drafts.db"
+        finally:
+            clear_draft_store()

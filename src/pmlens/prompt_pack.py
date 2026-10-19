@@ -43,7 +43,16 @@ from jinja2.sandbox import ImmutableSandboxedEnvironment
 
 from . import safe_yaml
 from .memory import MemoryStore, _has_pm_server_schema
-from .models import Decision, Memory, MemoryType, Project, SuggestedModel, Task, TaskStatus
+from .models import (
+    Decision,
+    Memory,
+    MemoryType,
+    PmServerError,
+    Project,
+    SuggestedModel,
+    Task,
+    TaskStatus,
+)
 from .storage import load_decisions, load_project, load_tasks
 from .utils import FileRefusedError, read_file_in_dir, write_file_below, write_file_in_dir
 
@@ -735,12 +744,16 @@ def run_prompt_pack(
     # cautions (never create it, never raise OperationalError on a bare SELECT).
     memories_by_task: dict[str, list[Memory]] = {}
     mem_db = pm_path / "memory.db"
-    if mem_db.exists() and _has_pm_server_schema(mem_db):
-        store = MemoryStore(mem_db, readonly=True)
-        try:
-            memories_by_task = {t.id: store.get_by_task(t.id) for t in selected}
-        finally:
-            store.close()
+    try:
+        if mem_db.exists() and _has_pm_server_schema(mem_db):
+            store = MemoryStore(mem_db, readonly=True)
+            try:
+                memories_by_task = {t.id: store.get_by_task(t.id) for t in selected}
+            finally:
+                store.close()
+    except PmServerError as exc:  # a refused store (a symlink in .pm): no cautions
+        memories_by_task = {}
+        warnings.append(f"memory_store_refused: {exc}; the pack has no memory cautions")
 
     decisions_by_id = {d.id: d for d in decisions}
     filter_label = _describe_prompt_pack_filter(filter_tag, filter_phase, filter_priority, task_ids)

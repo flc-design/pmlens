@@ -551,7 +551,9 @@ def get_draft_store(db_path: Path) -> DraftStore:
     path = Path(db_path)
     key = str(path.parent.resolve() / path.name)
     if key not in _draft_stores:
-        _draft_stores[key] = DraftStore(Path(db_path))
+        # Built from the key, not the first caller's spelling: a cached store
+        # must not keep writing through a path another project spelled.
+        _draft_stores[key] = DraftStore(Path(key))
     return _draft_stores[key]
 
 

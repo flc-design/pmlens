@@ -268,6 +268,7 @@ def prompt_pack_cmd(
     session"); use --format html for a diagram + copy buttons. Read-only over
     the project's data — the only write is the export file.
     """
+    from .models import PmServerError
     from .prompt_pack import run_prompt_pack
     from .utils import resolve_project_path
 
@@ -277,16 +278,20 @@ def prompt_pack_cmd(
         click.echo(f"Error: {e}", err=True)
         raise SystemExit(1) from e
 
-    result = run_prompt_pack(
-        root / ".pm",
-        filter_tag=filter_tag,
-        filter_phase=filter_phase,
-        filter_priority=filter_priority,
-        task_ids=list(task_ids) or None,
-        format=fmt,
-        group_by=group_by,
-        out_path=out_path,
-    )
+    try:
+        result = run_prompt_pack(
+            root / ".pm",
+            filter_tag=filter_tag,
+            filter_phase=filter_phase,
+            filter_priority=filter_priority,
+            task_ids=list(task_ids) or None,
+            format=fmt,
+            group_by=group_by,
+            out_path=out_path,
+        )
+    except PmServerError as e:  # a broken or refused ledger: name it, no traceback
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(1) from None
 
     if result["status"] == "error":
         click.echo(f"Error: {result['message']}", err=True)
