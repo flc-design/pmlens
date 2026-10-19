@@ -15,7 +15,7 @@ from pathlib import Path
 
 from .ledger_errors import LedgerReadError, LedgerWriteRefused, build_record
 from .models import Memory, MemoryType, SessionSummary
-from .safe_sqlite import connect_store
+from .safe_sqlite import connect_store, refusal_message
 from .utils import FileRefusedError
 
 # ─── Tag helpers ────────────────────────────────────
@@ -253,10 +253,7 @@ def _connect_readonly(db_path: Path) -> sqlite3.Connection:
 
 def _store_refused(db_path: Path, exc: FileRefusedError) -> LedgerWriteRefused:
     """A content-free refusal to open a project's SQLite store (PMSERV-277)."""
-    return LedgerWriteRefused(
-        f"refusing to open .pm/{db_path.name}: {exc}; pmlens does not open symlinks inside .pm "
-        "(to move or share the data, make .pm itself the symlink)"
-    )
+    return LedgerWriteRefused(refusal_message(db_path, exc))
 
 
 def _has_pm_server_schema(db_path: Path) -> bool:

@@ -273,13 +273,9 @@ def _inside_git_or_pm(root: Path, target: Path, parts: tuple[str, ...]) -> bool:
     """
     if any(part.casefold() in {".git", ".pm"} for part in parts):
         return True
-    guarded = []
-    for name in (".git", ".pm"):
-        try:
-            info = os.stat(root / name)
-        except OSError:
-            continue
-        guarded.append((info.st_dev, info.st_ino))
+    guarded = _guarded_dirs(root)
+    if guarded is None:
+        return True
     if not guarded:
         return False
     # Walk up from the target's directory through the root to the filesystem
@@ -299,6 +295,70 @@ def _inside_git_or_pm(root: Path, target: Path, parts: tuple[str, ...]) -> bool:
         if directory == directory.parent:
             return False
         directory = directory.parent
+
+
+def _guarded_dirs(root: Path) -> list[tuple[int, int]] | None:
+    """``(st_dev, st_ino)`` of the project's .git and .pm, or None to refuse every link.
+
+    ``.git`` can be a gitfile (``gitdir: <path>``, written by
+    ``--separate-git-dir``, a worktree or a submodule; git never checks one
+    out) naming the real git directory, which may sit inside the project
+    under another name: that directory, and the common directory a worktree's
+    ``commondir`` names, are guarded too. A .git or .pm that is a dangling or
+    looping link, or a gitfile that cannot be read, leaves what to guard
+    unknown, so every followed link is refused.
+    """
+    guarded: list[tuple[int, int]] = []
+    for name in (".git", ".pm"):
+        entry = root / name
+        try:
+            info = os.stat(entry)
+        except FileNotFoundError:
+            if os.path.lexists(entry):
+                return None
+            continue
+        except OSError:
+            return None
+        guarded.append((info.st_dev, info.st_ino))
+        if name == ".git" and stat.S_ISREG(info.st_mode):
+            gitdirs = _gitfile_dirs(root)
+            if gitdirs is None:
+                return None
+            guarded.extend(gitdirs)
+    return guarded
+
+
+_GITFILE_MAX_BYTES = 4096
+
+
+def _gitfile_dirs(root: Path) -> list[tuple[int, int]] | None:
+    """The git directory a ``.git`` file names, and its common directory."""
+    try:
+        raw = read_file_in_dir(root, ".git", _GITFILE_MAX_BYTES)
+        text = raw.decode("utf-8") if raw is not None else ""
+    except (FileRefusedError, UnicodeDecodeError):
+        return None
+    first = text.splitlines()[0] if text else ""
+    if not first.startswith("gitdir:"):
+        return None
+    gitdir = root / first.removeprefix("gitdir:").strip()  # a relative path is from root
+    dirs = [gitdir]
+    try:
+        common = (gitdir / "commondir").read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        common = ""
+    except (OSError, UnicodeDecodeError):
+        return None
+    if common:
+        dirs.append(gitdir / common)
+    found = []
+    for directory in dirs:
+        try:
+            info = os.stat(directory)
+        except OSError:
+            return None
+        found.append((info.st_dev, info.st_ino))
+    return found
 
 
 def _read_rule(loc: _RuleLocation, name: str) -> bytes | None:

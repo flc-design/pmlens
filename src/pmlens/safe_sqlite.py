@@ -20,11 +20,14 @@ import stat
 from pathlib import Path
 from urllib.parse import quote
 
-from .utils import FileRefusedError, _no_dir_fd
+from .utils import FileRefusedError, _no_dir_fd, open_trusted_dir
 
 _SIDECARS = ("-wal", "-shm", "-journal")
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+# SQLITE_DEFAULT_FILE_PERMISSIONS: the mode sqlite3.connect created stores
+# with before they were pre-created here; -wal / -shm take the store's mode.
+_DB_MODE = 0o644
 
 
 def _lstat_at(name: str, dir_fd: int | None, directory: Path) -> os.stat_result | None:
@@ -55,6 +58,17 @@ def _file_uri(target: Path) -> str:
     return "file://" + quote(path, safe="/:")
 
 
+def refusal_message(path: Path, exc: FileRefusedError) -> str:
+    """A content-free message for a store ``connect_store`` refused."""
+    reason = str(exc)
+    if "symlink" in reason or "not a regular file" in reason:
+        return (
+            f"refusing to open .pm/{path.name}: {reason}; pmlens does not open symlinks "
+            "inside .pm (to move or share the data, make .pm itself the symlink)"
+        )
+    return f"could not open .pm/{path.name}: {reason}"
+
+
 def connect_store(
     path: Path, *, readonly: bool = False, create: bool = True
 ) -> tuple[sqlite3.Connection, bool] | None:
@@ -80,7 +94,7 @@ def connect_store(
     name = path.name
     target = directory / name
     created = False
-    dir_fd = None if _no_dir_fd() else os.open(directory, os.O_RDONLY | os.O_DIRECTORY | _CLOEXEC)
+    dir_fd = None if _no_dir_fd() else open_trusted_dir(directory)
     try:
         info = _lstat_at(name, dir_fd, directory)
         if info is None:
@@ -89,9 +103,9 @@ def connect_store(
             flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | _NOFOLLOW | _CLOEXEC
             try:
                 if dir_fd is None:  # pragma: no cover - Windows
-                    fd = os.open(target, flags, 0o666)
+                    fd = os.open(target, flags, _DB_MODE)
                 else:
-                    fd = os.open(name, flags, 0o666, dir_fd=dir_fd)
+                    fd = os.open(name, flags, _DB_MODE, dir_fd=dir_fd)
                 os.close(fd)
                 created = True
             except FileExistsError:

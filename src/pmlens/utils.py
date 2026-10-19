@@ -230,6 +230,30 @@ def _open_or_make_dir(name: str, dir_fd: int) -> int:
     return fd
 
 
+def open_trusted_dir(path: Path) -> int:
+    """Open a directory pmlens trusts (``.pm``, a project root) for ``*at()`` calls.
+
+    Links are followed: a symlinked ``.pm`` and ancestors such as /tmp ->
+    /private/tmp keep working. A directory that may be searched and written
+    but not listed (mode 0o300) cannot be opened O_RDONLY; a descriptor for
+    ``*at()`` calls needs search permission only. The caller closes it.
+
+    Raises:
+        FileRefusedError: Permission to open the directory was denied.
+        OSError: It does not exist or is not a directory.
+    """
+    flags = getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        return os.open(path, os.O_RDONLY | flags)
+    except PermissionError:
+        if _SEARCH:
+            try:
+                return os.open(path, _SEARCH | flags)
+            except OSError:
+                pass
+        raise FileRefusedError("the directory could not be opened (Permission denied)") from None
+
+
 def open_dir_below(root: Path, parts: Sequence[str]) -> int:
     """Open ``root/parts...``, creating what is missing and following no link below root.
 
@@ -244,23 +268,7 @@ def open_dir_below(root: Path, parts: Sequence[str]) -> int:
     if parts:
         _plain_parts(parts)
     root.mkdir(parents=True, exist_ok=True)
-    root_flags = getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
-    try:
-        fd = os.open(root, os.O_RDONLY | root_flags)
-    except PermissionError:
-        # Searchable but not listable (mode 0o300): a descriptor for *at()
-        # calls needs search permission only. The root is trusted, so links
-        # are followed here.
-        if not _SEARCH:
-            raise FileRefusedError(
-                "the directory could not be opened (Permission denied)"
-            ) from None
-        try:
-            fd = os.open(root, _SEARCH | root_flags)
-        except OSError:
-            raise FileRefusedError(
-                "the directory could not be opened (Permission denied)"
-            ) from None
+    fd = open_trusted_dir(root)
     try:
         for part in parts:
             next_fd = _open_or_make_dir(part, fd)
@@ -405,7 +413,7 @@ def write_file_in_dir(parent: Path, dirname: str, filename: str, data: bytes) ->
         _atomic_write_text(directory / filename, data.decode("utf-8"))
         return
     parent.mkdir(parents=True, exist_ok=True)
-    parent_fd = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    parent_fd = open_trusted_dir(parent)
     try:
         dir_fd = _open_dir_nofollow(dirname, dir_fd=parent_fd)
         if dir_fd is None:

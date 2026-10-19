@@ -735,3 +735,144 @@ class TestFinalRoundFixes:
 
         assert summary.results[0].status == "created"
         assert "pm-server:begin" in (root / "docs" / "rules.md").read_text(encoding="utf-8")
+
+
+class TestDryRoundFixes:
+    @pytest.mark.parametrize("absolute", [True, False])
+    def test_a_separate_git_dir_inside_the_project_is_guarded(self, tmp_path, absolute):
+        # git init --separate-git-dir=.gitdata: .git is a file naming the real one.
+        from pmlens.rules import inject_pm_rules
+
+        root = _repo(tmp_path)
+        (root / ".gitdata" / "hooks").mkdir(parents=True)
+        config = root / ".gitdata" / "config"
+        config.write_text("[core]\n", encoding="utf-8")
+        gitdir = str(root / ".gitdata") if absolute else ".gitdata"
+        (root / ".git").write_text(f"gitdir: {gitdir}\n", encoding="utf-8")
+        (root / "AGENTS.md").symlink_to(".gitdata/config")
+        (root / "CLAUDE.md").symlink_to(".gitdata/hooks/post-checkout")
+
+        summary = inject_pm_rules(root, target="all")
+
+        assert {r.status for r in summary.results} == {"failed"}
+        assert config.read_text(encoding="utf-8") == "[core]\n"
+        assert not (root / ".gitdata" / "hooks" / "post-checkout").exists()
+
+    def test_a_worktrees_common_dir_is_guarded(self, tmp_path):
+        from pmlens.rules import inject_pm_rules
+
+        root = _repo(tmp_path)
+        common = root / ".gitdata"
+        (common / "worktrees" / "wt").mkdir(parents=True)
+        (common / "worktrees" / "wt" / "commondir").write_text("../..\n", encoding="utf-8")
+        (common / "config").write_text("[core]\n", encoding="utf-8")
+        (root / ".git").write_text(f"gitdir: {common / 'worktrees' / 'wt'}\n", encoding="utf-8")
+        (root / "CLAUDE.md").symlink_to(".gitdata/config")
+
+        summary = inject_pm_rules(root, target="claude-code")
+
+        assert summary.results[0].status == "failed"
+        assert (common / "config").read_text(encoding="utf-8") == "[core]\n"
+
+    def test_a_worktree_elsewhere_still_allows_links_inside_the_project(self, tmp_path):
+        from pmlens.rules import inject_pm_rules
+
+        main_git = _outside(tmp_path) / ".git"
+        (main_git / "worktrees" / "wt").mkdir(parents=True)
+        (main_git / "worktrees" / "wt" / "commondir").write_text("../..\n", encoding="utf-8")
+        root = _repo(tmp_path)
+        (root / ".git").write_text(f"gitdir: {main_git / 'worktrees' / 'wt'}\n", encoding="utf-8")
+        (root / "AGENTS.md").symlink_to("CLAUDE.md")
+
+        summary = inject_pm_rules(root, target="codex")
+
+        assert summary.results[0].status == "created"
+        assert "pm-server:begin" in (root / "CLAUDE.md").read_text(encoding="utf-8")
+
+    @pytest.mark.parametrize("gitfile", [b"not a gitfile\n", b"gitdir: missing\n", b"\xff\xfe"])
+    def test_a_git_file_that_cannot_be_followed_refuses_links(self, tmp_path, gitfile):
+        from pmlens.rules import inject_pm_rules
+
+        root = _repo(tmp_path)
+        (root / "docs").mkdir()
+        (root / ".git").write_bytes(gitfile)
+        (root / "CLAUDE.md").symlink_to("docs/rules.md")
+
+        summary = inject_pm_rules(root, target="claude-code")
+
+        assert summary.results[0].status == "failed"
+        assert list((root / "docs").iterdir()) == []
+
+    @pytest.mark.parametrize("name", [".pm", ".git"])
+    def test_a_dangling_pm_or_git_link_refuses_links(self, tmp_path, name):
+        from pmlens.rules import inject_pm_rules
+
+        root = _repo(tmp_path)
+        (root / name).symlink_to("docs/pm", target_is_directory=True)
+        (root / "CLAUDE.md").symlink_to("docs/pm/tasks.yaml")
+
+        summary = inject_pm_rules(root, target="claude-code")
+
+        assert summary.results[0].status == "failed"
+        assert not (root / "docs").exists()
+
+    def test_new_stores_get_sqlites_default_mode(self, tmp_path):
+        from pmlens.draft_store import DraftStore
+        from pmlens.memory import MemoryStore
+
+        pm = _project(tmp_path)
+        old = os.umask(0)
+        try:
+            MemoryStore(pm / "memory.db", global_db_path=None).close()
+            DraftStore(pm / "drafts.db").close()
+        finally:
+            os.umask(old)
+        for name in ("memory.db", "drafts.db"):
+            assert stat.S_IMODE((pm / name).stat().st_mode) == 0o644
+
+    def test_a_search_only_pm_directory_keeps_the_stores_and_exports(self, tmp_path):
+        from pmlens.draft_store import DraftStore
+        from pmlens.memory import MemoryStore
+        from pmlens.models import Memory
+
+        pm = _project(tmp_path)
+        add_task(pm, _task(1))
+        MemoryStore(pm / "memory.db", global_db_path=None).close()
+        pm.chmod(0o300)
+        try:
+            store = MemoryStore(pm / "memory.db", global_db_path=None)
+            store.save(Memory(session_id="s", content="kept", project="p"))
+            store.close()
+            ro = MemoryStore(pm / "memory.db", global_db_path=None, readonly=True)
+            assert [m.content for m in ro.get_recent(limit=5)] == ["kept"]
+            ro.close()
+            drafts = DraftStore(pm / "drafts.db")
+            assert drafts.get_pending_count() == 0
+            drafts.close()
+            pack = srv.pm_prompt_pack(project_path=str(pm.parent))
+        finally:
+            pm.chmod(0o755)
+        assert pack.get("status") != "error", pack
+        assert any((pm / "exports").iterdir())
+
+    def test_a_linked_lock_file_is_refused_on_windows_too(self, tmp_path, monkeypatch):
+        # filelock raises a bare OSError (no errno) for a reparse point there.
+        import pmlens.storage as storage
+
+        pm = _project(tmp_path)
+        add_task(pm, _task(1))
+        victim = _outside(tmp_path) / "victim"
+        victim.write_text("precious", encoding="utf-8")
+        (pm / ".locks" / "tasks.lock").unlink(missing_ok=True)
+        (pm / ".locks" / "tasks.lock").symlink_to(victim)
+        monkeypatch.setattr(storage, "_no_dir_fd", lambda: True)
+
+        def refuse_reparse_points(self, *args, **kwargs):
+            if Path(self.lock_file).is_symlink():
+                raise OSError(f"Lock file is a reparse point (symlink/junction): {self.lock_file}")
+            raise AssertionError("expected the link to be refused")
+
+        monkeypatch.setattr(storage.FileLock, "acquire", refuse_reparse_points)
+        with pytest.raises(LedgerWriteRefused, match=r"\.pm/\.locks/tasks\.lock"):
+            add_task(pm, _task(2))
+        assert victim.read_text(encoding="utf-8") == "precious"

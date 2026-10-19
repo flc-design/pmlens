@@ -34,7 +34,7 @@ from typing import Literal
 
 from .memory import _apply_pragmas
 from .models import PmServerError
-from .safe_sqlite import connect_store
+from .safe_sqlite import connect_store, refusal_message
 from .utils import FileRefusedError
 
 # Frozen enums. SQLite cannot ALTER a CHECK constraint and there is no
@@ -194,10 +194,7 @@ def _open_store(db_path: Path, *, create: bool) -> tuple[sqlite3.Connection, boo
     try:
         opened = connect_store(db_path, create=create)
     except FileRefusedError as exc:
-        raise PmServerError(
-            f"refusing to open .pm/{db_path.name}: {exc}; pmlens does not open symlinks "
-            "inside .pm (to move or share the data, make .pm itself the symlink)"
-        ) from None
+        raise PmServerError(refusal_message(db_path, exc)) from None
     if opened is None:
         raise PmServerError(f".pm/{db_path.name} disappeared while it was in use")
     return opened

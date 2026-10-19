@@ -246,6 +246,12 @@ def _write_refused(rel: str, exc: FileRefusedError) -> LedgerWriteRefused:
     return LedgerWriteRefused(f"could not write .pm/{rel}: {reason}")
 
 
+def _is_link(path: Path) -> bool:
+    """Whether ``path`` is a symlink or (Windows) a junction."""
+    isjunction = getattr(os.path, "isjunction", None)  # Python 3.12+
+    return os.path.islink(path) or bool(isjunction and isjunction(path))
+
+
 def _ensure_locks_dir(
     base_dir: Path, *, contained: bool = True
 ) -> tuple[Path, tuple[int, int] | None]:
@@ -369,7 +375,8 @@ def _yaml_transaction(
     if timeout is None:
         timeout = _resolve_lock_timeout()
     # The registry lock lives in the home ~/.pm, which no repository supplies.
-    lock_dir, identity = _ensure_locks_dir(base_dir, contained=stem != "registry")
+    contained = stem != "registry"
+    lock_dir, identity = _ensure_locks_dir(base_dir, contained=contained)
     lock_path = lock_dir / f"{stem}.lock"
     lock = FileLock(str(lock_path), timeout=timeout)
     try:
@@ -380,7 +387,8 @@ def _yaml_transaction(
         ) from e
     except OSError as e:
         # filelock opens the lock file with O_NOFOLLOW: a symlink there is ELOOP.
-        if e.errno in {errno.ELOOP, errno.EMLINK}:
+        # On Windows it raises a bare OSError (no errno) for a reparse point.
+        if e.errno in {errno.ELOOP, errno.EMLINK} or (contained and _is_link(lock_path)):
             raise _write_refused(
                 f"{_LOCKS_DIR}/{stem}.lock", FileRefusedError("a symlink")
             ) from None
