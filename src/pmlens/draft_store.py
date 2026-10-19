@@ -540,13 +540,16 @@ _draft_stores: dict[str, DraftStore] = {}
 def get_draft_store(db_path: Path) -> DraftStore:
     """Return the per-db_path DraftStore, creating it on first use.
 
-    Keyed by the resolved db_path so projectA's drafts never surface under
-    projectB within one process.
+    Keyed by the db_path with its directory resolved, so projectA's drafts
+    never surface under projectB within one process.
     """
-    # Resolve so two spellings of the same file (symlinks, '..' segments) map
-    # to ONE store — mirrors server._memory_stores' resolved keying. Without
-    # this the per-project isolation guarantee can be silently violated.
-    key = str(Path(db_path).resolve())
+    # The directory is resolved so two spellings of the same .pm (symlinks,
+    # '..' segments) map to ONE store. The file name is not: a repository can
+    # ship .pm/drafts.db as a link to another project's database, and keying
+    # by the link's target handed that project's cached store (and its rows)
+    # to this one without the symlink check ever running (PMSERV-277).
+    path = Path(db_path)
+    key = str(path.parent.resolve() / path.name)
     if key not in _draft_stores:
         _draft_stores[key] = DraftStore(Path(db_path))
     return _draft_stores[key]

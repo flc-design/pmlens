@@ -770,9 +770,11 @@ def run_prompt_pack(
         )
         ext = "md"
 
-    # Expanded once, so the checks below and the write see the same path.
+    # Expanded and normalised once, so the checks below and the write see the
+    # same path: the kernel would otherwise walk a '..' after a linked
+    # directory (.pm/exports/../../x) from the link's target.
     dest = (
-        Path(out_path).expanduser()
+        Path(os.path.normpath(os.path.abspath(Path(out_path).expanduser())))
         if out_path
         else pm_path / "exports" / f"prompt-pack-{_prompt_pack_slug(filter_label)}.{ext}"
     )

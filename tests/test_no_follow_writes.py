@@ -1147,3 +1147,81 @@ class TestPromptPackOutPathInPm:
 
         assert result["status"] == "error"
         assert dest.read_text(encoding="utf-8") == "keep"
+
+    def test_a_dot_dot_after_a_linked_pm_directory_is_folded_before_writing(self, tmp_path):
+        pm = self._project_with_task(tmp_path)
+        victim_dir = _outside(tmp_path) / "victim" / "a"
+        victim_dir.mkdir(parents=True)
+        (pm / "exports").symlink_to(victim_dir, target_is_directory=True)
+
+        result = srv.pm_prompt_pack(
+            project_path=str(pm.parent), out_path=str(pm / "exports" / ".." / ".." / "pack.md")
+        )
+
+        assert result["status"] == "ok", result
+        assert result["out_path"] == str(pm.parent / "pack.md")
+        assert (pm.parent / "pack.md").is_file()
+        assert not (tmp_path / "outside" / "pack.md").exists()
+
+
+class TestDryRound5Fixes:
+    def test_a_draft_store_link_to_another_projects_cached_store_is_refused(self, tmp_path):
+        from pmlens.draft_store import clear_draft_store, get_draft_store
+        from pmlens.models import PmServerError
+
+        a = tmp_path / "a" / ".pm"
+        b = tmp_path / "b" / ".pm"
+        a.mkdir(parents=True)
+        b.mkdir(parents=True)
+        try:
+            assert get_draft_store(a / "drafts.db").get_pending_count() == 0
+            (b / "drafts.db").symlink_to(a / "drafts.db")
+
+            with pytest.raises(PmServerError, match="symlink"):
+                get_draft_store(b / "drafts.db")
+        finally:
+            clear_draft_store()
+
+    def test_two_spellings_of_one_pm_still_share_a_draft_store(self, tmp_path):
+        from pmlens.draft_store import clear_draft_store, get_draft_store
+
+        real = tmp_path / "real"
+        real.mkdir()
+        (tmp_path / "alias").symlink_to(real, target_is_directory=True)
+        try:
+            first = get_draft_store(real / "drafts.db")
+            assert get_draft_store(tmp_path / "alias" / "drafts.db") is first
+        finally:
+            clear_draft_store()
+
+    def test_a_worktree_inside_a_bare_clone_keeps_its_links(self, tmp_path):
+        # git clone --bare url myrepo.git && git -C myrepo.git worktree add main
+        from pmlens.rules import ensure_claudemd, inject_pm_rules
+
+        bare = tmp_path / "myrepo.git"
+        gitdir = bare / "worktrees" / "main"
+        gitdir.mkdir(parents=True)
+        (gitdir / "commondir").write_text("../..\n", encoding="utf-8")
+        (bare / "config").write_text("[core]\n", encoding="utf-8")
+        root = bare / "main"
+        (root / "docs").mkdir(parents=True)
+        (root / ".git").write_text(f"gitdir: {gitdir}\n", encoding="utf-8")
+        (root / "AGENTS.md").symlink_to("CLAUDE.md")
+
+        assert inject_pm_rules(root, target="codex").results[0].status == "created"
+        (root / "CLAUDE.md").unlink()
+        (root / "AGENTS.md").unlink()
+        (root / "CLAUDE.md").symlink_to("docs/rules.md")
+        assert ensure_claudemd(root) == "created CLAUDE.md with PM Lens rules"
+        assert (bare / "config").read_text(encoding="utf-8") == "[core]\n"
+
+    def test_a_git_dir_that_is_the_project_root_is_still_guarded(self, tmp_path):
+        from pmlens.rules import ensure_claudemd
+
+        root = _repo(tmp_path)
+        (root / "config").write_text("[core]\n", encoding="utf-8")
+        (root / ".git").write_text("gitdir: .\n", encoding="utf-8")
+        (root / "CLAUDE.md").symlink_to("config")
+
+        assert ensure_claudemd(root).startswith("left CLAUDE.md unchanged")
+        assert (root / "config").read_text(encoding="utf-8") == "[core]\n"

@@ -356,7 +356,11 @@ def _guarded_dirs(root: Path) -> list[tuple[int, int]] | None:
     out), and the common directory a git directory's ``commondir`` names. A
     .git or .pm that is a dangling or looping link, or git metadata that
     cannot be read, leaves what to guard unknown (None). A git directory that
-    does not exist (a worktree whose main repository moved) guards nothing.
+    does not exist (a worktree whose main repository moved) guards nothing,
+    and neither does one above the project root (a worktree inside a bare
+    clone, ``myrepo.git/main``): a target inside the project is then in the
+    worktree, not among git's files. The project's own .git and .pm still
+    refuse everything when they are the root or above it.
     """
     guarded: list[tuple[int, int]] = []
     try:
@@ -366,10 +370,23 @@ def _guarded_dirs(root: Path) -> list[tuple[int, int]] | None:
                 continue
             guarded.append((info.st_dev, info.st_ino))
             if name == ".git":
-                guarded.extend(_git_dirs(root, info))
+                above = _ancestor_ids(root)
+                guarded.extend(d for d in _git_dirs(root, info) if d not in above)
     except _GitDirsUnknownError:
         return None
     return guarded
+
+
+def _ancestor_ids(root: Path) -> set[tuple[int, int]]:
+    """``(st_dev, st_ino)`` of the directories above ``root``."""
+    ids = set()
+    for directory in root.parents:
+        try:
+            info = os.stat(directory)
+        except OSError:
+            continue
+        ids.add((info.st_dev, info.st_ino))
+    return ids
 
 
 def _git_dirs(root: Path, info: os.stat_result) -> list[tuple[int, int]]:
