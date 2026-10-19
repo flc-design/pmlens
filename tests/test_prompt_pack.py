@@ -1179,3 +1179,88 @@ class TestCommitScope:
         assert "先に確認" in body
         assert "push はしない" in body
         assert "未コミットの変更があれば" not in body
+
+
+# ─── PMSERV-270: the override loader follows no symlink ──────────────
+
+
+class TestOverrideSymlinks:
+    """A repository can ship symlinks; the override loader must not follow them.
+
+    jinja2's FileSystemLoader followed a symlinked prompt_pack.html (or a file
+    it includes, or the whole prompt-templates directory) to any file the
+    server can read, and its text landed in the exported pack.
+    """
+
+    MARKER = "SECRET-OUTSIDE-PROJECT-MARKER"
+
+    def _secret(self, tmp_path: Path) -> Path:
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        secret = outside / "secret.html"
+        secret.write_text(self.MARKER, encoding="utf-8")
+        (outside / "prompt_pack.html").write_text(self.MARKER, encoding="utf-8")
+        return secret
+
+    def _pack(self, tmp_path: Path) -> tuple[Path, None]:
+        (tmp_path / "proj").mkdir()
+        pm_path = init_pm_directory(tmp_path / "proj")
+        _save_tasks(pm_path, [_task(id="P-1", tags=["x"])])
+        return pm_path, None
+
+    def _render(self, pm_path: Path) -> tuple[dict, str]:
+        res = run_prompt_pack(pm_path, filter_tag="x", format="html")
+        text = Path(res["out_path"]).read_text(encoding="utf-8") if res.get("out_path") else ""
+        return res, text
+
+    def test_a_symlinked_template_is_not_followed(self, tmp_path):
+        secret = self._secret(tmp_path)
+        pm_path, _ = self._pack(tmp_path)
+        override = pm_path / "prompt-templates"
+        override.mkdir()
+        (override / "prompt_pack.html").symlink_to(secret)
+
+        res, text = self._render(pm_path)
+
+        assert res["status"] == "ok"
+        assert self.MARKER not in text
+        assert "<!doctype html>" in text.lower()  # the bundled template
+        assert any(w.startswith("prompt_template_override_ignored") for w in res["warnings"])
+
+    def test_an_included_symlink_is_not_followed(self, tmp_path):
+        from jinja2.exceptions import TemplateNotFound
+
+        secret = self._secret(tmp_path)
+        pm_path, _ = self._pack(tmp_path)
+        override = pm_path / "prompt-templates"
+        override.mkdir()
+        (override / "leak.html").symlink_to(secret)
+        (override / "prompt_pack.html").write_text('{% include "leak.html" %}', encoding="utf-8")
+
+        try:
+            _, text = self._render(pm_path)
+        except TemplateNotFound:
+            text = ""  # refusing to render is also safe
+        assert self.MARKER not in text
+
+    def test_a_symlinked_override_directory_is_not_used(self, tmp_path):
+        self._secret(tmp_path)
+        pm_path, _ = self._pack(tmp_path)
+        (pm_path / "prompt-templates").symlink_to(tmp_path / "outside", target_is_directory=True)
+
+        res, text = self._render(pm_path)
+
+        assert self.MARKER not in text
+        assert "<!doctype html>" in text.lower()
+        assert any(w.startswith("prompt_template_override_ignored") for w in res["warnings"])
+
+    def test_a_regular_override_needs_no_warning(self, tmp_path):
+        pm_path, _ = self._pack(tmp_path)
+        override = pm_path / "prompt-templates"
+        override.mkdir()
+        (override / "prompt_pack.html").write_text("OVERRIDE {{ task_count }}", encoding="utf-8")
+
+        res, text = self._render(pm_path)
+
+        assert text == "OVERRIDE 1"
+        assert not any(w.startswith("prompt_template_override_ignored") for w in res["warnings"])

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
+import stat
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -48,6 +49,68 @@ def _is_project_pm_dir(pm_dir: Path) -> bool:
     excluded by this check.
     """
     return pm_dir.is_dir() and (pm_dir / "project.yaml").exists()
+
+
+def read_file_in_dir(directory: Path, filename: str, max_bytes: int) -> bytes | None:
+    """Read ``directory/filename`` once, following no symlink at either level.
+
+    For files a repository supplies (workflow templates, prompt-pack templates):
+    a symlink there could point at any file the server can read, and a check on
+    the path followed by a separate open can be raced by swapping the path in
+    between (PMSERV-270, PMSERV-271). The directory is opened with
+    ``O_NOFOLLOW | O_DIRECTORY`` and the file relative to it with
+    ``O_NOFOLLOW``, and the file is checked on its descriptor. Containment is
+    by path: a hard link needs write access to the project and is not refused.
+    Where ``os.open`` takes no ``dir_fd`` (Windows), symlinks are refused by a
+    check before the open instead, which is not atomic.
+
+    Args:
+        directory: The directory the file must be in.
+        filename: A single file name; anything with a separator is refused.
+        max_bytes: The largest file accepted.
+
+    Returns:
+        The file's bytes, or None when it is missing, a symlink (the file or the
+        directory), not a regular file, larger than ``max_bytes``, or the name
+        is not a plain file name.
+    """
+    if not filename or filename in {".", ".."} or "/" in filename or os.sep in filename:
+        return None
+    if os.altsep and os.altsep in filename:
+        return None
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    flags = os.O_RDONLY | nofollow | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        if os.open in os.supports_dir_fd and hasattr(os, "O_DIRECTORY") and nofollow:
+            dir_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | nofollow)
+            try:
+                fd = os.open(filename, flags, dir_fd=dir_fd)
+            finally:
+                os.close(dir_fd)
+        else:
+            if directory.is_symlink() or (directory / filename).is_symlink():
+                return None
+            fd = os.open(directory / filename, flags)
+    except OSError:
+        return None
+    chunks: list[bytes] = []
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > max_bytes:
+            return None
+        remaining = max_bytes + 1
+        while remaining > 0:
+            chunk = os.read(fd, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    data = b"".join(chunks)
+    return data if len(data) <= max_bytes else None
 
 
 def _pick_from_registry() -> Path | None:

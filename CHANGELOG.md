@@ -11,7 +11,7 @@ as accepted, like every lifecycle change, returns a warning to pass on to the
 user.
 
 MCP tool count: 48 names for 46 operations in full mode (the two content tool
-aliases); Lens 17, or 19 with Desktop outbox writes. Test suite: 2,585 passing.
+aliases); Lens 17, or 19 with Desktop outbox writes. Test suite: 2,598 passing.
 
 **Upgrade notes.**
 
@@ -145,17 +145,24 @@ aliases); Lens 17, or 19 with Desktop outbox writes. Test suite: 2,585 passing.
   `tasks.yaml: ValidationError in record 3 (PMSERV-012): title (string_type)`;
   a YAML syntax error gives its line and column. Registered tools also turn
   any parser error that still escapes into such a message.
-- **Prompt-pack templates are rendered in a sandbox** (PMSERV-270): a
-  `.pm/prompt-templates/prompt_pack.html` that came with a repository could
-  run Python (for example through `cycler.__init__.__globals__`) when
-  `pm_prompt_pack(format="html")` or `pmlens prompt-pack --format html` ran.
-  The bundled template renders exactly as before.
+- **Prompt-pack templates are rendered in a sandbox and read without
+  following symlinks** (PMSERV-270): a `.pm/prompt-templates/prompt_pack.html`
+  that came with a repository could run Python (for example through
+  `cycler.__init__.__globals__`) when `pm_prompt_pack(format="html")` or
+  `pmlens prompt-pack --format html` ran, and a symlinked template, included
+  file or `prompt-templates` directory put any file the server could read
+  into the exported pack. An override that is a symlink, not a regular file
+  or outside the project is ignored with the warning
+  `prompt_template_override_ignored`. The bundled template renders exactly
+  as before.
 - **Workflow template names cannot carry a path** (PMSERV-271):
   `pm_workflow_start(template=...)` joined the name into a file path, so an
   absolute path or `../` read any `*.yaml` on disk and put its text in the
   response and `.pm/workflows.yaml`. A name is now letters, digits, `.`, `_`
-  or `-`, and a template file that resolves outside its directory (a
-  symlink) is not loaded or listed.
+  or `-`, and a template is read once without following a symlink — a
+  symlinked file or `workflow_templates` directory is neither loaded nor
+  listed, and swapping a file for a link while it is being checked no longer
+  works.
 - **Ledgers that YAML aliases inflate are refused**: a ledger whose aliases
   (`*name`) would expand it past four times its size (at least 4 MiB) is not
   read. A few hundred bytes of nested aliases used to grow into tens of

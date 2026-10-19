@@ -349,6 +349,16 @@ class TestWorkflowTemplates:
             load_workflow_template("linked", tmp_pm_path)
         assert "linked" not in [t["name"] for t in list_workflow_templates(tmp_pm_path)]
 
+    def test_a_symlinked_template_directory_holds_no_templates(self, tmp_path, tmp_pm_path):
+        # Every file in the link's target resolved "inside" the linked directory.
+        target = self._outside_template(tmp_path)
+        (tmp_pm_path / "workflow_templates").symlink_to(target.parent, target_is_directory=True)
+        with pytest.raises(PmServerError, match="not found"):
+            load_workflow_template("creds", tmp_pm_path)
+        assert "creds" not in [t["name"] for t in list_workflow_templates(tmp_pm_path)]
+        # Built-in templates are unaffected.
+        assert load_workflow_template("development", tmp_pm_path).steps
+
     @pytest.mark.parametrize("name", ["my.flow", "my_flow-2", "検証フロー"])
     def test_plain_names_still_load(self, tmp_pm_path, name):
         custom_dir = tmp_pm_path / "workflow_templates"

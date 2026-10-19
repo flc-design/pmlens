@@ -76,7 +76,7 @@ from .models import (
     WorkflowStep,
     WorkflowTemplate,
 )
-from .utils import _atomic_write_text
+from .utils import _atomic_write_text, read_file_in_dir
 
 PM_DIR = ".pm"
 GLOBAL_PM_DIR = Path.home() / ".pm"
@@ -162,14 +162,23 @@ def _expanded_size(root: object, limit: int) -> int:
 def _load_yaml(path: Path) -> dict | list | None:
     if not path.exists():
         return None
-    text = path.read_text(encoding="utf-8")
+    return _parse_yaml_text(path.read_text(encoding="utf-8"), path.name)
+
+
+def _parse_yaml_text(text: str, name: str) -> dict | list | None:
+    """Parse a ledger's text; errors quote nothing from it (PMSERV-266).
+
+    Args:
+        text: The file's text.
+        name: The file name for messages.
+    """
     try:
         data = _safe_yaml.safe_load(text)
     except yaml.YAMLError as e:
         # Position only: str(e) quotes the offending line, which can be a secret.
         # from None: FastMCP logs a tool's traceback with its chained exceptions.
         summary = _lineage.error_summary(e)
-        raise LedgerReadError(f"Failed to parse {path.name}: {summary}", summary) from None
+        raise LedgerReadError(f"Failed to parse {name}: {summary}", summary) from None
     limit = max(_EXPANSION_FLOOR, _EXPANSION_FACTOR * len(text))
     try:
         _expanded_size(data, limit)
@@ -178,7 +187,7 @@ def _load_yaml(path: Path) -> dict | list | None:
             f"grows past {limit} characters once its YAML aliases (*name) are expanded; "
             "replace the aliases with plain values"
         )
-        raise LedgerReadError(f"{path.name} {summary}", summary) from None
+        raise LedgerReadError(f"{name} {summary}", summary) from None
     return data
 
 
@@ -1469,19 +1478,40 @@ def next_workflow_number(pm_path: Path) -> int:
 _TEMPLATE_NAME_RE = re.compile(r"[^\W_][\w.-]{0,63}")
 
 
-def _template_file(directory: Path, name: str) -> Path | None:
-    """``directory/{name}.yaml`` if it is a file that resolves inside ``directory``.
+# A template file larger than this is not a template.
+_TEMPLATE_MAX_BYTES = 1024 * 1024
 
-    A symlink that leads out of the directory is not followed.
+
+def _custom_templates_dir(pm_path: Path) -> Path | None:
+    """``.pm/workflow_templates`` if it is a real directory inside the project.
+
+    A symlinked directory would make every file in its target count as inside
+    it (PMSERV-271), so it holds no custom templates.
     """
-    path = directory / f"{name}.yaml"
+    directory = pm_path / "workflow_templates"
     try:
-        if not path.is_file():
+        if directory.is_symlink() or not directory.is_dir():
             return None
-        inside = path.resolve().is_relative_to(directory.resolve())
+        return directory if directory.resolve().is_relative_to(pm_path.resolve()) else None
     except OSError:
         return None
-    return path if inside else None
+
+
+def _read_template(directory: Path, name: str, file: str) -> dict | list | None:
+    """Parse ``directory/{name}.yaml``, or None when there is no usable file there.
+
+    The file is read once without following a symlink (utils.read_file_in_dir),
+    so neither a link nor a swap after a check can redirect it elsewhere.
+    """
+    raw = read_file_in_dir(directory, f"{name}.yaml", _TEMPLATE_MAX_BYTES)
+    if raw is None:
+        return None
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        summary = "the file is not UTF-8 text"
+        raise LedgerReadError(f"{file}: {summary}", summary) from None
+    return _parse_yaml_text(text, file)
 
 
 def load_workflow_template(name: str, pm_path: Path | None = None) -> WorkflowTemplate:
@@ -1501,19 +1531,17 @@ def load_workflow_template(name: str, pm_path: Path | None = None) -> WorkflowTe
             "(no path); see pm_workflow_templates"
         )
     # Custom template
-    if pm_path:
-        custom_path = _template_file(pm_path / "workflow_templates", name)
-        if custom_path is not None:
-            data = _load_yaml(custom_path)
-            if data:
-                return _parse_workflow_template(data, f"workflow_templates/{custom_path.name}")
+    custom_dir = _custom_templates_dir(pm_path) if pm_path else None
+    if custom_dir is not None:
+        file = f"workflow_templates/{name}.yaml"
+        data = _read_template(custom_dir, name, file)
+        if data:
+            return _parse_workflow_template(data, file)
 
     # Built-in template
-    builtin_path = _template_file(BUILTIN_TEMPLATES_DIR, name)
-    if builtin_path is not None:
-        data = _load_yaml(builtin_path)
-        if data:
-            return _parse_workflow_template(data, builtin_path.name)
+    data = _read_template(BUILTIN_TEMPLATES_DIR, name, f"{name}.yaml")
+    if data:
+        return _parse_workflow_template(data, f"{name}.yaml")
 
     raise PmServerError(f"Workflow template '{name}' not found")
 
@@ -1523,28 +1551,31 @@ def list_workflow_templates(pm_path: Path | None = None) -> list[dict]:
     templates: list[dict] = []
     seen: set[str] = set()
 
-    # Custom templates (higher priority, listed first)
-    if pm_path:
-        custom_dir = pm_path / "workflow_templates"
-        if custom_dir.is_dir():
-            for f in sorted(custom_dir.glob("*.yaml")):
-                name = f.stem
-                loadable = _TEMPLATE_NAME_RE.fullmatch(name) and _template_file(custom_dir, name)
-                if not loadable:
-                    continue  # pm_workflow_start could not load it either
-                seen.add(name)
-                data = _load_yaml(f)
-                if data:
-                    tmpl = _parse_workflow_template(data, f"workflow_templates/{f.name}")
-                    templates.append(
-                        {
-                            "name": name,
-                            "description": tmpl.description,
-                            "steps": len(tmpl.steps),
-                            "chain_to": tmpl.chain_to,
-                            "source": "custom",
-                        }
-                    )
+    # Custom templates (higher priority, listed first). Read the way
+    # load_workflow_template reads them, so the list offers only templates
+    # pm_workflow_start can load.
+    custom_dir = _custom_templates_dir(pm_path) if pm_path else None
+    if custom_dir is not None:
+        for f in sorted(custom_dir.glob("*.yaml")):
+            name = f.stem
+            if not _TEMPLATE_NAME_RE.fullmatch(name):
+                continue
+            file = f"workflow_templates/{f.name}"
+            data = _read_template(custom_dir, name, file)
+            if data is None:
+                continue  # a symlink, or not a regular file
+            seen.add(name)
+            if data:
+                tmpl = _parse_workflow_template(data, file)
+                templates.append(
+                    {
+                        "name": name,
+                        "description": tmpl.description,
+                        "steps": len(tmpl.steps),
+                        "chain_to": tmpl.chain_to,
+                        "source": "custom",
+                    }
+                )
 
     # Built-in templates
     if BUILTIN_TEMPLATES_DIR.is_dir():

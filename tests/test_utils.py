@@ -518,3 +518,45 @@ class TestGetUtilsFingerprint:
         assert fp["current"] == "unreadable"
         # ``stale`` must be False when we cannot read — avoids false alarms
         assert fp["stale"] is False
+
+
+# ─── read_file_in_dir (PMSERV-270 / PMSERV-271) ─────────────────────
+
+
+class TestReadFileInDir:
+    def test_reads_a_regular_file(self, tmp_path):
+        from pmlens.utils import read_file_in_dir
+
+        (tmp_path / "a.yaml").write_bytes(b"x: 1\n")
+        assert read_file_in_dir(tmp_path, "a.yaml", 100) == b"x: 1\n"
+
+    def test_refuses_a_symlinked_file_and_a_symlinked_directory(self, tmp_path):
+        from pmlens.utils import read_file_in_dir
+
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "secret.yaml").write_bytes(b"secret")
+        inside = tmp_path / "inside"
+        inside.mkdir()
+        (inside / "link.yaml").symlink_to(outside / "secret.yaml")
+        (tmp_path / "linked_dir").symlink_to(outside, target_is_directory=True)
+        assert read_file_in_dir(inside, "link.yaml", 100) is None
+        assert read_file_in_dir(tmp_path / "linked_dir", "secret.yaml", 100) is None
+
+    @pytest.mark.parametrize("name", ["", ".", "..", "a/b.yaml", "../a.yaml"])
+    def test_refuses_names_that_are_not_plain_file_names(self, tmp_path, name):
+        from pmlens.utils import read_file_in_dir
+
+        (tmp_path / "a.yaml").write_bytes(b"x")
+        assert read_file_in_dir(tmp_path, name, 100) is None
+
+    def test_refuses_a_fifo_without_blocking_and_an_oversized_file(self, tmp_path):
+        import os
+
+        from pmlens.utils import read_file_in_dir
+
+        os.mkfifo(tmp_path / "pipe.yaml")
+        assert read_file_in_dir(tmp_path, "pipe.yaml", 100) is None
+        (tmp_path / "big.yaml").write_bytes(b"x" * 101)
+        assert read_file_in_dir(tmp_path, "big.yaml", 100) is None
+        assert read_file_in_dir(tmp_path, "missing.yaml", 100) is None

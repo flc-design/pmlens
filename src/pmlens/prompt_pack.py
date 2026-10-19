@@ -25,16 +25,26 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Callable
 from pathlib import Path
 
 import yaml
-from jinja2 import ChoiceLoader, FileSystemLoader, select_autoescape
+from jinja2 import (
+    BaseLoader,
+    ChoiceLoader,
+    Environment,
+    FileSystemLoader,
+    TemplateNotFound,
+    select_autoescape,
+)
+from jinja2.loaders import split_template_path
 from jinja2.sandbox import ImmutableSandboxedEnvironment
 
 from . import safe_yaml
 from .memory import MemoryStore, _has_pm_server_schema
 from .models import Decision, Memory, MemoryType, Project, SuggestedModel, Task, TaskStatus
 from .storage import load_decisions, load_project, load_tasks
+from .utils import read_file_in_dir
 
 # Built-in template dir (shared with dashboard). The two-layer override adds the
 # project's ``.pm/prompt-templates/`` in front of this at render time.
@@ -317,6 +327,81 @@ def task_node(task: Task) -> dict:
     }
 
 
+# A template file larger than this is not a template.
+_OVERRIDE_MAX_BYTES = 1024 * 1024
+
+
+def _override_dir(pm_path: Path | None) -> Path | None:
+    """``.pm/prompt-templates`` if it is a real directory inside the project.
+
+    A symlinked directory would let a repository point the loader at any
+    directory, such as ``~/.ssh`` (PMSERV-270).
+    """
+    if pm_path is None:
+        return None
+    directory = pm_path / "prompt-templates"
+    try:
+        if directory.is_symlink() or not directory.is_dir():
+            return None
+        return directory if directory.resolve().is_relative_to(pm_path.resolve()) else None
+    except OSError:
+        return None
+
+
+class _OverrideLoader(BaseLoader):
+    """Templates in ``.pm/prompt-templates/``, read without following symlinks.
+
+    jinja2's FileSystemLoader follows symlinks, so a repository could ship
+    ``prompt_pack.html`` (or a file it includes) as a link to any file the
+    server can read, and its text would land in the exported pack (PMSERV-270).
+    Each template is a plain file name read once by ``read_file_in_dir``; a
+    link, a subdirectory path or anything else is "not found", so the bundled
+    template is used instead.
+    """
+
+    def __init__(self, directory: Path) -> None:
+        self.directory = directory
+
+    def get_source(
+        self, environment: Environment, template: str
+    ) -> tuple[str, str | None, Callable[[], bool]]:
+        pieces = split_template_path(template)
+        raw = (
+            read_file_in_dir(self.directory, pieces[0], _OVERRIDE_MAX_BYTES)
+            if len(pieces) == 1
+            else None
+        )
+        if raw is None:
+            raise TemplateNotFound(template)
+        try:
+            source = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            raise TemplateNotFound(template) from None
+        return source, None, lambda: False
+
+
+def override_ignored(pm_path: Path | None) -> bool:
+    """Whether ``.pm/prompt-templates/prompt_pack.html`` exists but is not used.
+
+    True for a symlink (the file or its directory), something that is not a
+    regular file, or a directory outside the project; the bundled template is
+    rendered instead.
+    """
+    if pm_path is None:
+        return False
+    candidate = pm_path / "prompt-templates" / _PROMPT_PACK_TEMPLATE
+    try:
+        present = candidate.is_symlink() or candidate.exists()
+    except OSError:
+        return False
+    if not present:
+        return False
+    directory = _override_dir(pm_path)
+    if directory is None:
+        return True
+    return read_file_in_dir(directory, _PROMPT_PACK_TEMPLATE, _OVERRIDE_MAX_BYTES) is None
+
+
 def _prompt_pack_env(pm_path: Path | None) -> ImmutableSandboxedEnvironment:
     """Jinja2 env with the two-layer loader: project override then built-in.
 
@@ -324,17 +409,17 @@ def _prompt_pack_env(pm_path: Path | None) -> ImmutableSandboxedEnvironment:
     template, mirroring the workflow-templates override convention (ADR-041).
     autoescape is on for html so all task-derived text is XSS-safe.
 
-    The override comes with the repository, so it is untrusted: a plain
-    Environment let it reach Python through attributes such as
-    ``cycler.__init__.__globals__`` and run code when a pack is rendered
-    (PMSERV-270). The sandbox refuses such access (SecurityError) and renders
-    the bundled template unchanged.
+    The override comes with the repository, so it is untrusted (PMSERV-270):
+    a plain Environment let it reach Python through attributes such as
+    ``cycler.__init__.__globals__`` and run code, so the environment is a
+    sandbox, which refuses such access (SecurityError) and renders the bundled
+    template unchanged; and its files are read by :class:`_OverrideLoader`,
+    which follows no symlink, so it cannot read files outside the directory.
     """
-    search: list[FileSystemLoader] = []
-    if pm_path is not None:
-        override = pm_path / "prompt-templates"
-        if override.is_dir():
-            search.append(FileSystemLoader(str(override)))
+    search: list[BaseLoader] = []
+    override = _override_dir(pm_path)
+    if override is not None:
+        search.append(_OverrideLoader(override))
     search.append(FileSystemLoader(str(_TEMPLATES_DIR)))
     return ImmutableSandboxedEnvironment(
         loader=ChoiceLoader(search),
@@ -662,6 +747,12 @@ def run_prompt_pack(
                 f"{reserved_dir!r}; choose a different out_path"
             ),
         }
+    if format == "html" and override_ignored(pm_path):
+        warnings.append(
+            "prompt_template_override_ignored: .pm/prompt-templates/prompt_pack.html is a "
+            "symlink, not a regular file, or outside the project, so the bundled template "
+            "was used"
+        )
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_text(content, encoding="utf-8")
 
