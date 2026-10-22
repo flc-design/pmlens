@@ -37,6 +37,7 @@ from pathlib import Path
 
 import yaml
 
+from .ledger_errors import LedgerReadError
 from .models import (
     Decision,
     DecisionKind,
@@ -48,6 +49,7 @@ from .models import (
     RecordedTiming,
 )
 from .redaction import redact_secrets
+from .safe_yaml import UnreadableValueError
 
 # ─── Constants ───────────────────────────────────────
 
@@ -199,20 +201,25 @@ def lineage_header_name(decision_id: str) -> str:
 
 
 def error_summary(exc: BaseException) -> str:
-    """Describe an exception by type (and YAML position) without its text.
+    """Describe an exception without quoting its text.
 
     ``str(exc)`` quotes the offending YAML line or pydantic's ``input_value``,
-    which can be a secret, so only the type name is used. For a YAML error,
-    possibly wrapped (``storage._load_yaml`` re-raises it as PmServerError with
-    the YAMLError as ``__cause__``), the line and column of ``problem_mark`` are
-    added; they are positions, not content.
+    which can be a secret, so only the type name is used. A LedgerReadError
+    (raised by the ledger loaders) carries a content-free ``summary``, which is
+    returned as is. For a YAML error, possibly wrapped with the YAMLError as
+    ``__cause__``, the line and column of ``problem_mark`` are added; they are
+    positions, not content.
 
     Args:
         exc: The exception to describe.
 
     Returns:
-        e.g. ``"ScannerError at line 3, column 9"`` or ``"ValidationError"``.
+        e.g. ``"ScannerError at line 3, column 9"``,
+        ``"ValidationError in record 2 (ADR-002): title (string_type)"`` or
+        ``"ValidationError"``.
     """
+    if isinstance(exc, LedgerReadError):
+        return exc.summary
     yaml_exc: BaseException | None = None
     if isinstance(exc, yaml.YAMLError):
         yaml_exc = exc
@@ -220,6 +227,8 @@ def error_summary(exc: BaseException) -> str:
         yaml_exc = exc.__cause__
     if yaml_exc is None:
         return type(exc).__name__
+    if isinstance(yaml_exc, UnreadableValueError):
+        return str(yaml_exc)  # names only the constructor's exception type
     mark = getattr(yaml_exc, "problem_mark", None)
     line = getattr(mark, "line", None)
     column = getattr(mark, "column", None)

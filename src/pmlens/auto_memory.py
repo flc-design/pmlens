@@ -37,6 +37,7 @@ from pathlib import Path
 
 import yaml
 
+from . import safe_yaml
 from .models import ProjectNotFoundError
 from .redaction import redact_secrets
 from .utils import _atomic_write_text, resolve_project_path
@@ -234,7 +235,7 @@ def _split_frontmatter(text: str) -> tuple[dict, str]:
             block = "".join(lines[1:i])
             body = "".join(lines[i + 1 :])
             try:
-                data = yaml.safe_load(block)
+                data = safe_yaml.safe_load(block)
             except yaml.YAMLError:
                 return {}, text
             if not isinstance(data, dict):

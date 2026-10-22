@@ -789,6 +789,70 @@ class TestTemplateOverride:
         )
         assert html == "OVERRIDE-MARKER 1 tasks"
 
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "{{ cycler.__init__.__globals__.os.getpid() }}",
+            "{{ cycler.__init__.__globals__.os.system('touch MARKER') }}",
+            "{{ ''.__class__.__mro__[1].__subclasses__() }}",
+            "{% set x = filter_label.upper %}{{ x.__self__.__class__ }}",
+        ],
+    )
+    def test_override_cannot_reach_python(self, tmp_path, monkeypatch, body):
+        # A repository-supplied template ran code under a plain Environment
+        # (PMSERV-270). The sandbox refuses the attribute walk: it raises
+        # SecurityError or renders the unsafe attribute as empty.
+        import os
+
+        from jinja2.exceptions import SecurityError
+
+        monkeypatch.chdir(tmp_path)
+        pm_path = init_pm_directory(tmp_path)
+        override_dir = pm_path / "prompt-templates"
+        override_dir.mkdir()
+        (override_dir / "prompt_pack.html").write_text(body, encoding="utf-8")
+        try:
+            html = build_prompt_pack_html(
+                [_task(id="A")],
+                project=load_project(pm_path),
+                memories_by_task={},
+                decisions_by_id={},
+                verify_commands=[],
+                filter_label="x",
+                pm_path=pm_path,
+            )
+        except SecurityError:
+            html = ""
+        assert "class" not in html and str(os.getpid()) not in html
+        assert not (tmp_path / "MARKER").exists()
+
+    def test_sandbox_renders_the_bundled_template_unchanged(self, tmp_path, monkeypatch):
+        import jinja2
+
+        import pmlens.prompt_pack as pp
+
+        pm_path = init_pm_directory(tmp_path)
+        tasks = [
+            _task(id="A", track="Sprint A", description="<b>x</b>", blocked_by=["B"]),
+            _task(id="B", track="DX", acceptance_criteria=["ok"]),
+        ]
+
+        def render() -> str:
+            return build_prompt_pack_html(
+                tasks,
+                project=load_project(pm_path),
+                memories_by_task={},
+                decisions_by_id={},
+                verify_commands=["make test"],
+                filter_label="all",
+                group_by="track",
+                pm_path=pm_path,
+            )
+
+        sandboxed = render()
+        monkeypatch.setattr(pp, "ImmutableSandboxedEnvironment", jinja2.Environment)
+        assert sandboxed == render()
+
     def test_builtin_used_when_no_override(self, tmp_path):
         pm_path = init_pm_directory(tmp_path)
         html = build_prompt_pack_html(
@@ -1115,3 +1179,205 @@ class TestCommitScope:
         assert "先に確認" in body
         assert "push はしない" in body
         assert "未コミットの変更があれば" not in body
+
+
+# ─── PMSERV-270: the override loader follows no symlink ──────────────
+
+
+class TestOverrideSymlinks:
+    """A repository can ship symlinks; the override loader must not follow them.
+
+    jinja2's FileSystemLoader followed a symlinked prompt_pack.html (or a file
+    it includes, or the whole prompt-templates directory) to any file the
+    server can read, and its text landed in the exported pack.
+    """
+
+    MARKER = "SECRET-OUTSIDE-PROJECT-MARKER"
+
+    def _secret(self, tmp_path: Path) -> Path:
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        secret = outside / "secret.html"
+        secret.write_text(self.MARKER, encoding="utf-8")
+        (outside / "prompt_pack.html").write_text(self.MARKER, encoding="utf-8")
+        return secret
+
+    def _pack(self, tmp_path: Path) -> tuple[Path, None]:
+        (tmp_path / "proj").mkdir()
+        pm_path = init_pm_directory(tmp_path / "proj")
+        _save_tasks(pm_path, [_task(id="P-1", tags=["x"])])
+        return pm_path, None
+
+    def _render(self, pm_path: Path) -> tuple[dict, str]:
+        res = run_prompt_pack(pm_path, filter_tag="x", format="html")
+        text = Path(res["out_path"]).read_text(encoding="utf-8") if res.get("out_path") else ""
+        return res, text
+
+    def test_a_symlinked_template_is_not_followed(self, tmp_path):
+        secret = self._secret(tmp_path)
+        pm_path, _ = self._pack(tmp_path)
+        override = pm_path / "prompt-templates"
+        override.mkdir()
+        (override / "prompt_pack.html").symlink_to(secret)
+
+        res, text = self._render(pm_path)
+
+        assert res["status"] == "ok"
+        assert self.MARKER not in text
+        assert "<!doctype html>" in text.lower()  # the bundled template
+        assert any(w.startswith("prompt_template_override_ignored") for w in res["warnings"])
+
+    def test_an_included_symlink_is_not_followed(self, tmp_path):
+        from jinja2.exceptions import TemplateNotFound
+
+        secret = self._secret(tmp_path)
+        pm_path, _ = self._pack(tmp_path)
+        override = pm_path / "prompt-templates"
+        override.mkdir()
+        (override / "leak.html").symlink_to(secret)
+        (override / "prompt_pack.html").write_text('{% include "leak.html" %}', encoding="utf-8")
+
+        try:
+            _, text = self._render(pm_path)
+        except TemplateNotFound:
+            text = ""  # refusing to render is also safe
+        assert self.MARKER not in text
+
+    def test_a_symlinked_override_directory_is_not_used(self, tmp_path):
+        self._secret(tmp_path)
+        pm_path, _ = self._pack(tmp_path)
+        (pm_path / "prompt-templates").symlink_to(tmp_path / "outside", target_is_directory=True)
+
+        res, text = self._render(pm_path)
+
+        assert self.MARKER not in text
+        assert "<!doctype html>" in text.lower()
+        assert any(w.startswith("prompt_template_override_ignored") for w in res["warnings"])
+
+    def test_a_regular_override_needs_no_warning(self, tmp_path):
+        pm_path, _ = self._pack(tmp_path)
+        override = pm_path / "prompt-templates"
+        override.mkdir()
+        (override / "prompt_pack.html").write_text("OVERRIDE {{ task_count }}", encoding="utf-8")
+
+        res, text = self._render(pm_path)
+
+        assert text == "OVERRIDE 1"
+        assert not any(w.startswith("prompt_template_override_ignored") for w in res["warnings"])
+
+    def test_an_include_from_a_subdirectory_still_works(self, tmp_path):
+        pm_path, _ = self._pack(tmp_path)
+        override = pm_path / "prompt-templates"
+        (override / "partials").mkdir(parents=True)
+        (override / "partials" / "h.html").write_text("PARTIAL-OK", encoding="utf-8")
+        (override / "prompt_pack.html").write_text(
+            '{% include "partials/h.html" %} {{ task_count }}', encoding="utf-8"
+        )
+
+        res, text = self._render(pm_path)
+
+        assert text == "PARTIAL-OK 1"
+        assert res["warnings"] == []
+
+    def test_an_include_through_a_symlinked_subdirectory_is_refused(self, tmp_path):
+        from jinja2.exceptions import TemplateNotFound
+
+        self._secret(tmp_path)
+        pm_path, _ = self._pack(tmp_path)
+        override = pm_path / "prompt-templates"
+        override.mkdir()
+        (override / "partials").symlink_to(tmp_path / "outside", target_is_directory=True)
+        (override / "prompt_pack.html").write_text(
+            '{% include "partials/secret.html" %}', encoding="utf-8"
+        )
+        with pytest.raises(TemplateNotFound):
+            self._render(pm_path)
+
+    def test_an_override_that_is_not_utf8_is_reported(self, tmp_path):
+        pm_path, _ = self._pack(tmp_path)
+        override = pm_path / "prompt-templates"
+        override.mkdir()
+        (override / "prompt_pack.html").write_bytes("見出し".encode("shift_jis"))
+
+        res, text = self._render(pm_path)
+
+        assert "<!doctype html>" in text.lower()
+        assert any(w.startswith("prompt_template_override_ignored") for w in res["warnings"])
+
+    def test_a_symlinked_export_file_is_replaced_not_written_through(self, tmp_path):
+        pm_path, _ = self._pack(tmp_path)
+        victim = tmp_path / "victim_rc"
+        victim.write_text("ORIGINAL", encoding="utf-8")
+        exports = pm_path / "exports"
+        exports.mkdir(exist_ok=True)
+        (exports / "prompt-pack-tag-x.html").symlink_to(victim)
+
+        res, text = self._render(pm_path)
+
+        assert res["status"] == "ok"
+        assert victim.read_text(encoding="utf-8") == "ORIGINAL"
+        assert not (exports / "prompt-pack-tag-x.html").is_symlink()
+        assert "<!doctype html>" in text.lower()
+
+    def test_a_symlinked_exports_directory_is_refused(self, tmp_path):
+        pm_path, _ = self._pack(tmp_path)
+        outside = tmp_path / "outside_dir"
+        outside.mkdir()
+        exports = pm_path / "exports"
+        if exports.exists():
+            exports.rmdir()
+        exports.symlink_to(outside, target_is_directory=True)
+
+        res = run_prompt_pack(pm_path, filter_tag="x", format="md")
+
+        assert res["status"] == "error"
+        assert res["message"].startswith("refusing to write the prompt pack to .pm/exports/")
+        assert "a symlink or not a directory" in res["message"]
+        assert list(outside.iterdir()) == []
+
+    def test_a_re_export_rewrites_the_file_in_place_like_a_plain_write(self, tmp_path):
+        # The same inode keeps its permissions, owner, group, ACL and xattrs,
+        # as open(path, "w") did on main.
+        import os
+        import stat
+
+        pm_path, _ = self._pack(tmp_path)
+        res, _ = self._render(pm_path)
+        target = Path(res["out_path"])
+        target.chmod(0o600)
+        inode = target.stat().st_ino
+        res, _ = self._render(pm_path)
+        assert res["status"] == "ok"
+        assert target.stat().st_ino == inode
+        assert stat.S_IMODE(target.stat().st_mode) == 0o600
+        # A read-only directory still allows rewriting an existing file.
+        exports = target.parent
+        exports.chmod(0o555)
+        try:
+            res, _ = self._render(pm_path)
+        finally:
+            exports.chmod(0o755)
+        assert res["status"] == "ok"
+        # A read-only file is not replaced.
+        target.chmod(0o444)
+        res = run_prompt_pack(pm_path, filter_tag="x", format="html")
+        target.chmod(0o644)
+        assert res["status"] == "error" and "Permission denied" in res["message"]
+        # A new file gets the umask's permissions.
+        target.unlink()
+        old = os.umask(0o002)
+        try:
+            res, _ = self._render(pm_path)
+        finally:
+            os.umask(old)
+        assert stat.S_IMODE(target.stat().st_mode) == 0o664
+
+    def test_write_errors_say_what_happened(self, tmp_path):
+        pm_path, _ = self._pack(tmp_path)
+        exports = pm_path / "exports"
+        exports.mkdir(exist_ok=True)
+        (exports / "prompt-pack-tag-x.html").mkdir()  # a directory at the file's name
+        res = run_prompt_pack(pm_path, filter_tag="x", format="html")
+        assert res["status"] == "error"
+        assert "symlink" not in res["message"]
+        assert res["message"].startswith("could not write the prompt pack to .pm/exports/")

@@ -354,8 +354,9 @@ deprecated、superseded → superseded、未知の値 → なし）。この時�
   decisions.yaml に `date` キーの無い ADR では、モデルの既定値（今日）が日ごとに変わり、
   書き直しで別の日付に固定されるので、`anchor.date` を null にして title だけを照合する。
 - 表示は許可リストのフィールドの str だけで組み立てる。未知のキーは名前だけを返し、
-  注記とメッセージに例外の本文（`str(exc)`）を入れない（型名と YAML の行・列だけ。
-  `lineage.error_summary`）。
+  注記とメッセージに例外の本文（`str(exc)`）を入れない（`lineage.error_summary` の、
+  内容を引用しない要約だけ。YAML の行・列、または不正なレコードの位置・ID の形をした id・
+  フィールド名・pydantic のエラー型。PMSERV-266）。
 
 **書き込み**（`storage.py`。読み込んだ dict を直接変え、未知のキーをどの深さでも保つ）
 

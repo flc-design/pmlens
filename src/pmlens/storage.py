@@ -52,6 +52,8 @@ from filelock import Timeout as FileLockTimeout
 from pydantic import BaseModel
 
 from . import lineage as _lineage
+from . import safe_yaml as _safe_yaml
+from .ledger_errors import LedgerReadError, build_record, build_records
 from .lineage import LineageChange, LineageWriteRefused
 from .models import (
     DailyLog,
@@ -73,7 +75,7 @@ from .models import (
     WorkflowStep,
     WorkflowTemplate,
 )
-from .utils import _atomic_write_text
+from .utils import FileRefusedError, _atomic_write_text, read_file_in_dir
 
 PM_DIR = ".pm"
 GLOBAL_PM_DIR = Path.home() / ".pm"
@@ -159,20 +161,32 @@ def _expanded_size(root: object, limit: int) -> int:
 def _load_yaml(path: Path) -> dict | list | None:
     if not path.exists():
         return None
-    text = path.read_text(encoding="utf-8")
+    return _parse_yaml_text(path.read_text(encoding="utf-8"), path.name)
+
+
+def _parse_yaml_text(text: str, name: str) -> dict | list | None:
+    """Parse a ledger's text; errors quote nothing from it (PMSERV-266).
+
+    Args:
+        text: The file's text.
+        name: The file name for messages.
+    """
     try:
-        data = yaml.safe_load(text)
+        data = _safe_yaml.safe_load(text)
     except yaml.YAMLError as e:
         # Position only: str(e) quotes the offending line, which can be a secret.
-        raise PmServerError(f"Failed to parse {path.name}: {_lineage.error_summary(e)}") from e
+        # from None: FastMCP logs a tool's traceback with its chained exceptions.
+        summary = _lineage.error_summary(e)
+        raise LedgerReadError(f"Failed to parse {name}: {summary}", summary) from None
     limit = max(_EXPANSION_FLOOR, _EXPANSION_FACTOR * len(text))
     try:
         _expanded_size(data, limit)
     except _ExpansionLimitError:
-        raise PmServerError(
-            f"{path.name} grows past {limit} characters once its YAML aliases (*name) "
-            "are expanded; replace the aliases with plain values"
-        ) from None
+        summary = (
+            f"grows past {limit} characters once its YAML aliases (*name) are expanded; "
+            "replace the aliases with plain values"
+        )
+        raise LedgerReadError(f"{name} {summary}", summary) from None
     return data
 
 
@@ -368,11 +382,15 @@ def _with_sibling_keys(path: Path, list_key: str, items: list[dict]) -> dict:
 
 
 def _next_number_from_ids(ids: Iterable[str]) -> int:
-    """Return max(numeric id suffix) + 1, or 1 when there is none."""
+    """Return max(numeric id suffix) + 1, or 1 when there is none.
+
+    Only ASCII digits count: ``"²".isdigit()`` is True but ``int("²")`` raises
+    a ValueError that quotes the stored id (PMSERV-266).
+    """
     numbers = []
     for item_id in ids:
         parts = item_id.rsplit("-", 1)
-        if len(parts) == 2 and parts[1].isdigit():
+        if len(parts) == 2 and parts[1].isascii() and parts[1].isdigit():
             numbers.append(int(parts[1]))
     return max(numbers, default=0) + 1
 
@@ -396,7 +414,7 @@ def load_project(pm_path: Path) -> Project:
     data = _load_yaml(pm_path / "project.yaml")
     if data is None:
         return Project(name=pm_path.parent.name)
-    return Project(**data)
+    return build_record(Project, data, "project.yaml")
 
 
 def _save_project(pm_path: Path, project: Project) -> None:
@@ -452,7 +470,7 @@ def load_tasks(pm_path: Path) -> list[Task]:
     data = _load_yaml(pm_path / "tasks.yaml")
     if data is None or not isinstance(data, dict) or "tasks" not in data:
         return []
-    return [Task(**t) for t in data["tasks"]]
+    return build_records(Task, data["tasks"], "tasks.yaml", "tasks")
 
 
 def _save_tasks(pm_path: Path, tasks: list[Task]) -> None:
@@ -542,7 +560,7 @@ def load_decisions(pm_path: Path) -> list[Decision]:
     data = _load_yaml(pm_path / "decisions.yaml")
     if data is None or not isinstance(data, dict) or "decisions" not in data:
         return []
-    return [Decision(**d) for d in data["decisions"]]
+    return build_records(Decision, data["decisions"], "decisions.yaml", "decisions")
 
 
 def _save_decisions(pm_path: Path, decisions: list[Decision]) -> None:
@@ -645,8 +663,9 @@ class DecisionWrite:
         decision: The appended ADR, or ``None`` when ``error`` is set.
         error: ``decision_id_exhausted`` or ``decisions_yaml_unreadable``
             (nothing written in either case), else ``None``.
-        error_detail: For ``decisions_yaml_unreadable``, the exception's type
-            and YAML position (:func:`lineage.error_summary`), never its text.
+        error_detail: For ``decisions_yaml_unreadable``, a content-free
+            summary (:func:`lineage.error_summary`): the YAML position, or which
+            record and fields are invalid; never the exception text.
         lineage_state: ``written``; ``not_written`` (checking for or writing
             the lineage failed with an OS error — the ADR is saved without a
             lineage); or ``preexisting`` (a file was already there and was
@@ -797,8 +816,7 @@ def add_decision_with_lineage(
         The write result; ``error="decision_id_exhausted"`` when the next
         number would exceed 999,999, and ``error="decisions_yaml_unreadable"``
         when decisions.yaml cannot be loaded (described in ``error_detail`` by
-        exception type and YAML position only). Nothing is written in either
-        case.
+        a content-free summary). Nothing is written in either case.
 
     Raises:
         LineageWriteRefused: ``.pm/decision_lineage`` is a symbolic link
@@ -814,7 +832,7 @@ def add_decision_with_lineage(
     with _yaml_transaction(pm_path, "decisions.yaml"):
         try:
             decisions = load_decisions(pm_path)
-        except Exception as exc:  # noqa: BLE001 - reported by type only, never quoted
+        except Exception as exc:  # noqa: BLE001 - reported as a content-free summary
             # str(exc) would quote the offending YAML line or pydantic's
             # input_value, which can be a secret (design §4, D11).
             return DecisionWrite(
@@ -992,8 +1010,7 @@ def change_decision_lineage(
     Returns:
         The result. Expected failures come back as ``status="error"`` with
         nothing written; that includes a decisions.yaml that cannot be loaded
-        (``decisions_yaml_unreadable``, described by exception type and YAML
-        position only).
+        (``decisions_yaml_unreadable``, described by a content-free summary).
 
     Raises:
         PmServerError: A lock timed out, or the projected status is not one of
@@ -1011,7 +1028,7 @@ def change_decision_lineage(
     with _yaml_transaction(pm_path, "decisions.yaml"):
         try:
             decisions = load_decisions(pm_path)
-        except Exception as exc:  # noqa: BLE001 - reported by type only, never quoted
+        except Exception as exc:  # noqa: BLE001 - reported as a content-free summary
             # str(exc) would quote the offending YAML line or pydantic's
             # input_value, which can be a secret (design §4, D11).
             return LineageChangeResult(
@@ -1148,7 +1165,7 @@ def load_milestones(pm_path: Path) -> list[Milestone]:
     data = _load_yaml(pm_path / "milestones.yaml")
     if data is None or not isinstance(data, dict) or "milestones" not in data:
         return []
-    return [Milestone(**m) for m in data["milestones"]]
+    return build_records(Milestone, data["milestones"], "milestones.yaml", "milestones")
 
 
 def _save_milestones(pm_path: Path, milestones: list[Milestone]) -> None:
@@ -1177,7 +1194,7 @@ def load_risks(pm_path: Path) -> list[Risk]:
     data = _load_yaml(pm_path / "risks.yaml")
     if data is None or not isinstance(data, dict) or "risks" not in data:
         return []
-    return [Risk(**r) for r in data["risks"]]
+    return build_records(Risk, data["risks"], "risks.yaml", "risks")
 
 
 def _save_risks(pm_path: Path, risks: list[Risk]) -> None:
@@ -1203,12 +1220,7 @@ def next_risk_number(pm_path: Path) -> int:
     risks = load_risks(pm_path)
     if not risks:
         return 1
-    numbers = []
-    for r in risks:
-        parts = r.id.rsplit("-", 1)
-        if len(parts) == 2 and parts[1].isdigit():
-            numbers.append(int(parts[1]))
-    return max(numbers, default=0) + 1
+    return _next_number_from_ids(r.id for r in risks)
 
 
 # ─── Knowledge Records ──────────────────────────────
@@ -1219,7 +1231,7 @@ def load_knowledge(pm_path: Path) -> list[KnowledgeRecord]:
     data = _load_yaml(pm_path / "knowledge.yaml")
     if data is None or not isinstance(data, dict) or "knowledge" not in data:
         return []
-    return [KnowledgeRecord(**k) for k in data["knowledge"]]
+    return build_records(KnowledgeRecord, data["knowledge"], "knowledge.yaml", "knowledge")
 
 
 def _save_knowledge(pm_path: Path, records: list[KnowledgeRecord]) -> None:
@@ -1288,7 +1300,7 @@ def load_daily_log(pm_path: Path, log_date: _dt.date | None = None) -> DailyLog:
     data = _load_yaml(log_file)
     if data is None:
         return DailyLog(date=log_date)
-    return DailyLog(**data)
+    return build_record(DailyLog, data, f"daily/{log_file.name}")
 
 
 def add_daily_log(
@@ -1316,7 +1328,7 @@ def load_registry(registry_dir: Path | None = None) -> Registry:
     data = _load_yaml(registry_dir / "registry.yaml")
     if data is None:
         return Registry()
-    return Registry(**data)
+    return build_record(Registry, data, "registry.yaml")
 
 
 def _save_registry(registry: Registry, registry_dir: Path | None = None) -> None:
@@ -1401,7 +1413,7 @@ def load_workflows(pm_path: Path) -> list[Workflow]:
     data = _load_yaml(pm_path / "workflows.yaml")
     if data is None or not isinstance(data, dict) or "workflows" not in data:
         return []
-    return [Workflow(**w) for w in data["workflows"]]
+    return build_records(Workflow, data["workflows"], "workflows.yaml", "workflows")
 
 
 def _save_workflows(pm_path: Path, workflows: list[Workflow]) -> None:
@@ -1457,27 +1469,113 @@ def next_workflow_number(pm_path: Path) -> int:
     return _next_number_from_ids(w.id for w in load_workflows(pm_path))
 
 
+# A workflow template is named by its file stem. The name is joined into a
+# path, so it may not carry a path (PMSERV-271): "/abs/creds" or "../x" read
+# any *.yaml on disk and returned its text. Only path separators and NUL are
+# refused (plus ':' on Windows, where "C:x" names a drive); every other name
+# that loaded before still does, and ".yaml" is appended, so even ".." names
+# the file "...yaml" in the directory.
+_TEMPLATE_NAME_FORBIDDEN = tuple(
+    {"/", "\x00", os.sep, *(os.altsep or ""), *((":",) if os.name == "nt" else ())}
+)
+
+
+def _plain_template_name(name: object) -> bool:
+    """Whether ``name`` names a file in a template directory and nothing else."""
+    return (
+        isinstance(name, str)
+        and name != ""
+        and not any(c in name for c in _TEMPLATE_NAME_FORBIDDEN)
+    )
+
+
+# A template file larger than this is not a template.
+_TEMPLATE_MAX_BYTES = 1024 * 1024
+
+
+def _custom_templates_dir(pm_path: Path) -> Path | None:
+    """``.pm/workflow_templates``, or None when the project has none.
+
+    A symlinked directory would make every file in its target count as inside
+    it (PMSERV-271), so it is refused, as is one outside the project.
+
+    Raises:
+        LedgerReadError: The directory exists but is a symlink, not a
+            directory, or outside the project.
+    """
+    directory = pm_path / "workflow_templates"
+    try:
+        if not directory.is_symlink() and not directory.is_dir():
+            return None  # absent, or a stray file of that name (ignored, as before)
+        usable = not directory.is_symlink() and directory.resolve().is_relative_to(
+            pm_path.resolve()
+        )
+    except OSError:
+        usable = False
+    if not usable:
+        summary = (
+            "a symlink or outside the project, so its templates are not read; replace it "
+            "with a directory"
+        )
+        raise LedgerReadError(f"workflow_templates is {summary}", summary)
+    return directory
+
+
+def _read_template(directory: Path, name: str, file: str) -> dict | list | None:
+    """Parse ``directory/{name}.yaml``, or None when there is no such file.
+
+    The file is read once without following a symlink (utils.read_file_in_dir),
+    so neither a link nor a swap after a check can redirect it elsewhere.
+
+    Raises:
+        LedgerReadError: The file exists but is a symlink, not a regular file,
+            larger than the limit, not UTF-8 or not valid YAML.
+    """
+    try:
+        raw = read_file_in_dir(directory, f"{name}.yaml", _TEMPLATE_MAX_BYTES)
+    except FileRefusedError as exc:
+        summary = f"{exc}; it is not read"
+        raise LedgerReadError(f"{file}: {summary}", summary) from None
+    if raw is None:
+        return None
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        summary = "the file is not UTF-8 text"
+        raise LedgerReadError(f"{file}: {summary}", summary) from None
+    return _parse_yaml_text(text, file)
+
+
 def load_workflow_template(name: str, pm_path: Path | None = None) -> WorkflowTemplate:
     """Load a workflow template by name.
 
     Resolution order:
     1. Custom: .pm/workflow_templates/{name}.yaml
     2. Built-in: templates/workflows/{name}.yaml
-    """
-    # Custom template
-    if pm_path:
-        custom_path = pm_path / "workflow_templates" / f"{name}.yaml"
-        if custom_path.exists():
-            data = _load_yaml(custom_path)
-            if data:
-                return _parse_workflow_template(data)
 
-    # Built-in template
-    builtin_path = BUILTIN_TEMPLATES_DIR / f"{name}.yaml"
-    if builtin_path.exists():
-        data = _load_yaml(builtin_path)
+    Raises:
+        PmServerError: The name is not a plain template name, or no template
+            has it.
+    """
+    if not _plain_template_name(name):
+        raise PmServerError(
+            "A workflow template name is a file name without a path separator or NUL "
+            "(no path); see pm_workflow_templates"
+        )
+    # Custom template
+    custom_dir = _custom_templates_dir(pm_path) if pm_path else None
+    if custom_dir is not None:
+        file = f"workflow_templates/{name}.yaml"
+        data = _read_template(custom_dir, name, file)
         if data:
-            return _parse_workflow_template(data)
+            return _parse_workflow_template(data, file)
+
+    # Built-in template: package data, not a file a repository supplies, read
+    # as installed (an installer may lay it down as a symlink into a cache).
+    builtin_path = BUILTIN_TEMPLATES_DIR / f"{name}.yaml"
+    data = _load_yaml(builtin_path)
+    if data:
+        return _parse_workflow_template(data, builtin_path.name)
 
     raise PmServerError(f"Workflow template '{name}' not found")
 
@@ -1487,25 +1585,31 @@ def list_workflow_templates(pm_path: Path | None = None) -> list[dict]:
     templates: list[dict] = []
     seen: set[str] = set()
 
-    # Custom templates (higher priority, listed first)
-    if pm_path:
-        custom_dir = pm_path / "workflow_templates"
-        if custom_dir.is_dir():
-            for f in sorted(custom_dir.glob("*.yaml")):
-                name = f.stem
-                seen.add(name)
-                data = _load_yaml(f)
-                if data:
-                    tmpl = _parse_workflow_template(data)
-                    templates.append(
-                        {
-                            "name": name,
-                            "description": tmpl.description,
-                            "steps": len(tmpl.steps),
-                            "chain_to": tmpl.chain_to,
-                            "source": "custom",
-                        }
-                    )
+    # Custom templates (higher priority, listed first). Read the way
+    # load_workflow_template reads them, so the list offers only templates
+    # pm_workflow_start can load.
+    custom_dir = _custom_templates_dir(pm_path) if pm_path else None
+    if custom_dir is not None:
+        for f in sorted(custom_dir.glob("*.yaml")):
+            name = f.stem
+            if not _plain_template_name(name):
+                continue
+            file = f"workflow_templates/{f.name}"
+            data = _read_template(custom_dir, name, file)
+            if data is None:
+                continue  # removed since the directory was listed
+            seen.add(name)
+            if data:
+                tmpl = _parse_workflow_template(data, file)
+                templates.append(
+                    {
+                        "name": name,
+                        "description": tmpl.description,
+                        "steps": len(tmpl.steps),
+                        "chain_to": tmpl.chain_to,
+                        "source": "custom",
+                    }
+                )
 
     # Built-in templates
     if BUILTIN_TEMPLATES_DIR.is_dir():
@@ -1515,7 +1619,7 @@ def list_workflow_templates(pm_path: Path | None = None) -> list[dict]:
                 continue  # custom overrides built-in
             data = _load_yaml(f)
             if data:
-                tmpl = _parse_workflow_template(data)
+                tmpl = _parse_workflow_template(data, f.name)
                 templates.append(
                     {
                         "name": name,
@@ -1529,12 +1633,25 @@ def list_workflow_templates(pm_path: Path | None = None) -> list[dict]:
     return templates
 
 
-def _parse_workflow_template(data: dict) -> WorkflowTemplate:
-    """Parse raw YAML data into a WorkflowTemplate."""
-    steps = [WorkflowStep(**s) for s in data.get("steps", [])]
-    return WorkflowTemplate(
-        name=data.get("name", ""),
-        description=data.get("description", ""),
-        chain_to=data.get("chain_to"),
-        steps=steps,
+def _parse_workflow_template(data: object, file: str) -> WorkflowTemplate:
+    """Parse raw YAML data into a WorkflowTemplate.
+
+    Args:
+        data: The loaded template document.
+        file: The template's file name, for error messages (which quote nothing
+            from the file; PMSERV-266).
+    """
+    if not isinstance(data, dict):
+        summary = f"the document is not a mapping ({type(data).__name__})"
+        raise LedgerReadError(f"{file}: {summary}", summary)
+    steps = build_records(WorkflowStep, data.get("steps", []), file, "steps")
+    return build_record(
+        WorkflowTemplate,
+        {
+            "name": data.get("name", ""),
+            "description": data.get("description", ""),
+            "chain_to": data.get("chain_to"),
+            "steps": steps,
+        },
+        file,
     )

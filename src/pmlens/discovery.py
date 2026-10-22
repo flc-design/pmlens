@@ -156,6 +156,16 @@ def read_git_branch(project_path: Path) -> str | None:
     return None
 
 
+def _text(value: object, default: str) -> str:
+    """``value`` if it is non-blank text, else ``default``.
+
+    Config files are untrusted: a list, a table (Cargo's ``version.workspace =
+    true``) or a number would fail Project validation in pm_init, and that
+    error would quote the value (PMSERV-266).
+    """
+    return value if isinstance(value, str) and value.strip() else default
+
+
 def detect_project_info(project_path: Path) -> dict:
     """Detect project metadata from common config files.
 
@@ -177,10 +187,10 @@ def detect_project_info(project_path: Path) -> dict:
             with open(cargo_toml, "rb") as f:
                 cargo = tomllib.load(f)
             pkg = cargo.get("package", cargo.get("workspace", {}).get("package", {}))
-            if pkg:
-                info["name"] = pkg.get("name", info["name"])
-                info["version"] = pkg.get("version", info["version"])
-                info["description"] = pkg.get("description", "") or ""
+            if isinstance(pkg, dict) and pkg:
+                info["name"] = _text(pkg.get("name"), info["name"])
+                info["version"] = _text(pkg.get("version"), info["version"])
+                info["description"] = _text(pkg.get("description"), "")
         except Exception:
             pass
 
@@ -189,9 +199,10 @@ def detect_project_info(project_path: Path) -> dict:
     if pkg_json.exists():
         try:
             pkg = json.loads(pkg_json.read_text(encoding="utf-8"))
-            info["name"] = pkg.get("name", info["name"])
-            info["version"] = pkg.get("version", info["version"])
-            info["description"] = pkg.get("description", "") or ""
+            if isinstance(pkg, dict):
+                info["name"] = _text(pkg.get("name"), info["name"])
+                info["version"] = _text(pkg.get("version"), info["version"])
+                info["description"] = _text(pkg.get("description"), "")
         except (json.JSONDecodeError, UnicodeDecodeError):
             pass
 
@@ -202,10 +213,10 @@ def detect_project_info(project_path: Path) -> dict:
             with open(pyproject, "rb") as f:
                 pyp = tomllib.load(f)
             proj = pyp.get("project", {})
-            if proj:
-                info["name"] = proj.get("name", info["name"])
-                info["version"] = proj.get("version", info["version"])
-                info["description"] = proj.get("description", "") or ""
+            if isinstance(proj, dict) and proj:
+                info["name"] = _text(proj.get("name"), info["name"])
+                info["version"] = _text(proj.get("version"), info["version"])
+                info["description"] = _text(proj.get("description"), "")
         except Exception:
             pass
 

@@ -233,7 +233,7 @@ lineage の書き手は pydantic のモデルを経由しない。safe_load が�
   - `os.open(path, os.O_RDONLY | O_NOFOLLOW | O_NONBLOCK)` で開く（`O_NOFOLLOW` と `O_NONBLOCK` は `getattr(os, …, 0)` で取り、無い環境では 0 にする）。FIFO を開いても止まらず、シンボリックリンクは開けない。
   - 開いた fd に `os.fstat` を掛け、`S_ISREG` であり、`st_size <= MAX_LINEAGE_BYTES`（256 KiB）の時だけ読む。読むのは最大 `MAX_LINEAGE_BYTES + 1` バイトで、超えたら読めないものとして扱う。lstat と open の間にファイルが差し替えられても、fd に対して検査するので抜けない。
   - 根拠: 実測で、`ADR-*.yaml` という名前の FIFO を glob が拾い、`read_text` が 2 秒を超えて止まった（lens-security レビュー）。PyYAML の safe_load は、密な 200 KB で約 0.36 秒かかった（final_probe で計測）。decisions のロックを持って読む書き手が、既定の 5 秒（storage.py:63）に掛からないようにするためでもある。
-- **注記に例外の本文を入れない**: notes とエラーの message には、例外の型名と、YAMLError なら `problem_mark` の行と列だけを入れる。`str(exc)` は該当行の抜粋や pydantic の `input_value` を含み、秘密情報が出る（lens-security レビューの実測）。
+- **注記に例外の本文を入れない**: notes とエラーの message には、例外の型名と、YAMLError なら `problem_mark` の行と列だけを入れる（PMSERV-266 で、`lineage.error_summary` が台帳のローダーの LedgerReadError の要約も返すようになった。§12 を参照）。`str(exc)` は該当行の抜粋や pydantic の `input_value` を含み、秘密情報が出る（lens-security レビューの実測）。
 
 | 状況 | 返し方（例外にはしない） | 注記の code |
 |---|---|---|
@@ -1271,7 +1271,13 @@ Q1・Q2 の答えは ADR-056 の S1 の具体化に当たるので、ユーザ�
 - §8.4 と D8 の保証の行に、引数名による検査であり、AI が渡す lifecycle=adopted・status=accepted・origin=human などは検出しないことを書いた。README と CHANGELOG も同じ限定にそろえた（§1.1、§8.1、§8.4。SEM-02）。
 - §1.5 の pm_status の漏れは PMSERV-258 で対応済みにした（SEM-06）。
 
-### 12.3 S1 のレビューで見つかり、S1 では直していないもの
+### 12.3 S1 の後の改訂（PMSERV-266、2026-10-19）
+
+- `lineage.error_summary` の契約を広げた。台帳のローダーは、検証に通らないレコードを、ファイル名・1 始まりのレコード番号・ID の形をした id・モデルのフィールド名・pydantic のエラー型だけで説明する `LedgerReadError` にし、`from None` で送出する。error_summary はその `summary` を返す。`decisions_yaml_unreadable` の message は、`ValidationError` だけだったものが `ValidationError in record 1 (ADR-001): title (string_type)` のようになる。YAML の構文エラーは、これまでどおり型名と行・列。
+- `!!int` などの明示タグに合わない値は、PyYAML が値を引用する ValueError / KeyError を送出していた。`safe_yaml.safe_load` が、型名だけの `UnreadableValueError`（YAMLError の派生）に変える。
+- 例外の本文を出さない対象は、decisions.yaml だけでなく、すべての台帳・registry・ワークフローのテンプレート・memory.db の行・Desktop の outbox・redaction.yaml になった。登録したツールは、パーサーの例外（直接でも連鎖でも）を内容を含まない ToolError に変える安全網で包む。
+
+### 12.4 S1 のレビューで見つかり、S1 では直していないもの
 
 どれも改善候補として親に渡す。保証の範囲は変えていない。
 

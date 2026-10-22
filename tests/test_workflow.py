@@ -305,6 +305,137 @@ class TestWorkflowTemplates:
         with pytest.raises(PmServerError, match="not found"):
             load_workflow_template("nonexistent")
 
+    @staticmethod
+    def _outside_template(tmp_path: Path) -> Path:
+        """A valid template file outside the project, carrying a marker."""
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        target = outside / "creds.yaml"
+        target.write_text(
+            yaml.safe_dump(
+                {"name": "x", "steps": [{"id": "s", "name": "n", "description": "OUTSIDE-MARKER"}]}
+            ),
+            encoding="utf-8",
+        )
+        return target
+
+    @pytest.mark.parametrize("kind", ["absolute", "relative", "separator", "nul", "empty"])
+    def test_a_name_that_carries_a_path_is_refused(self, tmp_path, tmp_pm_path, kind):
+        # PMSERV-271: the name was joined into the path, so "/abs/creds" or
+        # "../x" read any *.yaml on disk and returned its text.
+        target = self._outside_template(tmp_path)
+        (tmp_pm_path / "workflow_templates").mkdir()
+        name = {
+            "absolute": str(target.with_suffix("")),
+            "relative": "../../outside/creds",
+            "separator": "sub/creds",
+            "nul": "creds\x00",
+            "empty": "",
+        }[kind]
+        with pytest.raises(PmServerError, match="no path") as caught:
+            load_workflow_template(name, tmp_pm_path)
+        assert "OUTSIDE-MARKER" not in str(caught.value)
+        with pytest.raises(PmServerError):
+            start_workflow(tmp_pm_path, "feature", name)
+        workflows = tmp_pm_path / "workflows.yaml"
+        assert not workflows.exists() or "OUTSIDE-MARKER" not in workflows.read_text("utf-8")
+
+    def test_a_symlink_out_of_the_template_directory_is_not_followed(self, tmp_path, tmp_pm_path):
+        target = self._outside_template(tmp_path)
+        custom_dir = tmp_pm_path / "workflow_templates"
+        custom_dir.mkdir()
+        (custom_dir / "linked.yaml").symlink_to(target)
+        # Refused out loud, never silently replaced by a built-in of that name.
+        for read in (
+            lambda: load_workflow_template("linked", tmp_pm_path),
+            lambda: list_workflow_templates(tmp_pm_path),
+        ):
+            with pytest.raises(PmServerError, match="a symlink; it is not read") as caught:
+                read()
+            assert "OUTSIDE-MARKER" not in str(caught.value)
+
+    def test_a_symlinked_template_directory_holds_no_templates(self, tmp_path, tmp_pm_path):
+        # Every file in the link's target resolved "inside" the linked directory.
+        target = self._outside_template(tmp_path)
+        (tmp_pm_path / "workflow_templates").symlink_to(target.parent, target_is_directory=True)
+        # Refused out loud: a built-in of the same name would silently replace
+        # the project's own template otherwise.
+        for read in (
+            lambda: load_workflow_template("creds", tmp_pm_path),
+            lambda: load_workflow_template("development", tmp_pm_path),
+            lambda: list_workflow_templates(tmp_pm_path),
+        ):
+            with pytest.raises(PmServerError, match="replace it with a directory") as caught:
+                read()
+            assert "OUTSIDE-MARKER" not in str(caught.value)
+
+    def test_a_template_over_the_size_cap_is_refused_not_replaced(self, tmp_pm_path):
+        custom_dir = tmp_pm_path / "workflow_templates"
+        custom_dir.mkdir()
+        big = {"name": "development", "description": "x" * (1024 * 1024), "steps": []}
+        (custom_dir / "development.yaml").write_text(yaml.safe_dump(big), encoding="utf-8")
+        with pytest.raises(PmServerError, match="larger than"):
+            load_workflow_template("development", tmp_pm_path)
+
+    def test_built_in_templates_installed_as_symlinks_still_load(self, tmp_path, monkeypatch):
+        # uv --link-mode symlink installs package files as links into a cache.
+        import pmlens.storage as storage
+
+        linked = tmp_path / "linked_builtin"
+        linked.mkdir()
+        for f in storage.BUILTIN_TEMPLATES_DIR.glob("*.yaml"):
+            (linked / f.name).symlink_to(f)
+        monkeypatch.setattr(storage, "BUILTIN_TEMPLATES_DIR", linked)
+        listed = {t["name"] for t in list_workflow_templates()}
+        assert "development" in listed
+        for name in listed:
+            assert load_workflow_template(name).name
+
+    def test_a_stray_file_named_workflow_templates_is_ignored(self, tmp_pm_path):
+        (tmp_pm_path / "workflow_templates").write_text("notes", encoding="utf-8")
+        assert load_workflow_template("development", tmp_pm_path).steps
+        assert "development" in [t["name"] for t in list_workflow_templates(tmp_pm_path)]
+
+    @pytest.mark.parametrize("name", ["café", "デザイン"])
+    def test_names_stored_decomposed_are_listed_and_load(self, tmp_pm_path, name):
+        import unicodedata
+
+        stored = unicodedata.normalize("NFD", name)
+        custom_dir = tmp_pm_path / "workflow_templates"
+        custom_dir.mkdir()
+        (custom_dir / f"{stored}.yaml").write_text(
+            yaml.safe_dump({"name": "decomposed", "steps": [{"id": "s", "name": "n"}]}),
+            encoding="utf-8",
+        )
+        listed = [
+            t["name"] for t in list_workflow_templates(tmp_pm_path) if t["source"] == "custom"
+        ]
+        assert len(listed) == 1
+        assert load_workflow_template(listed[0], tmp_pm_path).name == "decomposed"
+
+    @pytest.mark.parametrize(
+        "name",
+        # Every name that is not a path loads, as before: ".." names "...yaml".
+        [
+            "my.flow",
+            "my_flow-2",
+            "検証フロー",
+            "my flow",
+            "dev:fast",
+            "back\\slash",
+            "..",
+            "x" * 240,
+        ],
+    )
+    def test_plain_names_still_load(self, tmp_pm_path, name):
+        custom_dir = tmp_pm_path / "workflow_templates"
+        custom_dir.mkdir()
+        (custom_dir / f"{name}.yaml").write_text(
+            yaml.safe_dump({"name": name, "steps": [{"id": "s", "name": "n"}]}), encoding="utf-8"
+        )
+        assert load_workflow_template(name, tmp_pm_path).name == name
+        assert name in [t["name"] for t in list_workflow_templates(tmp_pm_path)]
+
     def test_custom_overrides_builtin(self, tmp_pm_path):
         """Custom template with the same name should override built-in."""
         custom_dir = tmp_pm_path / "workflow_templates"

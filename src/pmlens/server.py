@@ -4,14 +4,21 @@ from __future__ import annotations
 
 import datetime as _dt
 import fnmatch
+import functools
+import inspect
 import json
 import os
 import re
 import uuid
 from collections import Counter
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
+import yaml
 from fastmcp import FastMCP
+from fastmcp.exceptions import ToolError
+from pydantic import ValidationError
 
 from . import __version__
 from . import lineage as _lineage
@@ -32,6 +39,7 @@ from .draft_store import (
     get_draft_store,
     normalize_source_refs,
 )
+from .ledger_errors import LedgerReadError, build_record, safe_validation_message
 from .lineage import ScrubCache, error_summary, scrub_label
 from .memory import MemoryStore, SearchDiagnostics, _has_pm_server_schema
 from .models import (
@@ -263,9 +271,113 @@ def _tool():
                 if not (PM_DESKTOP_WRITE_ENABLED and tool_name in OUTBOX_WRITE_ALLOWLIST):
                     return fn
         REGISTERED_TOOLS.add(tool_name)
-        return mcp.tool()(fn)
+        mcp.tool()(_content_free_errors(fn))
+        return fn
 
     return decorator
+
+
+# Modules whose exceptions can quote the text they were given: PyYAML's
+# constructors (an explicit !!int / !!float / !!bool tag that does not fit)
+# and pydantic.
+_PARSER_MODULES = ("yaml", "pydantic", "pydantic_core")
+
+
+def _raised_by_parser(exc: BaseException) -> bool:
+    """Whether ``exc`` was raised inside PyYAML or pydantic code."""
+    tb = exc.__traceback__
+    while tb is not None:
+        module = tb.tb_frame.f_globals.get("__name__", "")
+        if isinstance(module, str) and module.split(".", 1)[0] in _PARSER_MODULES:
+            return True
+        tb = tb.tb_next
+    return False
+
+
+def _raw_error_in_chain(exc: BaseException) -> bool:
+    """Whether ``exc``, or an exception a traceback shows chained to it, may quote content.
+
+    That is a pydantic ValidationError, a YAML error, or anything raised inside
+    PyYAML or pydantic code.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, (ValidationError, yaml.YAMLError)) or _raised_by_parser(current):
+            return True
+        if current.__cause__ is not None:
+            current = current.__cause__
+        elif not current.__suppress_context__:
+            current = current.__context__
+        else:
+            current = None
+    return False
+
+
+def _content_free_message(exc: BaseException) -> str | None:
+    """A message for ``exc`` that quotes no stored content, or None if it needs none."""
+    if isinstance(exc, ValidationError):
+        return safe_validation_message(exc)
+    if isinstance(exc, yaml.YAMLError):
+        return f"A file could not be parsed: {error_summary(exc)}"
+    if not _raw_error_in_chain(exc):
+        return None
+    if isinstance(exc, PmServerError):
+        return str(exc)  # pmlens's own wording; only the chained error is dropped
+    return f"{type(exc).__name__} while reading stored data"
+
+
+def _content_free_errors(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Wrap a tool so a parser's error never reaches its error text or log (PMSERV-266).
+
+    The loaders raise LedgerReadError, and stored YAML is read through
+    safe_yaml.safe_load; both quote nothing. This is the safety net for a path
+    that still lets a parser's error out: a pydantic ValidationError, a YAML
+    error, or any exception raised inside PyYAML or pydantic code, directly or
+    chained. FastMCP sends an exception's text to the client (fastmcp 3.x
+    includes a ValidationError's input_value) and logs its traceback with every
+    chained exception. Such an error becomes a ToolError with a content-free
+    message, raised from None, which FastMCP returns as written and logs
+    without a traceback.
+
+    Every other exception passes through unchanged. This is not a general
+    filter: tools report a bad argument with the ValueError of an enum lookup
+    (``'P9' is not a valid Priority``), and that text must reach the caller.
+    Only the registered tool is wrapped; direct calls (tests, the CLI) still
+    see the original exceptions.
+    """
+
+    def translate(exc: Exception) -> None:
+        message = _content_free_message(exc)
+        if message is not None:
+            raise ToolError(message) from None
+
+    if inspect.iscoroutinefunction(fn):
+
+        @functools.wraps(fn)
+        async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
+            try:
+                return await fn(*args, **kwargs)
+            except ToolError:
+                raise
+            except Exception as exc:
+                translate(exc)
+                raise
+
+        return async_wrapper
+
+    @functools.wraps(fn)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return fn(*args, **kwargs)
+        except ToolError:
+            raise
+        except Exception as exc:
+            translate(exc)
+            raise
+
+    return wrapper
 
 
 def _outbox_host_id() -> str:
@@ -1051,9 +1163,10 @@ def _decision_ledger_warnings(pm_path: Path) -> list[dict]:
     reject the entire decisions.yaml over it, so the user needs to hear about
     it. Read-only: this never repairs the file.
 
-    Nothing from the file is quoted verbatim (PMSERV-258): a parse failure is
-    described by exception type and YAML line/column only (``str(exc)`` quotes
-    the offending line or pydantic's ``input_value``), and each listed id and
+    Nothing from the file is quoted verbatim (PMSERV-258, PMSERV-266): a load
+    failure is described by ``error_summary`` — the YAML line and column, or
+    which record and fields are invalid — never by ``str(exc)``, which quotes
+    the offending line or pydantic's ``input_value``; and each listed id and
     status is passed whole through ``redact_secrets``, then cut to 100
     characters. One scrub cache serves the list, so a value that a YAML alias
     repeats on every ADR is scanned once.
@@ -2837,13 +2950,26 @@ def pm_outbox_merge(
                 memory_store = _get_memory_store(project_path)
                 pm_path = _get_pm_path(project_path)
                 project = load_project(pm_path)
-                memory = Memory(
-                    session_id=_current_session_id,
-                    type=_OUTBOX_TYPE_TO_MEMORY_TYPE[row_type],
-                    content=row["content"],
-                    tags=[t.strip() for t in (row["tags"] or "").split(",") if t.strip()],
-                    project=project.name,
-                )
+                tags = row["tags"] if isinstance(row["tags"], str) else ""
+                try:
+                    # The entry is Desktop-written content; its error quotes none of it.
+                    memory = build_record(
+                        Memory,
+                        {
+                            "session_id": _current_session_id,
+                            "type": _OUTBOX_TYPE_TO_MEMORY_TYPE[row_type],
+                            "content": row["content"],
+                            "tags": [t.strip() for t in tags.split(",") if t.strip()],
+                            "project": project.name,
+                        },
+                        "outbox",
+                        label=f"outbox entry {outbox_id}",
+                    )
+                except LedgerReadError as exc:
+                    warnings.append(
+                        {"id": outbox_id, "reason": "outbox_entry_invalid", "detail": str(exc)}
+                    )
+                    continue
                 new_id = memory_store.save(memory)
             except (PmServerError, ProjectNotFoundError) as exc:
                 warnings.append(
@@ -3067,7 +3193,7 @@ class _DraftDecisionIndex:
                 self._by_number.setdefault(number, []).append(adr)
 
     def unreadable(self) -> str | None:
-        """Why decisions.yaml could not be read (type and position only), or None."""
+        """Why decisions.yaml could not be read (a content-free summary), or None."""
         self._load()
         return self._unreadable
 
@@ -3708,8 +3834,8 @@ def pm_add_decision(
         # Checked before anything is written (a symlinked lineage directory).
         return {"status": "error", "code": refused.code, "message": str(refused)}
     if written.error == "decisions_yaml_unreadable":
-        # error_detail is the exception's type and YAML position only: its
-        # text could quote a secret from the broken file.
+        # error_detail is a content-free summary (error_summary): the
+        # exception text could quote a secret from the broken file.
         return {
             "status": "error",
             "code": written.error,

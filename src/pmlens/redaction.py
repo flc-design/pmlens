@@ -31,6 +31,8 @@ from pathlib import Path
 
 import yaml
 
+from . import safe_yaml
+
 # Severity is advisory metadata for the count-only report. "high" = credential/
 # secret-shaped (a real leak if posted); "medium" = identifying-but-not-secret
 # (paths, emails, internal IDs). Both are scrubbed; severity only colors the
@@ -524,7 +526,7 @@ def load_redaction_config(pm_path: Path) -> dict:
     if not config_path.exists():
         return {"allow": [], "deny": [], "scrub_internal_ids": False}
     try:
-        raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        raw = safe_yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     except (yaml.YAMLError, OSError):
         return {"allow": [], "deny": [], "scrub_internal_ids": False}
     if not isinstance(raw, dict):
