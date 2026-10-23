@@ -14,6 +14,7 @@ from __future__ import annotations
 import datetime as dt
 import os
 import stat
+import sys
 from pathlib import Path
 
 import pytest
@@ -1024,7 +1025,12 @@ class TestDryRound3Fixes:
 
     @pytest.mark.parametrize(
         ("link", "expected"),
-        [("a/x", "could not be checked"), (".", "the project directory itself")],
+        [
+            # Python < 3.13 raises on a link loop in resolve(strict=False), so the
+            # loop is refused one step earlier, as a link that cannot be resolved.
+            ("a/x", "could not be checked" if sys.version_info >= (3, 13) else "be resolved"),
+            (".", "the project directory itself"),
+        ],
     )
     def test_refusals_say_why(self, tmp_path, link, expected):
         from pmlens.rules import inject_pm_rules
