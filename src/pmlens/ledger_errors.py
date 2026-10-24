@@ -56,6 +56,16 @@ class LedgerReadError(PmServerError):
         self.summary = summary
 
 
+class LedgerWriteRefused(PmServerError):  # noqa: N818 - matches LineageWriteRefused
+    """A write into ``.pm/`` refused because a symlink or special file is in the way.
+
+    A repository can ship ``.pm/daily``, ``.pm/.locks`` or a ledger file as a
+    symlink, and writing through it would create or replace files anywhere the
+    user can write (PMSERV-277). The message names the ``.pm`` path and the
+    fixed reason only.
+    """
+
+
 def _field_shape(annotation: Any) -> tuple[type[BaseModel] | None, bool]:
     """The model a field holds and whether it holds a sequence of values.
 

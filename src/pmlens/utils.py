@@ -63,7 +63,28 @@ class FileRefusedError(Exception):
 
 
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+# Windows: a raw os.open is in CRT text mode unless O_BINARY is given (CRLF
+# read as LF, a Ctrl-Z ends the read); Python's io layer always adds it.
+_O_BINARY = getattr(os, "O_BINARY", 0)
 _DIR_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | _NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+# O_SEARCH (macOS, BSD) or O_PATH (Linux) opens a directory for *at() calls
+# with search permission only; with O_DIRECTORY | O_NOFOLLOW a symlink is
+# still refused (ELOOP or ENOTDIR).
+_SEARCH = getattr(os, "O_SEARCH", 0) or getattr(os, "O_PATH", 0)
+_DIR_SEARCH_FLAGS = (
+    _SEARCH | getattr(os, "O_DIRECTORY", 0) | _NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    if _SEARCH
+    else None
+)
+
+
+def _temp_name() -> str:
+    """A temporary file name for a write renamed into place.
+
+    Independent of the target's name, so a target whose name is near the
+    filesystem's limit (255 bytes) can still be written.
+    """
+    return f".pmlens-{os.getpid()}-{os.urandom(6).hex()}.tmp"
 
 
 def _plain_parts(name: str | Sequence[str]) -> list[str]:
@@ -97,6 +118,16 @@ def _open_dir_nofollow(path: Path | str, dir_fd: int | None = None) -> int | Non
         return os.open(path, _DIR_FLAGS, dir_fd=dir_fd)
     except FileNotFoundError:
         return None
+    except PermissionError:
+        # A directory that may be searched and written but not listed (mode
+        # 0o300) cannot be opened O_RDONLY; a descriptor only for *at() calls
+        # needs search permission alone.
+        if _DIR_SEARCH_FLAGS is not None:
+            try:
+                return os.open(path, _DIR_SEARCH_FLAGS, dir_fd=dir_fd)
+            except OSError:
+                pass
+        raise FileRefusedError("the directory could not be opened (Permission denied)") from None
     except OSError as exc:
         if exc.errno in {errno.ELOOP, errno.ENOTDIR, errno.EMLINK}:
             raise FileRefusedError("a symlink or not a directory") from None
@@ -132,7 +163,13 @@ def read_file_in_dir(directory: Path, name: str | Sequence[str], max_bytes: int)
             not a plain relative path.
     """
     parts = _plain_parts(name)
-    flags = os.O_RDONLY | _NOFOLLOW | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
+    flags = (
+        os.O_RDONLY
+        | _NOFOLLOW
+        | _O_BINARY
+        | getattr(os, "O_NONBLOCK", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
     if _no_dir_fd():
         path = directory
         for part in parts:
@@ -193,53 +230,232 @@ def read_file_in_dir(directory: Path, name: str | Sequence[str], max_bytes: int)
     return data
 
 
+def _open_or_make_dir(name: str, dir_fd: int) -> int:
+    """Open (creating it if missing) the directory ``name`` under ``dir_fd``, no-follow.
+
+    Raises:
+        FileRefusedError: ``name`` is a symlink or not a directory.
+    """
+    fd = _open_dir_nofollow(name, dir_fd=dir_fd)
+    if fd is None:
+        try:
+            os.mkdir(name, 0o777, dir_fd=dir_fd)
+        except FileExistsError:
+            pass
+        fd = _open_dir_nofollow(name, dir_fd=dir_fd)
+        if fd is None:
+            raise FileRefusedError("the directory could not be created")
+    return fd
+
+
+def open_trusted_dir(path: Path) -> int:
+    """Open a directory pmlens trusts (``.pm``, a project root) for ``*at()`` calls.
+
+    Links are followed: a symlinked ``.pm`` and ancestors such as /tmp ->
+    /private/tmp keep working. A directory that may be searched and written
+    but not listed (mode 0o300) cannot be opened O_RDONLY; a descriptor for
+    ``*at()`` calls needs search permission only. The caller closes it.
+
+    Raises:
+        FileRefusedError: Permission to open the directory was denied.
+        OSError: It does not exist or is not a directory.
+    """
+    flags = getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        return os.open(path, os.O_RDONLY | flags)
+    except PermissionError:
+        if _SEARCH:
+            try:
+                return os.open(path, _SEARCH | flags)
+            except OSError:
+                pass
+        raise FileRefusedError("the directory could not be opened (Permission denied)") from None
+
+
+def open_dir_below(root: Path, parts: Sequence[str]) -> int:
+    """Open ``root/parts...``, creating what is missing and following no link below root.
+
+    ``root`` itself is trusted (a symlinked ``.pm`` keeps working, as do
+    ancestor links such as /tmp -> /private/tmp). The caller closes the
+    descriptor.
+
+    Raises:
+        FileRefusedError: A directory in ``parts`` is a symlink or not a
+            directory, or a part is not a plain name.
+    """
+    if parts:
+        _plain_parts(parts)
+    root.mkdir(parents=True, exist_ok=True)
+    fd = open_trusted_dir(root)
+    try:
+        for part in parts:
+            next_fd = _open_or_make_dir(part, fd)
+            os.close(fd)
+            fd = next_fd
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def replace_file_in_dir(
+    root: Path, name: str | Sequence[str], data: bytes, *, only_if_absent: bool = False
+) -> bool:
+    """Atomically write ``root/name``, following no symlink below ``root`` (PMSERV-277).
+
+    For files a project's ``.pm/`` holds: a repository can ship a directory or
+    a file there as a symlink, and writing through it would create or replace
+    files anywhere the user can write. Each directory below ``root`` is opened
+    (or created) with ``O_NOFOLLOW``, an existing name must be a regular file,
+    and the data goes to a temporary file renamed over the name, so a link
+    swapped in later is replaced, never written through. An existing file's
+    permission bits are kept; a new one gets the umask's.
+
+    Args:
+        root: The trusted directory (``.pm``).
+        name: The file name, or its path below ``root`` as parts.
+        data: The bytes to write.
+        only_if_absent: Create the file only if no entry has the name; an
+            existing regular file is left alone and False is returned.
+
+    Returns:
+        True if the file was written.
+
+    Raises:
+        FileRefusedError: A directory on the way or the name is a symlink, or
+            the name is not a regular file.
+        OSError: The write failed.
+    """
+    parts = _plain_parts(name)
+    if _no_dir_fd():
+        path = root
+        for part in parts:
+            path = path / part
+            if path.is_symlink():
+                raise FileRefusedError("a symlink")
+        if path.exists() and not path.is_file():
+            raise FileRefusedError("not a regular file")
+        if only_if_absent and path.exists():
+            return False
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write_bytes(path, data)
+        return True
+    dir_fd = open_dir_below(root, parts[:-1])
+    leaf = parts[-1]
+    cloexec = getattr(os, "O_CLOEXEC", 0)
+    try:
+        try:
+            existing = os.stat(leaf, dir_fd=dir_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            existing = None
+        if existing is not None:
+            if stat.S_ISLNK(existing.st_mode):
+                raise FileRefusedError("a symlink")
+            if not stat.S_ISREG(existing.st_mode):
+                raise FileRefusedError("not a regular file")
+            if only_if_absent:
+                return False
+        temp = _temp_name()
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW | cloexec
+        fd = os.open(temp, flags, 0o666, dir_fd=dir_fd)
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                if existing is not None:
+                    os.fchmod(fh.fileno(), stat.S_IMODE(existing.st_mode))
+                fh.write(data)
+            if only_if_absent:
+                # link() fails if the name appeared meanwhile; rename would replace it.
+                try:
+                    os.link(temp, leaf, src_dir_fd=dir_fd, dst_dir_fd=dir_fd, follow_symlinks=False)
+                except FileExistsError:
+                    return False
+                finally:
+                    os.unlink(temp, dir_fd=dir_fd)
+            else:
+                os.replace(temp, leaf, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+        except BaseException:
+            try:
+                os.unlink(temp, dir_fd=dir_fd)
+            except OSError:
+                pass
+            raise
+    finally:
+        os.close(dir_fd)
+    return True
+
+
+def create_file_in_dir(dir_fd: int, name: str, data: bytes) -> bool:
+    """Create ``name`` under ``dir_fd`` with ``data`` only if no entry has that name.
+
+    ``O_CREAT | O_EXCL`` fails for any existing name, a dangling symlink
+    included, so nothing is ever written through a link (PMSERV-277).
+
+    Returns:
+        True if the file was created, False if the name was already taken.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    try:
+        fd = os.open(name, flags, 0o666, dir_fd=dir_fd)
+    except FileExistsError:
+        return False
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(data)
+    return True
+
+
 def write_file_in_dir(parent: Path, dirname: str, filename: str, data: bytes) -> None:
     """Write ``parent/dirname/filename`` without following a symlink.
 
     For pmlens's own output inside a project (``.pm/exports``): a repository
     can ship that directory or the file as a symlink, and writing through it
-    would overwrite any file the user can write (PMSERV-270 review). The
-    directory is created if missing (umask applied) and refused if it is a
-    link. An existing regular file is rewritten in place, as
-    ``open(path, "w")`` does, so it keeps its permissions, owner, group, ACL
-    and extended attributes, and a file the user may not write is refused.
-    Anything else at the name (nothing, a symlink, a FIFO) is replaced by a
-    new file renamed over it, so a link is replaced, never written through.
-    ``parent`` itself is trusted.
+    would overwrite any file the user can write (PMSERV-270 review). See
+    :func:`write_file_below`; a link at the file is replaced.
+    """
+    write_file_below(parent, (dirname, filename), data)
+
+
+def write_file_below(
+    root: Path, parts: Sequence[str], data: bytes, *, refuse_link: bool = False
+) -> None:
+    """Write ``root/parts...`` the way ``open(path, "w")`` does, following no link below root.
+
+    Each directory on the way is created if missing (umask applied) and
+    refused if it is a link. An existing regular file is rewritten in place,
+    so it keeps its permissions, owner, group, ACL and extended attributes,
+    and a file the user may not write is refused. Anything else at the name
+    (nothing, a FIFO, or a symlink unless ``refuse_link``) is replaced by a
+    new file renamed over it, so a link is never written through. ``root``
+    itself is trusted.
 
     Raises:
-        FileRefusedError: ``dirname`` is a symlink or not a directory, a name is
-            not plain, or the file was swapped while it was being written.
+        FileRefusedError: A directory on the way is a symlink or not a
+            directory, a name is not plain, the file is a symlink and
+            ``refuse_link`` is set, or the file was swapped while it was
+            being written.
         OSError: The write failed (PermissionError for a read-only file).
     """
-    _plain_parts([dirname, filename])
+    parts = _plain_parts(parts)
+    *dirs, filename = parts
     if _no_dir_fd():
-        directory = parent / dirname
-        if directory.is_symlink():
-            raise FileRefusedError("a symlink or not a directory")
+        directory = root
+        for part in dirs:
+            directory = directory / part
+            if directory.is_symlink():
+                raise FileRefusedError("a symlink or not a directory")
+        if refuse_link and (directory / filename).is_symlink():
+            raise FileRefusedError("a symlink")
         directory.mkdir(parents=True, exist_ok=True)
         _atomic_write_text(directory / filename, data.decode("utf-8"))
         return
-    parent.mkdir(parents=True, exist_ok=True)
-    parent_fd = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-    try:
-        dir_fd = _open_dir_nofollow(dirname, dir_fd=parent_fd)
-        if dir_fd is None:
-            try:
-                os.mkdir(dirname, 0o777, dir_fd=parent_fd)
-            except FileExistsError:
-                pass
-            dir_fd = _open_dir_nofollow(dirname, dir_fd=parent_fd)
-            if dir_fd is None:
-                raise FileRefusedError("the directory could not be created")
-    finally:
-        os.close(parent_fd)
+    dir_fd = open_dir_below(root, dirs)
     cloexec = getattr(os, "O_CLOEXEC", 0)
     try:
         try:
             existing = os.stat(filename, dir_fd=dir_fd, follow_symlinks=False)
         except FileNotFoundError:
             existing = None
+        if refuse_link and existing is not None and stat.S_ISLNK(existing.st_mode):
+            raise FileRefusedError("a symlink")
         if existing is not None and stat.S_ISREG(existing.st_mode):
             # O_NONBLOCK: a FIFO swapped in after the stat fails at once
             # (ENXIO) instead of waiting for a reader; a regular file ignores it.
@@ -264,7 +480,7 @@ def write_file_in_dir(parent: Path, dirname: str, filename: str, data: bytes) ->
             finally:
                 os.close(fd)
             return
-        temp = f".{filename}.{os.getpid()}.{os.urandom(4).hex()}.tmp"
+        temp = _temp_name()
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW | cloexec
         fd = os.open(temp, flags, 0o666, dir_fd=dir_fd)
         try:
@@ -489,6 +705,24 @@ def _timestamped_backup(path: Path) -> Path:
     backup_path = path.with_name(f"{path.name}.bak.{timestamp}")
     shutil.copy2(path, backup_path)
     return backup_path
+
+
+def _atomic_write_bytes(path: Path, data: bytes) -> None:
+    """Like :func:`_atomic_write_text` for bytes, written as given (no newline translation)."""
+    tmp_fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+    try:
+        with os.fdopen(tmp_fd, "wb") as f:
+            f.write(data)
+        if path.exists():
+            shutil.copymode(path, tmp_name)
+        else:
+            current_umask = os.umask(0)
+            os.umask(current_umask)
+            os.chmod(tmp_name, 0o666 & ~current_umask)
+        os.replace(tmp_name, path)
+    except BaseException:
+        Path(tmp_name).unlink(missing_ok=True)
+        raise
 
 
 def _atomic_write_text(path: Path, content: str, *, encoding: str = "utf-8") -> None:

@@ -23,6 +23,7 @@ markdown fence and the HTML ``<pre>`` so the two formats never drift.
 
 from __future__ import annotations
 
+import errno
 import os
 import re
 from collections.abc import Callable
@@ -41,10 +42,11 @@ from jinja2.loaders import split_template_path
 from jinja2.sandbox import ImmutableSandboxedEnvironment
 
 from . import safe_yaml
+from .ledger_errors import LedgerWriteRefused
 from .memory import MemoryStore, _has_pm_server_schema
 from .models import Decision, Memory, MemoryType, Project, SuggestedModel, Task, TaskStatus
 from .storage import load_decisions, load_project, load_tasks
-from .utils import FileRefusedError, read_file_in_dir, write_file_in_dir
+from .utils import FileRefusedError, read_file_in_dir, write_file_below, write_file_in_dir
 
 # Built-in template dir (shared with dashboard). The two-layer override adds the
 # project's ``.pm/prompt-templates/`` in front of this at render time.
@@ -615,6 +617,36 @@ def _reserved_dir_in(out_path: str) -> str | None:
     return None
 
 
+def _parts_inside_pm(dest: Path, pm_path: Path) -> tuple[str, ...] | None:
+    """``dest``'s path below the project's ``.pm``, or None when it is not in it.
+
+    The path as written (expanded, made absolute, ``..`` folded) and the
+    resolved path are walked up, and each existing directory is compared with
+    ``.pm`` by identity: the written path catches a linked subdirectory
+    (``.pm/exports -> elsewhere``), and identity a symlinked or differently
+    spelled ``.pm``.
+    """
+    try:
+        pm_info = os.stat(pm_path)
+    except OSError:
+        return None
+    path = dest.expanduser()
+    candidates = [Path(os.path.normpath(os.path.abspath(path)))]
+    try:
+        candidates.append(path.resolve())
+    except (OSError, RuntimeError):
+        pass
+    for candidate in candidates:
+        for ancestor in (candidate, *candidate.parents):
+            try:
+                info = os.stat(ancestor)
+            except (OSError, ValueError):
+                continue
+            if (info.st_dev, info.st_ino) == (pm_info.st_dev, pm_info.st_ino):
+                return candidate.relative_to(ancestor).parts
+    return None
+
+
 def _inside_reserved_dir(dest: Path, pm_path: Path) -> str | None:
     """The reserved subdirectory of ``pm_path`` that ``dest`` lands in, if any.
 
@@ -704,8 +736,13 @@ def run_prompt_pack(
     # cautions (never create it, never raise OperationalError on a bare SELECT).
     memories_by_task: dict[str, list[Memory]] = {}
     mem_db = pm_path / "memory.db"
-    if mem_db.exists() and _has_pm_server_schema(mem_db):
-        store = MemoryStore(mem_db, readonly=True)
+    store = None
+    try:
+        if mem_db.exists() and _has_pm_server_schema(mem_db):
+            store = MemoryStore(mem_db, readonly=True)
+    except LedgerWriteRefused as exc:  # a refused store (a symlink in .pm): no cautions
+        warnings.append(f"memory_store_refused: {exc}; the pack has no memory cautions")
+    if store is not None:
         try:
             memories_by_task = {t.id: store.get_by_task(t.id) for t in selected}
         finally:
@@ -739,8 +776,11 @@ def run_prompt_pack(
         )
         ext = "md"
 
+    # Expanded and normalised once, so the checks below and the write see the
+    # same path: the kernel would otherwise walk a '..' after a linked
+    # directory (.pm/exports/../../x) from the link's target.
     dest = (
-        Path(out_path)
+        Path(os.path.normpath(os.path.abspath(Path(out_path).expanduser())))
         if out_path
         else pm_path / "exports" / f"prompt-pack-{_prompt_pack_slug(filter_label)}.{ext}"
     )
@@ -759,31 +799,46 @@ def run_prompt_pack(
             "symlink, not a regular UTF-8 file, too large, or outside the project, so the "
             "bundled template was used"
         )
-    if out_path:
+    # A destination inside the project's .pm (the default, or an out_path
+    # such as .pm/exports/mine.md) is in what a repository controls: a
+    # directory or the file there may be a symlink, and writing through it
+    # would overwrite any file the user can write (PMSERV-270, PMSERV-277).
+    in_pm = ("exports", dest.name) if not out_path else _parts_inside_pm(dest, pm_path)
+    if in_pm is not None and (len(in_pm) < 2 or in_pm[0].casefold() != "exports"):
+        # Inside .pm only exports/ is the pack's: everything else there is
+        # pmlens's data (ledgers, stores and their sidecars, daily logs,
+        # templates), which out_path, or a link it names (PROMPT.md ->
+        # .pm/drafts.db), must not overwrite.
+        return {
+            "status": "error",
+            "message": (
+                f"refusing to write a prompt pack to .pm/{'/'.join(in_pm)}: inside .pm, packs "
+                "go under .pm/exports; choose an out_path there or outside .pm"
+            ),
+        }
+    if in_pm is None:
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(content, encoding="utf-8")
     else:
-        # The default destination is inside the project, which a repository
-        # controls: .pm/exports or the file may be a symlink, and writing
-        # through it would overwrite any file the user can write.
+        shown = "/".join(in_pm)
+        hint = "fix it or pass out_path" if not out_path else "choose an out_path outside .pm"
         try:
-            write_file_in_dir(pm_path, "exports", dest.name, content.encode("utf-8"))
+            if not in_pm:
+                raise IsADirectoryError(errno.EISDIR, os.strerror(errno.EISDIR))
+            if out_path:
+                write_file_below(pm_path, in_pm, content.encode("utf-8"), refuse_link=True)
+            else:
+                write_file_in_dir(pm_path, "exports", dest.name, content.encode("utf-8"))
         except FileRefusedError as exc:
             return {
                 "status": "error",
-                "message": (
-                    f"refusing to write the prompt pack to .pm/exports/{dest.name}: {exc}; "
-                    "fix it or pass out_path"
-                ),
+                "message": f"refusing to write the prompt pack to .pm/{shown}: {exc}; {hint}",
             }
         except OSError as exc:  # a directory at the name, a read-only file, a full disk
             reason = exc.strerror or type(exc).__name__
             return {
                 "status": "error",
-                "message": (
-                    f"could not write the prompt pack to .pm/exports/{dest.name}: {reason}; "
-                    "fix it or pass out_path"
-                ),
+                "message": f"could not write the prompt pack to .pm/{shown}: {reason}; {hint}",
             }
 
     return {

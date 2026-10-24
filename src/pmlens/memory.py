@@ -13,8 +13,10 @@ import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .ledger_errors import LedgerReadError, build_record
+from .ledger_errors import LedgerReadError, LedgerWriteRefused, build_record
 from .models import Memory, MemoryType, SessionSummary
+from .safe_sqlite import connect_store, refusal_message
+from .utils import FileRefusedError
 
 # ─── Tag helpers ────────────────────────────────────
 
@@ -235,10 +237,23 @@ def _connect_readonly(db_path: Path) -> sqlite3.Connection:
     they would attempt to write the file header and fail with OperationalError
     on a read-only connection.
     """
-    uri = f"file:{db_path}?mode=ro&immutable=1"
-    conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
+    if str(db_path) == ":memory:":
+        conn = sqlite3.connect(":memory:", check_same_thread=False)
+    else:
+        try:
+            opened = connect_store(db_path, readonly=True)
+        except FileRefusedError as exc:
+            raise _store_refused(db_path, exc) from None
+        if opened is None:
+            raise sqlite3.OperationalError("unable to open database file")
+        conn = opened[0]
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def _store_refused(db_path: Path, exc: FileRefusedError) -> LedgerWriteRefused:
+    """A content-free refusal to open a project's SQLite store (PMSERV-277)."""
+    return LedgerWriteRefused(refusal_message(db_path, exc))
 
 
 def _has_pm_server_schema(db_path: Path) -> bool:
@@ -465,8 +480,16 @@ class MemoryStore:
         if readonly:
             self._conn = _connect_readonly(db_path)
         else:
-            db_path.parent.mkdir(parents=True, exist_ok=True)
-            self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
+            if str(db_path) == ":memory:":
+                self._conn = sqlite3.connect(":memory:", check_same_thread=False)
+            else:
+                db_path.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    opened = connect_store(db_path)
+                except FileRefusedError as exc:
+                    raise _store_refused(db_path, exc) from None
+                assert opened is not None  # create=True
+                self._conn = opened[0]
             self._conn.row_factory = sqlite3.Row
             _apply_pragmas(self._conn)
             self._ensure_schema()

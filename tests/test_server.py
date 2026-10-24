@@ -503,10 +503,10 @@ class TestPmAddDecisionLineage:
         """(b) decisions.yaml is saved; the lineage is reported missing."""
         real_save = _storage._save_yaml
 
-        def failing(path, data, header_name):
+        def failing(path, data, header_name, **kwargs):
             if Path(path).parent.name == "decision_lineage":
                 raise OSError(28, "No space left on device")
-            return real_save(path, data, header_name)
+            return real_save(path, data, header_name, **kwargs)
 
         monkeypatch.setattr(_storage, "_save_yaml", failing)
         result = _add(initialized_project, origin="human", decision_kind="technical")

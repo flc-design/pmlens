@@ -33,6 +33,9 @@ from pathlib import Path
 from typing import Literal
 
 from .memory import _apply_pragmas
+from .models import PmServerError
+from .safe_sqlite import connect_store, refusal_message
+from .utils import FileRefusedError
 
 # Frozen enums. SQLite cannot ALTER a CHECK constraint and there is no
 # migration framework (user_version pinned at 1), so the value sets below are
@@ -178,6 +181,25 @@ END;
 """
 
 
+def _open_store(db_path: Path, *, create: bool) -> tuple[sqlite3.Connection, bool]:
+    """Open the draft database, refusing a symlink at it or its sidecars (PMSERV-277).
+
+    A dangling ``.pm/drafts.db`` link used to make SQLite create the target
+    anywhere and write unredacted ``raw_content`` into it.
+
+    Raises:
+        PmServerError: The database (or a sidecar) is a symlink or not a
+            regular file, or it is missing when it may not be created.
+    """
+    try:
+        opened = connect_store(db_path, create=create)
+    except FileRefusedError as exc:
+        raise PmServerError(refusal_message(db_path, exc)) from None
+    if opened is None:
+        raise PmServerError(f".pm/{db_path.name} disappeared while it was in use")
+    return opened
+
+
 def _ensure_schema(db_path: Path) -> None:
     """Create the x_drafts schema if missing.
 
@@ -186,8 +208,7 @@ def _ensure_schema(db_path: Path) -> None:
     non-existence and apply it first. Mirrors ``outbox._ensure_schema``.
     """
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    is_new = not db_path.exists()
-    conn = sqlite3.connect(str(db_path), check_same_thread=False)
+    conn, is_new = _open_store(db_path, create=True)
     try:
         if is_new:
             conn.execute("PRAGMA page_size = 8192")
@@ -226,8 +247,12 @@ class DraftStore:
         _ensure_schema(self.db_path)
 
     def _connect(self) -> sqlite3.Connection:
-        """Open a short-lived RW connection with WAL pragmas applied."""
-        conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+        """Open a short-lived RW connection with WAL pragmas applied.
+
+        Reopened for every write, so the symlink check runs every time:
+        ``raw_content`` is written on these connections (PMSERV-277).
+        """
+        conn, _ = _open_store(self.db_path, create=False)
         conn.row_factory = sqlite3.Row
         _apply_pragmas(conn)
         return conn
@@ -515,15 +540,20 @@ _draft_stores: dict[str, DraftStore] = {}
 def get_draft_store(db_path: Path) -> DraftStore:
     """Return the per-db_path DraftStore, creating it on first use.
 
-    Keyed by the resolved db_path so projectA's drafts never surface under
-    projectB within one process.
+    Keyed by the db_path with its directory resolved, so projectA's drafts
+    never surface under projectB within one process.
     """
-    # Resolve so two spellings of the same file (symlinks, '..' segments) map
-    # to ONE store — mirrors server._memory_stores' resolved keying. Without
-    # this the per-project isolation guarantee can be silently violated.
-    key = str(Path(db_path).resolve())
+    # The directory is resolved so two spellings of the same .pm (symlinks,
+    # '..' segments) map to ONE store. The file name is not: a repository can
+    # ship .pm/drafts.db as a link to another project's database, and keying
+    # by the link's target handed that project's cached store (and its rows)
+    # to this one without the symlink check ever running (PMSERV-277).
+    path = Path(db_path)
+    key = str(path.parent.resolve() / path.name)
     if key not in _draft_stores:
-        _draft_stores[key] = DraftStore(Path(db_path))
+        # Built from the key, not the first caller's spelling: a cached store
+        # must not keep writing through a path another project spelled.
+        _draft_stores[key] = DraftStore(Path(key))
     return _draft_stores[key]
 
 

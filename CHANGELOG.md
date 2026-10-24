@@ -11,7 +11,7 @@ as accepted, like every lifecycle change, returns a warning to pass on to the
 user.
 
 MCP tool count: 48 names for 46 operations in full mode (the two content tool
-aliases); Lens 17, or 19 with Desktop outbox writes. Test suite: 2,623 passing.
+aliases); Lens 17, or 19 with Desktop outbox writes. Test suite: 2,725 passing.
 
 **Upgrade notes.**
 
@@ -163,9 +163,34 @@ aliases); Lens 17, or 19 with Desktop outbox writes. Test suite: 2,623 passing.
   written through it to any file the user can write. A link at the file is
   now replaced, and a symlinked `.pm/exports` is refused; an existing export
   is rewritten in place as before, keeping its permissions, group and ACL,
-  and a read-only one is not replaced. An explicit `out_path` is written as
-  before. A write that fails returns `status: error` with the reason instead
-  of raising.
+  and a read-only one is not replaced. An explicit `out_path` inside `.pm`
+  (such as `.pm/exports/mine.md`) is written the same way, except that a
+  link at the file is refused; one elsewhere is written as before. `~` and
+  `..` in `out_path` are resolved once, before the path is checked and
+  written, so the write goes where the checks looked. Inside `.pm` a pack
+  may only go under `.pm/exports`: an `out_path` elsewhere in `.pm`, or a
+  link that leads there (`PROMPT.md -> .pm/drafts.db`), is refused.
+  A write that fails returns `status: error` with the reason instead of
+  raising.
+- **Writes no longer follow symlinks a repository ships in `.pm/` or as a
+  rule file** (PMSERV-277). git checks symlinks out as links, and pmlens
+  wrote through them: a dangling `.pm/.locks/.gitignore` link created its
+  target (for example git's global excludes file, with `*` in it) on the
+  first ledger write; a linked `.pm/.locks`, `.pm/daily` or ledger file put
+  lock files, logs or ledgers elsewhere; SQLite followed a linked
+  `memory.db` or `drafts.db`, writing memories or unredacted draft text
+  anywhere; and a `CLAUDE.md` / `AGENTS.md` link was appended to wherever it
+  pointed, `~/.zshrc` included. Ledgers, locks and logs are now written
+  through descriptors that follow no link below `.pm`; `memory.db` and the
+  draft database (and their `-wal` / `-shm`) must be regular files; a rule
+  file link is followed only to a file inside the project and outside `.git`
+  / `.pm` (including the real git directory a `.git` file names, as with
+  `--separate-git-dir` or a worktree), so `AGENTS.md -> CLAUDE.md` keeps
+  working, and backups are created without overwriting an existing name. A
+  refused entry gives an error naming it; `pm_status` and `pm_init` list the
+  entries in `.pm` that are symlinks (`symlinks_in_pm_refused`). A symlinked
+  `.pm` itself keeps working, and is the way to keep the data elsewhere or
+  share it.
 - **Workflow template names cannot carry a path** (PMSERV-271):
   `pm_workflow_start(template=...)` joined the name into a file path, so an
   absolute path or `../` read any `*.yaml` on disk and put its text in the

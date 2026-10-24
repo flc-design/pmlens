@@ -16,16 +16,26 @@ unchanged.
 
 from __future__ import annotations
 
+import errno
 import os
 import re
 import shutil
+import stat
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
 from .hosts import HOSTS, hosts_reading_both_rule_files, rule_files
 from .models import PmServerError
-from .utils import TARGET_CHOICES, _atomic_write_text, _timestamped_backup
+from .utils import (
+    TARGET_CHOICES,
+    FileRefusedError,
+    _no_dir_fd,
+    open_dir_below,
+    read_file_in_dir,
+    replace_file_in_dir,
+)
 
 # Mapping from host id (used by `target` arg) to the rule-file basename
 # managed in the project root. Same marker scheme is reused across hosts
@@ -158,23 +168,21 @@ def get_claudemd_status(project_root: Path) -> dict:
 
     Returns:
         dict with keys: exists, has_pm_section, version, up_to_date,
-        other_rule_sections
+        other_rule_sections, and ``refused`` (a reason) when CLAUDE.md is a
+        symlink pmlens does not follow (PMSERV-277).
     """
-    claude_md = project_root / "CLAUDE.md"
+    return _scan_rule_file(project_root / "CLAUDE.md")
+
+
+def _status_from_content(content: str) -> dict:
+    """The section status of a rule file's text."""
     result: dict = {
-        "exists": claude_md.exists(),
+        "exists": True,
         "has_pm_section": False,
         "version": None,
         "up_to_date": False,
         "other_rule_sections": [],
     }
-    if not claude_md.exists():
-        return result
-
-    try:
-        content = claude_md.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return result
     versions = _section_versions(content)
     if versions:
         result["has_pm_section"] = True
@@ -182,12 +190,378 @@ def get_claudemd_status(project_root: Path) -> dict:
         # the first one alone let an older build rewrite around a newer copy.
         result["version"] = max(versions)
         result["up_to_date"] = result["version"] >= TEMPLATE_VERSION
-
     # Detect other MCP rule sections (any <!-- name:begin --> marker except pm-server)
     all_sections = OTHER_SECTION_PATTERN.findall(content)
     result["other_rule_sections"] = [s for s in all_sections if s != "pm-server"]
-
     return result
+
+
+# --- PMSERV-277: rule files a repository may ship as symlinks --------------
+
+_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+_O_BINARY = getattr(os, "O_BINARY", 0)
+
+# A rule file is Markdown; anything larger is not one.
+RULE_FILE_MAX_BYTES = 1024 * 1024
+
+
+class RuleFileRefused(PmServerError):  # noqa: N818 - matches LedgerWriteRefused
+    """A rule file pmlens does not read or write; the message names the file and the reason."""
+
+
+@dataclass(frozen=True)
+class _RuleLocation:
+    """Where a rule file's text lives: below ``root``, the resolved project root."""
+
+    root: Path
+    parts: tuple[str, ...]
+
+
+def _rule_location(path: Path) -> _RuleLocation:
+    """Where ``path`` (CLAUDE.md or AGENTS.md at a project root) is read and written.
+
+    A repository can ship the rule file as a symlink: cross-check D3 followed
+    it so that ``AGENTS.md -> CLAUDE.md`` shares one file, but a link to
+    ``~/.zshrc`` or ``~/CLAUDE.md`` was then appended to, and the ADR-053
+    home-root guard checked only the project. A link is followed only when it
+    resolves inside the project and outside ``.git`` and ``.pm``; the file and
+    every directory on the way are then opened without following links, so a
+    link swapped in later is refused rather than followed.
+
+    Raises:
+        RuleFileRefused: The link leads outside the project, into .git or .pm,
+            or cannot be resolved.
+    """
+    root = path.parent.resolve()
+    name = path.name
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return _RuleLocation(root, (name,))
+    except OSError as exc:
+        reason = os.strerror(exc.errno) if exc.errno else type(exc).__name__
+        raise RuleFileRefused(f"{name} could not be checked ({reason})") from None
+    if not stat.S_ISLNK(info.st_mode):
+        return _RuleLocation(root, (name,))
+    try:
+        target = path.resolve(strict=False)
+    except (OSError, RuntimeError):
+        raise RuleFileRefused(
+            f"{name} is a symlink that cannot be resolved; pmlens does not follow it"
+        ) from None
+    rel = _relative_inside(target, root)
+    if rel is None:
+        raise RuleFileRefused(
+            f"{name} is a symlink to a file outside the project, so pmlens does not read or "
+            "write through it; replace the link with the file, or point it at a file inside "
+            "the project"
+        )
+    if not rel.parts:
+        raise RuleFileRefused(
+            f"{name} is a symlink to the project directory itself; pmlens does not follow it"
+        )
+    into = f"{name} is a symlink into .git or .pm; pmlens does not follow it"
+    if any(part.casefold() in {".git", ".pm"} for part in rel.parts):
+        raise RuleFileRefused(into)
+    guarded = _guarded_dirs(root)
+    if guarded is None:
+        raise RuleFileRefused(
+            f"{name} is a symlink, and pmlens could not tell where this project's .git and .pm "
+            "are (a dangling link or an unreadable .git file), so it does not follow it"
+        )
+    try:
+        inside = _inside_any(target, guarded)
+    except OSError as exc:
+        reason = os.strerror(exc.errno) if exc.errno else type(exc).__name__
+        raise RuleFileRefused(
+            f"{name} is a symlink whose target could not be checked ({reason}); pmlens does "
+            "not follow it"
+        ) from None
+    if inside:
+        raise RuleFileRefused(into)
+    return _RuleLocation(root, rel.parts)
+
+
+def _relative_inside(target: Path, root: Path) -> Path | None:
+    """``target``'s path below ``root``, or None when it is not inside it.
+
+    By path, and otherwise by the identity of the directory on the way that is
+    the root: a case-insensitive filesystem resolves ``/w/proj`` (as the caller
+    spelled the project) and an absolute link to ``/W/Proj/CLAUDE.md`` to
+    different strings for the same directory.
+    """
+    try:
+        return target.relative_to(root)
+    except ValueError:
+        pass
+    try:
+        root_info = os.stat(root)
+    except OSError:
+        return None
+    for ancestor in target.parents:
+        try:
+            info = os.stat(ancestor)
+        except (OSError, ValueError):
+            continue
+        if (info.st_dev, info.st_ino) == (root_info.st_dev, root_info.st_ino):
+            return target.relative_to(ancestor)
+    return None
+
+
+def _inside_any(target: Path, guarded: list[tuple[int, int]]) -> bool:
+    """Whether a directory ``target`` is (or would be created) under is guarded.
+
+    The project's .git and .pm are caught by name before this; by identity a
+    ``.pm`` that is itself a link (``.pm -> data``), a differently spelled
+    alias, or one that is the project root or above it (``.pm -> .``,
+    ``.git -> ..``, which puts every file in the project inside it) is caught
+    too. The walk goes from the target's directory to the filesystem root,
+    past directories that do not exist yet (the write would create them).
+
+    Raises:
+        OSError: A directory on the way could not be checked (a link loop, a
+            name too long, no permission).
+    """
+    directory = target.parent
+    while True:
+        try:
+            info = os.stat(directory)
+        except (FileNotFoundError, NotADirectoryError):
+            pass
+        except ValueError:
+            raise OSError(errno.EINVAL, os.strerror(errno.EINVAL)) from None
+        else:
+            if (info.st_dev, info.st_ino) in guarded:
+                return True
+        if directory == directory.parent:
+            return False
+        directory = directory.parent
+
+
+class _GitDirsUnknownError(Exception):
+    """Which directories the project's git uses cannot be told."""
+
+
+_GITFILE_MAX_BYTES = 4096
+
+
+def _guarded_dirs(root: Path) -> list[tuple[int, int]] | None:
+    """``(st_dev, st_ino)`` of the project's .git and .pm, or None to refuse every link.
+
+    Besides ``.git`` itself, the directories git uses for the project are
+    guarded, since either may sit inside the project under another name: the
+    git directory a ``.git`` file names (``gitdir: <path>``, written by
+    ``--separate-git-dir``, a worktree or a submodule; git never checks one
+    out), and the common directory a git directory's ``commondir`` names. A
+    .git or .pm that is a dangling or looping link, or git metadata that
+    cannot be read, leaves what to guard unknown (None). A git directory that
+    does not exist (a worktree whose main repository moved) guards nothing,
+    and neither does one above the project root (a worktree inside a bare
+    clone, ``myrepo.git/main``): a target inside the project is then in the
+    worktree, not among git's files. The project's own .git and .pm still
+    refuse everything when they are the root or above it.
+    """
+    guarded: list[tuple[int, int]] = []
+    try:
+        for name in (".git", ".pm"):
+            info = _stat_existing(root / name)
+            if info is None:
+                continue
+            guarded.append((info.st_dev, info.st_ino))
+            if name == ".git":
+                above = _ancestor_ids(root)
+                guarded.extend(d for d in _git_dirs(root, info) if d not in above)
+    except _GitDirsUnknownError:
+        return None
+    return guarded
+
+
+def _ancestor_ids(root: Path) -> set[tuple[int, int]]:
+    """``(st_dev, st_ino)`` of the directories above ``root``."""
+    ids = set()
+    for directory in root.parents:
+        try:
+            info = os.stat(directory)
+        except OSError:
+            continue
+        ids.add((info.st_dev, info.st_ino))
+    return ids
+
+
+def _git_dirs(root: Path, info: os.stat_result) -> list[tuple[int, int]]:
+    """The git directory a ``.git`` file names, and the common directory, if any.
+
+    Parsed as git does, so the directory guarded is the one git uses: a
+    ``.git`` file is ``gitdir: <path>`` and the rest of the file is the path
+    (relative to the directory holding ``.git``) up to trailing CR / LF;
+    ``commondir`` likewise, relative to the git directory. A ``.git`` that is
+    a link to a gitfile (git follows it) is read through the link.
+    """
+    if stat.S_ISREG(info.st_mode):
+        try:
+            gitfile = (root / ".git").resolve(strict=True)
+        except (OSError, RuntimeError):
+            raise _GitDirsUnknownError from None
+        value = _git_metadata(gitfile.parent, gitfile.name)
+        if not value.startswith("gitdir: "):
+            raise _GitDirsUnknownError
+        gitdir = root / value.removeprefix("gitdir: ")
+        gitdir_info = _stat_existing(gitdir)
+        if gitdir_info is None:
+            return []
+        found = [(gitdir_info.st_dev, gitdir_info.st_ino)]
+    elif stat.S_ISDIR(info.st_mode):
+        gitdir = root / ".git"
+        found = []
+    else:
+        return []
+    common = _git_metadata(gitdir.resolve(), "commondir")
+    if common:
+        common_info = _stat_existing(gitdir / common)
+        if common_info is not None:
+            found.append((common_info.st_dev, common_info.st_ino))
+    return found
+
+
+def _git_metadata(directory: Path, name: str) -> str:
+    """A small git metadata file's content without trailing CR / LF, or "" if none.
+
+    git strips nothing else, so neither is anything stripped here: a path with
+    a trailing space or a form feed in it names that directory. Read like a
+    rule file (no link, no FIFO, a size cap), since a project that did not
+    come from ``git clone`` can supply it.
+    """
+    try:
+        raw = read_file_in_dir(directory, name, _GITFILE_MAX_BYTES)
+        text = raw.decode("utf-8") if raw is not None else ""
+    except (FileRefusedError, OSError, UnicodeDecodeError):
+        raise _GitDirsUnknownError from None
+    value = text.rstrip("\r\n")
+    if "\x00" in value:
+        raise _GitDirsUnknownError
+    return value
+
+
+def _stat_existing(path: Path) -> os.stat_result | None:
+    """``os.stat(path)``, or None when nothing is there; a dangling link is unknowable."""
+    try:
+        return os.stat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        if os.path.lexists(path):
+            raise _GitDirsUnknownError from None
+        return None
+    except (OSError, ValueError):
+        raise _GitDirsUnknownError from None
+
+
+def _read_rule(loc: _RuleLocation, name: str) -> bytes | None:
+    """The rule file's bytes, or None when it does not exist."""
+    try:
+        return read_file_in_dir(loc.root, loc.parts, RULE_FILE_MAX_BYTES)
+    except FileRefusedError as exc:
+        raise RuleFileRefused(f"{name}: {exc}") from None
+
+
+def _decode_rule(raw: bytes, name: str) -> str:
+    """The rule file's text with newlines normalised, as ``read_text`` did.
+
+    A CRLF file therefore compares equal to the LF template when nothing
+    changed, and is written back with LF, as before (the backup keeps the
+    original bytes).
+    """
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise RuleFileRefused(f"{name} is not UTF-8 text") from None
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _backup_rule(loc: _RuleLocation, data: bytes) -> Path:
+    """Write ``<file>.bak.<timestamp>`` next to the rule file from the bytes read.
+
+    Created with O_EXCL | O_NOFOLLOW, so a name planted in advance (a link
+    included) is never written through; a same-second collision gets ``-N``.
+    """
+    leaf = loc.parts[-1]
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    names = [f"{leaf}.bak.{stamp}" + (f"-{i}" if i else "") for i in range(100)]
+    directory = loc.root.joinpath(*loc.parts[:-1])
+    if _no_dir_fd():  # pragma: no cover - Windows: O_EXCL never follows an existing name
+        original = os.stat(directory / leaf, follow_symlinks=False)
+        for name in names:
+            try:
+                fd = os.open(
+                    directory / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_BINARY, 0o600
+                )
+            except FileExistsError:
+                continue
+            _finish_backup(fd, data, original, path=directory / name)
+            return directory / name
+        raise OSError(errno.EEXIST, "no free backup name")
+    try:
+        fd = open_dir_below(loc.root, loc.parts[:-1])
+    except FileRefusedError as exc:
+        raise RuleFileRefused(f"{leaf}: {exc}") from None
+    try:
+        original = os.stat(leaf, dir_fd=fd, follow_symlinks=False)
+        for name in names:
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW | _CLOEXEC
+            try:
+                out = os.open(name, flags, 0o600, dir_fd=fd)
+            except FileExistsError:
+                continue
+            _finish_backup(out, data, original)
+            return directory / name
+    finally:
+        os.close(fd)
+    raise OSError(errno.EEXIST, "no free backup name")
+
+
+def _finish_backup(
+    fd: int, data: bytes, original: os.stat_result, *, path: Path | None = None
+) -> None:
+    """Write a backup and give it the original's permissions and times, as copy2 did.
+
+    ``path`` is for platforms without ``fchmod`` / ``utime`` on a descriptor
+    (Windows): the backup is then adjusted by path once it is closed.
+    """
+    mode = stat.S_IMODE(original.st_mode) & 0o777
+    times = (original.st_atime_ns, original.st_mtime_ns)
+    by_fd = hasattr(os, "fchmod") and os.utime in os.supports_fd
+    try:
+        view = memoryview(data)
+        while view:
+            view = view[os.write(fd, view) :]
+        if by_fd:
+            os.fchmod(fd, mode)
+            os.utime(fd, ns=times)
+    finally:
+        os.close(fd)
+    if not by_fd and path is not None:
+        os.chmod(path, mode)
+        os.utime(path, ns=times)
+
+
+def _write_rule(loc: _RuleLocation, content: str, name: str) -> None:
+    """Write ``content`` (LF newlines) with the platform's newlines, as a text-mode write did."""
+    try:
+        data = content.replace("\n", os.linesep).encode("utf-8")
+        replace_file_in_dir(loc.root, loc.parts, data)
+    except FileRefusedError as exc:
+        raise RuleFileRefused(f"{name}: {exc}") from None
+
+
+def _write_rule_backed_up(loc: _RuleLocation, old: bytes, content: str, name: str) -> Path:
+    """Back up the rule file from the bytes read, then replace it atomically.
+
+    Every writer goes through here or through ``_inject_into_file`` so the
+    README's "backed up before each write" holds for pm_init and the legacy
+    update-claudemd path too (ADR-055).
+    """
+    backup = _backup_rule(loc, old)
+    _write_rule(loc, content, name)
+    return backup
 
 
 def _render_template() -> str:
@@ -214,31 +588,13 @@ def ensure_claudemd(project_root: Path) -> str:
     - No markers -> append PM section
     - Same version -> skip
     - Old version -> replace PM section
+    - A symlink pmlens does not follow (PMSERV-277) -> left unchanged
 
     Returns:
         Status message describing what was done.
     """
     guard_not_home_root(project_root)
-    status = get_claudemd_status(project_root)
-    claude_md = project_root / "CLAUDE.md"
-    template = _render_template()
-
-    if not status["exists"]:
-        _atomic_write_text(claude_md, template + "\n")
-        return "created CLAUDE.md with PM Lens rules"
-
-    content = claude_md.read_text(encoding="utf-8")
-
-    if not status["has_pm_section"]:
-        separator = _separator_for(content)
-        _write_rule_file(claude_md, content + separator + template + "\n")
-        return "appended PM Lens rules to CLAUDE.md"
-
-    if status["up_to_date"]:
-        return "CLAUDE.md already has up-to-date PM Lens rules (skipped)"
-
-    # Old version -> replace
-    return _replace_pm_section(claude_md, content, template)
+    return _claudemd_rewrite(project_root, force=None)
 
 
 def update_claudemd(project_root: Path, *, force: bool = False) -> str:
@@ -253,25 +609,32 @@ def update_claudemd(project_root: Path, *, force: bool = False) -> str:
         Status message describing what was done.
     """
     guard_not_home_root(project_root)
-    status = get_claudemd_status(project_root)
-    claude_md = project_root / "CLAUDE.md"
+    return _claudemd_rewrite(project_root, force=force)
+
+
+def _claudemd_rewrite(project_root: Path, *, force: bool | None) -> str:
+    """Shared body of ensure_claudemd (``force=None``) and update_claudemd."""
     template = _render_template()
-
-    if not status["exists"]:
-        _atomic_write_text(claude_md, template + "\n")
-        return "created CLAUDE.md with PM Lens rules"
-
-    content = claude_md.read_text(encoding="utf-8")
-
-    if not status["has_pm_section"]:
-        separator = _separator_for(content)
-        _write_rule_file(claude_md, content + separator + template + "\n")
-        return "appended PM Lens rules to CLAUDE.md"
-
-    if status["version"] > TEMPLATE_VERSION and not force:
-        return _downgrade_refusal_message("CLAUDE.md", status["version"]) + " (skipped)"
-
-    return _replace_pm_section(claude_md, content, template)
+    try:
+        loc = _rule_location(project_root / "CLAUDE.md")
+        raw = _read_rule(loc, "CLAUDE.md")
+        if raw is None:
+            _write_rule(loc, template + "\n", "CLAUDE.md")
+            return "created CLAUDE.md with PM Lens rules"
+        content = _decode_rule(raw, "CLAUDE.md")
+        status = _status_from_content(content)
+        if not status["has_pm_section"]:
+            separator = _separator_for(content)
+            _write_rule_backed_up(loc, raw, content + separator + template + "\n", "CLAUDE.md")
+            return "appended PM Lens rules to CLAUDE.md"
+        if force is None:
+            if status["up_to_date"]:
+                return "CLAUDE.md already has up-to-date PM Lens rules (skipped)"
+        elif status["version"] > TEMPLATE_VERSION and not force:
+            return _downgrade_refusal_message("CLAUDE.md", status["version"]) + " (skipped)"
+        return _replace_pm_section(loc, raw, content, template)
+    except RuleFileRefused as exc:
+        return f"left CLAUDE.md unchanged: {exc}"
 
 
 def _downgrade_refusal_message(target_file: str, version: int) -> str:
@@ -329,20 +692,7 @@ def _section_bounds(content: str, begin: re.Match, end: re.Match) -> tuple[str, 
     return content[: _marker_start(content, begin)], content[marker_end:]
 
 
-def _write_rule_file(path: Path, content: str) -> None:
-    """Back up an existing rule file, then replace it atomically.
-
-    Every writer goes through here or through ``_inject_into_file`` so the
-    README's "backed up before each write" holds for pm_init and the legacy
-    update-claudemd path too (ADR-055).
-    """
-    target = path.resolve(strict=False) if path.is_symlink() else path
-    if target.exists():
-        _timestamped_backup(target)
-    _atomic_write_text(target, content)
-
-
-def _replace_pm_section(claude_md: Path, content: str, template: str) -> str:
+def _replace_pm_section(loc: _RuleLocation, raw: bytes, content: str, template: str) -> str:
     """Replace the marker-delimited PM section with new template."""
     sections = _pm_sections(content)
     if len(sections) > 1:
@@ -353,19 +703,19 @@ def _replace_pm_section(claude_md: Path, content: str, template: str) -> str:
     if begin_match and end_match:
         # Normal: replace between begin and end markers
         before, after = _section_bounds(content, begin_match, end_match)
-        _write_rule_file(claude_md, before + template + after)
+        _write_rule_backed_up(loc, raw, before + template + after, "CLAUDE.md")
         old_version = int(begin_match.group(1))
         return f"updated PM Lens rules in CLAUDE.md (v{old_version} → v{TEMPLATE_VERSION})"
 
     if begin_match:
         # Corrupted: begin marker exists but no end marker — remove begin and everything after it
         before = content[: _marker_start(content, begin_match)]
-        _write_rule_file(claude_md, before.rstrip() + "\n\n" + template + "\n")
+        _write_rule_backed_up(loc, raw, before.rstrip() + "\n\n" + template + "\n", "CLAUDE.md")
         return "replaced corrupted PM Lens section in CLAUDE.md"
 
     # No markers at all — fallback to append
     separator = _separator_for(content)
-    _write_rule_file(claude_md, content + separator + template + "\n")
+    _write_rule_backed_up(loc, raw, content + separator + template + "\n", "CLAUDE.md")
     return "appended PM Lens rules to CLAUDE.md (no markers found)"
 
 
@@ -376,31 +726,29 @@ def _scan_rule_file(path: Path) -> dict:
     """Return marker-status dict for any rule file (same shape as
     ``get_claudemd_status``).
 
-    Internal helper for ``get_rules_status``. Does NOT replace
-    ``get_claudemd_status``: the legacy function is preserved verbatim
-    as the v0.4.x compatibility surface (ADR-008 #9).
+    Internal helper for ``get_rules_status``. Reads with the rule-file
+    location (PMSERV-277): a symlink leading outside the project is not read,
+    and ``refused`` gives the reason; a FIFO or an oversized file is not read
+    either.
     """
     result: dict = {
-        "exists": path.exists(),
+        "exists": False,
         "has_pm_section": False,
         "version": None,
         "up_to_date": False,
         "other_rule_sections": [],
     }
-    if not path.exists():
+    try:
+        raw = _read_rule(_rule_location(path), path.name)
+    except RuleFileRefused as exc:
+        return {**result, "exists": True, "refused": str(exc)}
+    if raw is None:
         return result
     try:
-        content = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return result
-    versions = _section_versions(content)
-    if versions:
-        result["has_pm_section"] = True
-        result["version"] = max(versions)
-        result["up_to_date"] = result["version"] >= TEMPLATE_VERSION
-    all_sections = OTHER_SECTION_PATTERN.findall(content)
-    result["other_rule_sections"] = [s for s in all_sections if s != "pm-server"]
-    return result
+        content = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return {**result, "exists": True}
+    return _status_from_content(content)
 
 
 def get_rules_status(project_root: Path) -> dict[str, dict]:
@@ -431,16 +779,10 @@ def _has_pm_marker(path: Path) -> bool:
     associated host is in active use, even if external probes (PATH /
     config files / env vars) fail to detect it.
     """
-    if not path.exists():
-        return False
-    try:
-        content = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        # An unreadable or non-UTF-8 file is not a pm-managed one; raising here
-        # would abort a whole `update-rules --all` run from outside the
-        # per-file failure guard.
-        return False
-    return bool(BEGIN_PATTERN.search(content))
+    # An unreadable, refused or non-UTF-8 file is not a pm-managed one; raising
+    # here would abort a whole `update-rules --all` run from outside the
+    # per-file failure guard.
+    return _scan_rule_file(path)["has_pm_section"]
 
 
 def detect_hosts(project_root: Path) -> tuple[list[str], str]:
@@ -575,10 +917,11 @@ def pm_section_versions(project_root: Path) -> dict[str, int]:
 
 
 def _file_section_versions(path: Path) -> list[int]:
-    """Versions of every PM Lens section in ``path`` ([] if unreadable)."""
+    """Versions of every PM Lens section in ``path`` ([] if unreadable or refused)."""
     try:
-        return _section_versions(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError):
+        raw = _read_rule(_rule_location(path), path.name)
+        return _section_versions(raw.decode("utf-8")) if raw is not None else []
+    except (RuleFileRefused, UnicodeDecodeError):
         return []
 
 
@@ -960,19 +1303,28 @@ def _inject_into_file(
     guard_not_home_root(path.parent)
     template = _render_template()
 
-    # Symlink-safe resolution (cross-check D3): operate on the underlying
-    # file so the backup names the real target, not the symlink itself.
-    if path.exists() or path.is_symlink():
-        resolved = path.resolve(strict=False)
-    else:
-        resolved = path
+    # Symlink-safe location (cross-check D3, narrowed by PMSERV-277): a link
+    # is followed to the file it names only inside the project, and that file
+    # is read and written without following any further link.
+    try:
+        loc = _rule_location(path)
+        raw = _read_rule(loc, target_file)
+        content = _decode_rule(raw, target_file) if raw is not None else None
+    except RuleFileRefused as e:
+        return InjectResult(
+            target_file=target_file,
+            host=host,
+            status="failed",
+            message=str(e),
+            is_dry_run=dry_run,
+        )
 
     # --- Path 1: file does not exist — create it ---
-    if not resolved.exists():
+    if raw is None:
         if not dry_run:
             try:
-                _atomic_write_text(resolved, template + "\n")
-            except OSError as e:  # pragma: no cover — defensive FS guard (PMSERV-059)
+                _write_rule(loc, template + "\n", target_file)
+            except (OSError, RuleFileRefused) as e:  # pragma: no cover — defensive FS guard
                 return InjectResult(
                     target_file=target_file,
                     host=host,
@@ -985,18 +1337,6 @@ def _inject_into_file(
             host=host,
             status="created",
             message=f"created {target_file} with PM Lens rules",
-            is_dry_run=dry_run,
-        )
-
-    # --- File exists: read current content ---
-    try:
-        content = resolved.read_text(encoding="utf-8")
-    except OSError as e:  # pragma: no cover — defensive FS guard (PMSERV-059)
-        return InjectResult(
-            target_file=target_file,
-            host=host,
-            status="failed",
-            message=f"failed to read {target_file}: {e}",
             is_dry_run=dry_run,
         )
 
@@ -1070,8 +1410,8 @@ def _inject_into_file(
     backup_path: Path | None = None
     if not dry_run and changed:
         try:
-            backup_path = _timestamped_backup(resolved)
-        except OSError as e:  # pragma: no cover — defensive FS guard (PMSERV-059)
+            backup_path = _backup_rule(loc, raw)
+        except (OSError, RuleFileRefused) as e:  # pragma: no cover — defensive FS guard
             return InjectResult(
                 target_file=target_file,
                 host=host,
@@ -1083,8 +1423,8 @@ def _inject_into_file(
     # Write
     if not dry_run and changed:
         try:
-            _atomic_write_text(resolved, new_content)
-        except OSError as e:
+            _write_rule(loc, new_content, target_file)
+        except (OSError, RuleFileRefused) as e:
             return InjectResult(
                 target_file=target_file,
                 host=host,
