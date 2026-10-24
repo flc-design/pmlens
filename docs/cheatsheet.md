@@ -1,7 +1,7 @@
 # PM Lens Cheatsheet
 
 > **46 MCP tools + 2 compatibility aliases** for Claude Code, Codex CLI, Cursor and Grok Build.
-> Version 0.16.0 | Python 3.11+ | PyPI: `pmlens`
+> Version 0.17.0 | Python 3.11+ | PyPI: `pmlens`
 
 ---
 
@@ -74,8 +74,7 @@ Claude Code session:
 
 ### Content Pipeline (ADR-024)
 
-The preferred names below are an unreleased development change. Released packages
-use the legacy names. See the [migration guide](content-tool-migration.md).
+The names below are the standard ones; the legacy names remain as aliases. See the [migration guide](content-tool-migration.md).
 
 | Tool | Description | Key Params |
 |------|-------------|------------|

@@ -89,7 +89,7 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
 <header class="hero">
   <h1>PM Lens — Architecture &amp; Behavior</h1>
   <div class="subtitle">Claude Code 用プロジェクト管理 MCP サーバーの全体機能・データフロー・状態遷移マップ</div>
-  <div class="meta">バージョン 0.16.0 (2026-08-01 時点) · 44 MCP tools · 16 RO + 2 outbox-RW + 26 full-RW（未リリースの <code>pm_decision_query</code> と <code>pm_update_decision</code> を含めると 46 tools · 17 RO + 2 outbox-RW + 27 full-RW。3 章・8 章はこちらの数）· 1,530 tests · MIT</div>
+  <div class="meta">バージョン 0.17.0 (2026-08-01 時点) · 46 MCP tools · 17 RO + 2 outbox-RW + 27 full-RW（<code>pm_decision_query</code> と <code>pm_update_decision</code> は v0.17.0 で追加）· 1,530 tests · MIT</div>
   <div class="meta">関連ドキュメント: <a href="user-guide.html">User Guide (CLI &amp; UX Tips)</a> · <a href="workflow-guide.html">Workflow Guide (作り方)</a> · <a href="cheatsheet.ja.md">Cheatsheet (ja)</a></div>
 </header>
 
@@ -257,13 +257,12 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
 
 <section class="card" id="tools">
   <h2>3. MCP Tool Catalog</h2>
-  <p class="muted">未リリースの変更: (1) <code>pm_draft_content</code> /
-     <code>pm_drafts_pending</code> を標準名として追加し、旧名も互換名として維持する
+  <p class="muted"><code>pm_draft_content</code> /
+     <code>pm_drafts_pending</code> が標準名で、旧名も互換名として維持している
      （既存の下書きDBを共有する。<a href="content-tool-migration.md">移行ガイド</a>参照）。
-     (2) ADR と lineage を読む読み取り専用の <code>pm_decision_query</code> を追加し、Lens にも登録する。
-     (3) ADR の lifecycle・関係・evaluation・note を記録する <code>pm_update_decision</code> を追加する（full モードだけ）。
-     合わせて Full は46機能・48登録名、Lens は17登録名（Desktop outbox有効時19）になる。
-     以下のカタログと集計は公開済みバージョンに (2) と (3) を加えたもの。</p>
+     v0.17.0 で、ADR と lineage を読む読み取り専用の <code>pm_decision_query</code>（Lens にも登録）と、
+     ADR の lifecycle・関係・evaluation・note を記録する <code>pm_update_decision</code>（full モードだけ）を追加した。
+     Full は46機能・48登録名、Lens は17登録名（Desktop outbox有効時19）。</p>
   <p>46 個の MCP ツールがカテゴリ別に提供される。配布モードによって登録される ツール集合が異なる:
      <span class="badge badge-ro">RO</span> は Lens モード (<code>PM_LENS=1</code>) で利用可能、
      <span class="badge" style="background:#ede9fe;color:#6d28d9">OUTBOX</span> は Lens + <code>PM_DESKTOP_WRITE=1</code> で追加開放される Desktop Outbox 書込み tool、
@@ -317,8 +316,8 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
 
     <tr><td rowspan="3">Decisions (ADR)</td>
       <td><code>pm_add_decision</code></td><td>Architecture Decision Record の登録</td><td><span class="badge badge-rw">RW</span></td></tr>
-    <tr><td><code>pm_decision_query</code></td><td>ADR と lineage の読み取り (list/get。書き込みなし、未リリース)</td><td><span class="badge badge-ro">RO</span></td></tr>
-    <tr><td><code>pm_update_decision</code></td><td>ADR の lifecycle を遷移表に沿って移し、links・evaluation・note を記録 (本文は変えない。status は lifecycle の射影。未リリース)</td><td><span class="badge badge-rw">RW</span></td></tr>
+    <tr><td><code>pm_decision_query</code></td><td>ADR と lineage の読み取り (list/get。書き込みなし、v0.17.0)</td><td><span class="badge badge-ro">RO</span></td></tr>
+    <tr><td><code>pm_update_decision</code></td><td>ADR の lifecycle を遷移表に沿って移し、links・evaluation・note を記録 (本文は変えない。status は lifecycle の射影。v0.17.0)</td><td><span class="badge badge-rw">RW</span></td></tr>
 
     <tr><td rowspan="3">Knowledge records</td>
       <td><code>pm_record</code></td><td>research/spec/tradeoff/risk_analysis を構造化記録</td><td><span class="badge badge-rw">RW</span></td></tr>
@@ -333,7 +332,7 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
     <tr><td><code>pm_workflow_list</code></td><td>active/completed/paused/abandoned 一覧</td><td><span class="badge badge-ro">RO</span></td></tr>
     <tr><td><code>pm_workflow_templates</code></td><td>builtin + custom テンプレート一覧</td><td><span class="badge badge-ro">RO</span></td></tr>
   </table>
-  <p class="muted">17 RO + 2 OUTBOX-RW + 27 Full-RW = 46 ツール。未リリースの <code>pm_decision_query</code> と <code>pm_update_decision</code> を除くと 44 ツール (2026-08-01, v0.16.0)。Lens 配布では RO_ALLOWLIST 外の
+  <p class="muted">17 RO + 2 OUTBOX-RW + 27 Full-RW = 46 ツール (2026-08-01 時点の 44 ツールに、v0.17.0 で追加した <code>pm_decision_query</code> と <code>pm_update_decision</code> を加えた数, v0.17.0)。Lens 配布では RO_ALLOWLIST 外の
      ツールが FastMCP に未登録 = 構造的不変条件 (ADR-015/017/018)。OUTBOX 2 ツールは <code>PM_DESKTOP_WRITE=1</code>
      が追加で立った時のみ登録され、main <code>.pm/memory.db</code> は touch しない (ADR-019)。</p>
 </section>
@@ -764,7 +763,7 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
 </section>
 
 <footer style="text-align: center; color: var(--muted); font-size: 12px; margin: 24px 0;">
-  Generated 2026-06-15, counts refreshed 2026-08-06 · PM Lens v0.16.0 · Phase 2 Desktop Outbox (ADR-019) shipped · 1,530 tests · 44 MCP tools (未リリースの 2 ツールを含めると 46)
+  Generated 2026-06-15, counts refreshed 2026-08-06 · PM Lens v0.17.0 · Phase 2 Desktop Outbox (ADR-019) shipped · 1,530 tests · 46 MCP tools
 </footer>
 
 </main>
