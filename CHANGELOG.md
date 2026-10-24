@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.17.0] - 2026-10-25
 
 Decision Lineage v1, first half (ADR-056 / ADR-057 / ADR-058 / ADR-059): ADRs
 get a lifecycle and a provenance record kept beside `decisions.yaml`, so a
@@ -9,6 +9,12 @@ later. A new ADR is recorded as proposed unless the caller passes
 `status=accepted`. pmlens cannot verify who accepted an ADR, so recording one
 as accepted, like every lifecycle change, returns a warning to pass on to the
 user.
+
+This release also fixes security problems in 0.16.0 that opening an untrusted
+repository could trigger, among them writes that followed the repository's
+symlinks out of the project and code execution through a prompt-pack
+template; see **Security** below. Upgrade every host that uses the same
+`.pm`.
 
 MCP tool count: 48 names for 46 operations in full mode (the two content tool
 aliases); Lens 17, or 19 with Desktop outbox writes. Test suite: 2,725 passing.
@@ -69,11 +75,13 @@ aliases); Lens 17, or 19 with Desktop outbox writes. Test suite: 2,725 passing.
   with its provenance, links in both directions and recent events. Long titles
   are cut in the list and a page stops before 32,000 characters
   (`decision_list_truncated`); an ADR without a date in `decisions.yaml` shows
-  `date: null` (`decision_date_not_recorded`). Unknown keys are returned by
+  `date: null` (`decision_date_not_recorded`) until `decisions.yaml` is next
+  rewritten — adding an ADR or changing a lifecycle stores that day's date for
+  it. Unknown keys are returned by
   name only and every string is scanned whole for secrets on the way out.
 - **`pm_update_decision` (PMSERV-224 / ADR-059)**: change an ADR's lifecycle
-  along an explicit transition table, add or remove links (at most 50 ids per
-  type in one call), append an evaluation or a note, and fill a still-unknown
+  along an explicit transition table, add or remove links (each link type holds
+  at most 50 ids, and one call may list at most 50 per type), append an evaluation or a note, and fill a still-unknown
   `origin` (only `ai_auto`) or `recorded_timing`. It never rewrites the ADR's
   text and has no argument whose name marks accuracy, a classification change
   or a human confirmation. That is a check on argument names: an assistant
@@ -88,7 +96,8 @@ aliases); Lens 17, or 19 with Desktop outbox writes. Test suite: 2,725 passing.
   drafts the warning points at the published post instead of
   `pm_reject_draft`. Nothing is refused.
 - `pm_status` reports `decision_status_unknown` and `decisions_yaml_unreadable`
-  (PMSERV-218 / PMSERV-258), without echoing file contents.
+  (PMSERV-218 / PMSERV-258) without quoting the file: an unreadable file is
+  reported by position, and unknown status values are shown redacted and cut.
 
 ### Changed
 
@@ -105,7 +114,9 @@ aliases); Lens 17, or 19 with Desktop outbox writes. Test suite: 2,725 passing.
   as proposed. Before asking for approval, the gate shows the user the ADR's
   own text with `pm_decision_query` (recording a new ADR when the design has
   changed since), and adopts it with `pm_update_decision` once the user
-  accepts that text.
+  accepts that text. The content-pipeline `extract` step drafts only from
+  adopted ADRs (`pm_decision_query` shows the lifecycle) and lists every ADR
+  the draft relies on in `source_refs`.
 - **`prompt_pack` compares its reserved `.pm` file names case-insensitively**:
   `TASKS.yaml` is refused like `tasks.yaml` (on the default macOS and Windows
   file systems they are the same file).
@@ -147,8 +158,8 @@ aliases); Lens 17, or 19 with Desktop outbox writes. Test suite: 2,725 passing.
   any parser error that still escapes into such a message.
 - **Prompt-pack templates are rendered in a sandbox and read without
   following symlinks** (PMSERV-270): a `.pm/prompt-templates/prompt_pack.html`
-  that came with a repository could run Python (for example through
-  `cycler.__init__.__globals__`) when `pm_prompt_pack(format="html")` or
+  that came with a repository could run arbitrary Python through
+  template injection when `pm_prompt_pack(format="html")` or
   `pmlens prompt-pack --format html` ran, and a symlinked template, included
   file or `prompt-templates` directory put any file the server could read
   into the exported pack. Overrides, including files they include from
@@ -170,18 +181,19 @@ aliases); Lens 17, or 19 with Desktop outbox writes. Test suite: 2,725 passing.
   written, so the write goes where the checks looked. Inside `.pm` a pack
   may only go under `.pm/exports`: an `out_path` elsewhere in `.pm`, or a
   link that leads there (`PROMPT.md -> .pm/drafts.db`), is refused.
-  A write that fails returns `status: error` with the reason instead of
-  raising.
+  A write inside `.pm` that fails returns `status: error` with the reason
+  instead of raising.
 - **Writes no longer follow symlinks a repository ships in `.pm/` or as a
   rule file** (PMSERV-277). git checks symlinks out as links, and pmlens
-  wrote through them: a dangling `.pm/.locks/.gitignore` link created its
-  target (for example git's global excludes file, with `*` in it) on the
-  first ledger write; a linked `.pm/.locks`, `.pm/daily` or ledger file put
-  lock files, logs or ledgers elsewhere; SQLite followed a linked
-  `memory.db` or `drafts.db`, writing memories or unredacted draft text
-  anywhere; and a `CLAUDE.md` / `AGENTS.md` link was appended to wherever it
-  pointed, `~/.zshrc` included. Ledgers, locks and logs are now written
-  through descriptors that follow no link below `.pm`; `memory.db` and the
+  wrote through them, so opening such a repository could make pmlens create,
+  overwrite or append to files outside the project (a shell startup file, for
+  example): links in `.pm/` redirected lock files, logs and ledgers; SQLite
+  followed a linked `memory.db` or `drafts.db`, writing memories or
+  unredacted draft text elsewhere; and a `CLAUDE.md` / `AGENTS.md` link was
+  appended to wherever it pointed. Ledgers, locks and logs are now written
+  through descriptors that follow no link below `.pm` (on Windows, where
+  directory descriptors are unavailable, each path component is checked for
+  a link before writing); `memory.db` and the
   draft database (and their `-wal` / `-shm`) must be regular files; a rule
   file link is followed only to a file inside the project and outside `.git`
   / `.pm` (including the real git directory a `.git` file names, as with
@@ -205,8 +217,7 @@ aliases); Lens 17, or 19 with Desktop outbox writes. Test suite: 2,725 passing.
   (`*name`) would expand it past four times its size (at least 4 MiB) is not
   read. A few hundred bytes of nested aliases used to grow into tens of
   megabytes on the next rewrite (strings are never re-emitted as anchors) and
-  into oversized tool responses. Ledgers pmlens writes contain no aliases; all
-  792 ledger files of the maintainer's registered projects load unchanged.
+  into oversized tool responses. Ordinary ledgers are not affected.
 
 ### Fixed
 
@@ -232,10 +243,6 @@ aliases); Lens 17, or 19 with Desktop outbox writes. Test suite: 2,725 passing.
 - `pm_outbox_merge` reports an outbox entry that cannot become a memory with
   the warning reason `outbox_entry_invalid` and goes on with the rest
   (PMSERV-266).
-- `prompt_pack` refuses an output path inside a project's
-  `.pm/decision_lineage/` (checked as written and resolved, and again against
-  the project before writing); a `decision_lineage` directory outside `.pm/`
-  is not affected.
 
 ### Tests
 
