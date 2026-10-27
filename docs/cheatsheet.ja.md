@@ -1,7 +1,7 @@
 # PM Lens チートシート
 
 > Claude Code / Codex CLI / Cursor / Grok Build 用プロジェクト管理 MCP Server — **46 ツール + 互換名2個**
-> Version 0.16.0 | Python 3.11+ | PyPI: `pmlens`
+> Version 0.17.0 | Python 3.11+ | PyPI: `pmlens`
 
 ---
 
@@ -74,8 +74,8 @@ Claude Code セッション:
 
 ### コンテンツパイプライン (ADR-024)
 
-以下の新名は開発中の未リリース変更。旧名も引き続き利用できる。
-公開済みのパッケージでは旧名を使用する。詳細は[移行ガイド](content-tool-migration.md)を参照。
+以下が標準名で、旧名も互換名として引き続き利用できる。
+詳細は[移行ガイド](content-tool-migration.md)を参照。
 
 | ツール | 説明 | 主要パラメータ |
 |------|-------------|------------|
