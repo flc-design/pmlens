@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.17.0] - 2026-10-25
+## [0.17.0] - 2026-10-27
 
 Decision Lineage v1, first half (ADR-056 / ADR-057 / ADR-058 / ADR-059): ADRs
 get a lifecycle and a provenance record kept beside `decisions.yaml`, so a
