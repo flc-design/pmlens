@@ -467,6 +467,9 @@ class TestGet:
             "events_total": 1,
             "unknown_keys": [],
             "notes": [],
+            # The S2 sections (S2 spec §3.6): no fact core recorded yet.
+            "fact_core": None,
+            "adopted_fact_core_version": None,
         }
         assert "cannot tell whether a person approved them" in got["notice"]
         assert "not a human review" in got["notice"]
@@ -1030,8 +1033,15 @@ class TestUnknownKeysAreNamesOnly:
         assert last["at"] == "2026-10-05T03:12:00"
         assert "reason" not in last
         assert last["unknown_fields"] == ["caused_by"]
-        assert got["lineage"]["unknown_keys"] == ["fact_core"]
+        # fact_core is a known section since S2, so it is not listed by name;
+        # one that is not a fact core is shown as none and counted as skipped,
+        # its values never shown (S2 spec §2.7).
+        assert got["lineage"]["unknown_keys"] == []
+        assert got["lineage"]["fact_core"] is None
+        assert got["lineage"]["adopted_fact_core_version"] is None
         assert "decision_lineage_items_skipped" in _note_codes(got)
+        # One for the broken fact core, one for the event's caused_by value.
+        assert {"code": "decision_lineage_items_skipped", "count": 2} in got["lineage"]["notes"]
 
 
 class TestExitRedaction:

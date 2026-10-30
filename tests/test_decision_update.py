@@ -325,6 +325,7 @@ class TestInvariants:
 
         no_reason = _update(tmp_project, lifecycle="deprecated")
         assert no_reason["code"] == "reason_required"
+        assert no_reason["field"] == "reason"  # S2 spec §4
         retired = _update(tmp_project, lifecycle="deprecated", reason="no successor was recorded")
         assert retired["decision_status"] == "deprecated"
         assert _status(tmp_project) is DecisionStatus.DEPRECATED
@@ -853,6 +854,7 @@ class TestBackfill:
         _add(tmp_project)
         assert _update(tmp_project, origin="ai_auto")["code"] == "reason_required"
         assert _update(tmp_project, recorded_timing="post_hoc")["code"] == "reason_required"
+        assert _update(tmp_project, origin="ai_auto")["field"] == "reason"  # S2 spec §4
 
 
 # ─── D8: no argument that claims more than pmlens can know ───
@@ -879,7 +881,8 @@ _TOOL_PARAMETERS = _tool_parameters()
 _FORBIDDEN_NAME = re.compile(r"accura|verif|confirm|human|reader_hint|anchor|^mode$")
 
 # Design §4.3: the whole argument list of pm_update_decision. Adding one is a
-# deliberate change to this set (and to the design).
+# deliberate change to this set (and to the design). S2 spec §3.1 adds the fact
+# core and its version; caused_by comes with the feedback it names.
 _UPDATE_PARAMETERS = {
     "decision_id",
     "lifecycle",
@@ -891,6 +894,8 @@ _UPDATE_PARAMETERS = {
     "note",
     "origin",
     "recorded_timing",
+    "fact_core",
+    "expected_fact_core_version",
     "project_path",
 }
 
@@ -929,6 +934,23 @@ class TestD8:
         ]
         assert required == ["decision_id"]
         assert signature.parameters["evaluation_kind"].default == "other"
+        # The S1 arguments keep their positions; the S2 ones come before
+        # project_path, which stays last (S2 spec §3.1).
+        assert list(signature.parameters)[:10] == [
+            "decision_id",
+            "lifecycle",
+            "reason",
+            "add_links",
+            "remove_links",
+            "evaluation",
+            "evaluation_kind",
+            "note",
+            "origin",
+            "recorded_timing",
+        ]
+        assert list(signature.parameters)[-1] == "project_path"
+        assert signature.parameters["fact_core"].default is None
+        assert signature.parameters["expected_fact_core_version"].default is None
         for absent in (
             "title",
             "context",

@@ -734,7 +734,7 @@ Claude Code Session
         └── pmlens serve
               │
               ├── server.py    → 46 MCP ツール + 互換名2個 (FastMCP)
-              ├── models.py    → Pydantic v2 データモデル (18 models, 21 enums)
+              ├── models.py    → Pydantic v2 データモデル (18 models, 23 enums)
               ├── storage.py   → YAML 読み書き
               ├── workflow.py  → ワークフローエンジン (state machine)
               ├── memory.py    → SQLite メモリストア + FTS5 検索

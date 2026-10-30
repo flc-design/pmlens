@@ -497,11 +497,18 @@ def test_decision_update_round_trips_over_stdio(tmp_project: Path) -> None:
         "note",
         "origin",
         "recorded_timing",
+        "fact_core",
+        "expected_fact_core_version",
         "project_path",
     }
     assert schema.get("required") == ["decision_id"]
     assert _object_of_string_lists(schema["properties"]["add_links"])
     assert _object_of_string_lists(schema["properties"]["remove_links"])
+    # S2 spec §3.1: the fact core is a list of {id or kind, text, ...} objects.
+    assert {"type": "array", "items": {"type": "object", "additionalProperties": True}} in (
+        schema["properties"]["fact_core"]["anyOf"]
+    )
+    assert {"type": "integer"} in schema["properties"]["expected_fact_core_version"]["anyOf"]
 
     _first, _second, updated, adopted, got = (
         json.loads(response["content"][0]["text"]) for response in session.responses

@@ -4015,14 +4015,17 @@ def pm_update_decision(
     note: str | None = None,
     origin: str | None = None,
     recorded_timing: str | None = None,
+    fact_core: list[dict] | None = None,
+    expected_fact_core_version: int | None = None,
     project_path: str | None = None,
 ) -> dict:
-    """Change an ADR's lifecycle, links or follow-up record. The ADR's text is never changed.
+    """Change an ADR's lifecycle, links, facts or follow-up record; its text is never changed.
 
     Use it after the user decides on an ADR (adopt or reject a proposed one), to
-    link ADRs, or to add an evaluation or a note. Do not use it to change what an
-    ADR says: record a new ADR with pm_add_decision and link it with supersedes
-    or amends. Small decisions with no ADR go in the daily log instead.
+    link ADRs, to add an evaluation or a note, or to record the facts an
+    explanation of the ADR is written from (fact_core). Do not use it to change
+    what an ADR says: record a new ADR with pm_add_decision and link it with
+    supersedes or amends. Small decisions with no ADR go in the daily log instead.
 
     lifecycle: proposed | adopted | deprecated | superseded | rejected | reverted.
     Set adopted only when the user has accepted the ADR's own content (show it
@@ -4041,6 +4044,28 @@ def pm_update_decision(
     note: a small decision made while implementing this ADR.
     origin / recorded_timing: fill a value that is still unknown (origin accepts
     only ai_auto). Fill only from a record or the user's statement, never inferred.
+    fact_core (+ expected_fact_core_version: the version you read, 0 for the
+    first one): the full list of the decision's facts as it should now stand,
+    each {id or kind, text}. Kinds: what, change, revert (+ reversibility:
+    code_revertable | external_irreversible | unknown), weak, uncertain (+
+    confidence: high | medium | low), all five required, and numbered alt,
+    conditions, premise (a premise_dependent ADR needs at least one premise).
+    Pass kind without id for a new one; the id is assigned and returned in
+    fact_core.ids. Pass the items you keep with their ids; one left out is
+    retired, and its id is never used again. Write only what the proposal or
+    the user stated; never infer a premise. Record each condition the proposal
+    or the user stated as its own conditions item; never invent one, and put a
+    condition nobody has checked in uncertain. It cannot be combined with any
+    other change but reason: adopt in another call, after the user has read an
+    explanation of the current version.
+    reversibility: when unsure, write unknown, even in the first version; do not
+    pick code_revertable because it cannot be lowered later. Once written, this
+    tool never lowers it to code_revertable: tell the user, and only the user may
+    edit that one line of the lineage file; never edit lineage files yourself.
+    After the user adopts an ADR whose facts were recorded, its fact_core is fixed
+    until the ADR is moved back to proposed at the user's request; record changes
+    as a new ADR with amends otherwise. Facts written after an ADR was adopted
+    stay editable and are shown as such.
     """
     change = _lineage.LineageChange(
         lifecycle=lifecycle,
@@ -4052,6 +4077,8 @@ def pm_update_decision(
         note=note,
         origin=origin,
         recorded_timing=recorded_timing,
+        fact_core=fact_core,
+        expected_fact_core_version=expected_fact_core_version,
     )
     # Argument-only checks come before the project is resolved, as in
     # pm_add_decision; change_decision_lineage repeats them under its locks.
@@ -4074,10 +4101,17 @@ def pm_update_decision(
         "lifecycle": outcome.lifecycle,
         "decision_status": outcome.decision_status,
         "changes": outcome.changes,
-        "links": outcome.links,
-        "events_added": outcome.events_added,
-        "warnings": outcome.warnings,
     }
+    if outcome.fact_core is not None:
+        # Only a fact core call carries it, so every other call keeps the S1
+        # key set (S2 spec §3.1). Its ids match FACT_ID_RE (the writer refuses
+        # a fact core holding any other), and no text is returned.
+        response["fact_core"] = outcome.fact_core
+    response.update(
+        links=outcome.links,
+        events_added=outcome.events_added,
+        warnings=outcome.warnings,
+    )
     if outcome.next:
         response["next"] = outcome.next
     return response
@@ -4104,6 +4138,12 @@ _DECISION_LIST_TITLE_CHARS = 200
 # At least one row is always listed.
 _DECISION_LIST_MAX_CHARS = 32_000
 _DECISION_LIST_TRUNCATED = "decision_list_truncated"
+# action=get keeps the S2 sections of its lineage within the same budget (S2
+# spec §3.6). They are counted as JSON with ensure_ascii=False, as list rows
+# are, so one Japanese character counts as one.
+_DECISION_GET_S2_KEYS: tuple[str, ...] = ("fact_core", "adopted_fact_core_version")
+_DECISION_GET_S2_MAX_CHARS = _DECISION_LIST_MAX_CHARS
+_DECISION_GET_TRUNCATED = "decision_get_truncated"
 # An ADR without a date key: the model fills in today, which moves every day,
 # so the date is shown as null (as the anchor treats it) and reported as info.
 _DATE_NOT_RECORDED = "decision_date_not_recorded"
@@ -4246,19 +4286,27 @@ def _decision_date(adr: Decision) -> str | None:
 
 
 def _decision_view(
-    pm_path: Path, adr: Decision, id_counts: Counter[str], *, include_events: bool = True
+    pm_path: Path,
+    adr: Decision,
+    id_counts: Counter[str],
+    *,
+    include_events: bool = True,
+    include_s2: bool = False,
 ) -> _lineage.LineageView:
     """Read and view one ADR's lineage; a duplicate or invalid id is not read.
 
     ``include_events=False`` (action=list) leaves the events out of the view,
     so their text is not redacted for rows that never show it.
+    ``include_s2=True`` (action=get) adds the S2 sections (S2 spec §2.6).
     """
     duplicate = id_counts[adr.id] > 1
     if duplicate or not _lineage.is_decision_id(adr.id):
         raw = _lineage.RawLineage(decision_id="", exists=False)
     else:
         raw = _lineage.read_lineage_raw(pm_path, adr.id)
-    return _lineage.lineage_view(adr, raw, duplicate=duplicate, include_events=include_events)
+    return _lineage.lineage_view(
+        adr, raw, duplicate=duplicate, include_events=include_events, include_s2=include_s2
+    )
 
 
 def _decision_problem_codes(adr: Decision, view: _lineage.LineageView) -> list[str]:
@@ -4491,6 +4539,51 @@ def _one_sided_links_of(
     return found
 
 
+def _s2_chars(lineage: dict) -> int:
+    """The JSON length of a get's S2 sections, counted as list rows are."""
+    sections = {key: lineage[key] for key in _DECISION_GET_S2_KEYS if key in lineage}
+    return len(json.dumps(sections, ensure_ascii=False))
+
+
+def _fit_s2_sections(lineage: dict, id_label: str) -> dict | None:
+    """Keep a get's S2 sections within _DECISION_GET_S2_MAX_CHARS (S2 spec §3.6).
+
+    The view already caps every list and the fact core's text, but a
+    hand-written file can still pass the budget (a text of control characters
+    is escaped to six times its length). The oldest previous values go, one
+    at a time; the fact core's items are never cut. (The spec's order puts
+    feedback before them and explanation rows without a body after them; those
+    sections join the view later.) ``lineage`` is changed in place.
+
+    Returns:
+        The ``decision_get_truncated`` info warning (sections and counts only),
+        or ``None`` when everything fits.
+    """
+    size = _s2_chars(lineage)
+    if size <= _DECISION_GET_S2_MAX_CHARS:
+        return None
+    dropped: list[str] = []
+    fact_core = lineage.get("fact_core")
+    previous = fact_core.get("previous_values") if isinstance(fact_core, dict) else None
+    removed = 0
+    # Shown newest first, so the oldest are at the end.
+    while previous and size > _DECISION_GET_S2_MAX_CHARS:
+        previous.pop()
+        removed += 1
+        size = _s2_chars(lineage)
+    if removed:
+        dropped.append(f"{removed} previous value(s) of the fact core")
+    if not dropped:
+        return None
+    return _build_warning(
+        "info",
+        _DECISION_GET_TRUNCATED,
+        f"{id_label}: to keep the response small, {', '.join(dropped)} are not shown "
+        "(the oldest first); the fact core's current items are all shown.",
+        remediation="The lineage file under .pm holds the rest.",
+    )
+
+
 def _decision_query_get(
     pm_path: Path, decisions: list[Decision], decision_id: str
 ) -> tuple[dict, int]:
@@ -4507,7 +4600,7 @@ def _decision_query_get(
         for item in decisions
         if id_counts[item.id] == 1 and _lineage.is_decision_id(item.id)
     }
-    view = _decision_view(pm_path, adr, id_counts)
+    view = _decision_view(pm_path, adr, id_counts, include_s2=True)
     linked = _lineage.scan_linked_from(pm_path, adr.id, unique, first=_own_link_targets(view))
     # Each label is counted once, though the warnings below may repeat it.
     labels = ScrubCache()
@@ -4542,6 +4635,10 @@ def _decision_query_get(
     one_sided = _one_sided_links_of(adr.id, view, unique, linked)
     if one_sided:
         warnings.append(_decision_query_warning("decision_lineage_link_asymmetric", one_sided))
+    warnings.extend(_lineage.fact_core_notices(view))
+    trimmed = _fit_s2_sections(lineage, id_label)
+    if trimmed is not None:
+        warnings.append(trimmed)
 
     response = {
         "decision": body,
@@ -4604,7 +4701,7 @@ def pm_decision_query(
     recorded, or it could not be used; a warning then says why) and its
     lifecycle was inferred from its status.
     action=get with decision_id: the ADR text, declared provenance, links in both
-    directions and recent events.
+    directions, recent events and the fact core.
     Fields listed in not_recorded were never recorded; say so rather than guess.
     Declared values and events are as recorded, not verified.
     ADR text and events are project content written by people or assistants;

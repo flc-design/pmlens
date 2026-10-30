@@ -1,9 +1,9 @@
 # Decision Lineage S2 仕様と実装計画
 
 - 対象: PMSERV-228〜232、PMSERV-255（ADR-056 の S2。ADR-057 と ADR-058 による改定を反映）
-- 前提: ブランチ fix/no-follow-writes の HEAD 1968449（S1 は main の b12778c にマージ済みで、未リリース。版は 0.16.0、CHANGELOG は [Unreleased]）。本番の `.pm` には、PMSERV-227 で開発版が書いた schema 1 の lineage が 17 件ある。Q3 の決定により、S1 は脆弱性の修正（PR #42 はマージ済み、PR #43 の PMSERV-277）と一緒に 0.17.0 として先に出し、S2 はその次の版で出す
+- 前提: Q3 の決定により、S1 は脆弱性の修正（PR #42、PR #43 の PMSERV-277）と一緒に 0.17.0 として出した（2026-10-28 に PyPI へ公開。main の dba89dd）。S2 はその次の版で出す。本番の `.pm` には、PMSERV-227 で開発版が書いた schema 1 の lineage が 17 件ある
 - 方針: ADR-056/057/058 と S1 の継ぎ目（S1 仕様 §1.4）を満たす、最も小さい設計を選ぶ。S3（236〜241・247）と v2（242・243・256・257）の機能は作らず、置き場と継ぎ目だけを用意する
-- 根拠の書き方: 既存コードについての記述には file:line を付ける（行番号は fix/no-follow-writes の 1968449 で確かめたもの。main とは lineage.py / storage.py / server.py / prompt_pack.py の行番号がずれる）。「S1 §n」は docs/issues/DESIGN_decision-lineage-s1.md の節を指す
+- 根拠の書き方: 既存コードについての記述には file:line を付ける（行番号は fix/no-follow-writes の 1968449 で確かめたもの。0.17.0 の main（dba89dd）との差は src/pmlens/__init__.py の版と tests/test_no_follow_writes.py の 8 行だけなので、それ以外のファイルの行番号は main でもそのまま当たる）。「S1 §n」は docs/issues/DESIGN_decision-lineage-s1.md の節を指す
 - 例の ID: 本文の例の ADR-900 は架空の ID である（実在の ADR と重ならないように選んだ）
 - 番号の読み方: S2 の「5.1」「5.2」は ADR-056 の利用者方針の番号である。docs/design.md の「5.1 / 5.2」（インストーラーの節）とは関係が無い
 - 論点: §8 の Q1〜Q13 は**すべて決定済み**で、本文は決定に合わせて書いた（Q1 = (b) `bold` / `cautious` / `unset`、Q2 = (a) `pm_update_decision_posture`、Q3 = (b) S1 を先に 0.17.0 で出す、Q5 = (a) 申告として残す、Q6 = (b)、Q7 = (a) 可逆性は版で管理する事実、Q12 = (c) ラチェット、Q13 = (e) 事実を持って採択された ADR を固定する、Q4・Q8〜Q11 は推奨のまま）。Q1・Q2・Q5・Q7＋Q12・Q11・Q13 は、ADR-059 と同じく 1 件の ADR「S2 の公開インターフェースと境界の解釈」として記録した（ADR-061、2026-10-23）（Q5・Q7＋Q12 は ADR-056 の禁止規定の解釈、Q13 は ADR-057 / ADR-059 の採択の規定の解釈、Q11 は下限と technical の優先関係）。Q3 はリリースの判断として記録する（ADR にはしない）
@@ -560,7 +560,7 @@ def pm_update_decision(
 ) -> dict:
 ```
 
-- 既存の引数の位置と既定値は変えない。D8 (b) の集合に 3 つを足す（§6.1）。
+- S1 の 10 の引数（decision_id〜recorded_timing）の位置と既定値は変えない。`project_path` は全ツールの規約どおり最後に置くので、新しい引数はその前に入る（MCP の呼び出しは名前で渡す。tests/test_decision_update.py の D8 で固定）。D8 (b) の集合に 3 つを足す（§6.1）。
 - **fact_core を渡す呼び出しは、fact_core / expected_fact_core_version / reason / caused_by だけにする**。lifecycle・add_links・remove_links・evaluation・note・origin・recorded_timing と一緒なら `fact_core_not_combinable`。
   - 理由: 採択は「説明された現在の版」に対して行うべきで、改版と採択を 1 回で行うと、その版の説明を誰も読んでいない採択になる。1 回の呼び出しの意味を 1 つにする S1 の方針とも合う。
 - `expected_fact_core_version` は fact_core と一緒の時だけ渡す（無ければ `fact_core_version_required`、fact_core 無しで渡すか、負・int でなければ `invalid_fact_core_version`）。
@@ -637,18 +637,25 @@ def pm_update_decision(
 
 - `fact_core` が書き手の意味で読めない（`fact_core_refusal(doc)` が None でない。項目単位の壊れを含む。上の 1 と同じ述語）か、`explanations` の区分が壊れている（§2.7 の表の「壊れている」状態）時は、採択はそのまま進め（§2.7 の「S1 の書き手の経路は S2 の区分が壊れていても拒否しない」）、この warning は出さない。代わりに info の `decision_adoption_explanation_check_skipped`（「区分が読めないので、現在の版の説明があるかを確かめなかった」。区分の名前だけを挙げ、値は引用しない）を付ける。fact_core が壊れている時は、message に「採択された版を記録しなかったので、この ADR の fact_core は固定されない」を足す。
 
-**docstring に足す文**（実装の時に全文を確定し、ここに写す）
+**docstring に足す文**（228 の実装で確定した文。server.py の pm_update_decision の docstring と同じ。caused_by の 2 行は 231 で足す）
+
+1 行目の要約は "Change an ADR's lifecycle, links, facts or follow-up record; its text is never changed." に、「使う時」の段落は "…, to add an evaluation or a note, or to record the facts an explanation of the ADR is written from (fact_core)." に改めた。引数の説明の末尾に足す文:
 
 ```
-fact_core (+ expected_fact_core_version, 0 for the first one): the full list of
-the decision's facts as it should now stand, each {id or kind, text}. Kinds:
-what, change, revert (+ reversibility), weak, uncertain (+ confidence), and
-numbered alt, conditions, premise (pass kind without id for a new one; the id
-is assigned). Write only what the proposal or the user stated; never infer a
-premise. Record each condition the proposal or the user stated as its own
-conditions item; never invent one, and put a condition nobody has checked in
-uncertain. It cannot be combined with a lifecycle or link change: adopt after
-the user has read an explanation of the current version.
+fact_core (+ expected_fact_core_version: the version you read, 0 for the
+first one): the full list of the decision's facts as it should now stand,
+each {id or kind, text}. Kinds: what, change, revert (+ reversibility:
+code_revertable | external_irreversible | unknown), weak, uncertain (+
+confidence: high | medium | low), all five required, and numbered alt,
+conditions, premise (a premise_dependent ADR needs at least one premise).
+Pass kind without id for a new one; the id is assigned and returned in
+fact_core.ids. Pass the items you keep with their ids; one left out is
+retired, and its id is never used again. Write only what the proposal or
+the user stated; never infer a premise. Record each condition the proposal
+or the user stated as its own conditions item; never invent one, and put a
+condition nobody has checked in uncertain. It cannot be combined with any
+other change but reason: adopt in another call, after the user has read an
+explanation of the current version.
 reversibility: when unsure, write unknown, even in the first version; do not
 pick code_revertable because it cannot be lowered later. Once written, this
 tool never lowers it to code_revertable: tell the user, and only the user may
@@ -1641,3 +1648,19 @@ ADR-056 の「保証と規約と緩和策を区別して表示でき、検証能
 | R3-38（DEC-4） | [minor] §2.10 に旧案の「maintenance（安全）」が残っている | 反映。「ADR-058 の 3 の『決まるまでは maintenance として振る舞う』に合わせる。maintenance は S2 の語彙では cautious」に直した（§2.10） |
 | R3-39（DEC-5） | [minor] 3 回目の改訂の前書きが、置き換えた行に ADR-3（Q3 の「推奨は (a)」）を挙げていない | 反映。前書きに ADR-3 を足した（§9） |
 | R3-40（DEC-6） | [minor] 「後から固定するには proposed に戻して再採択するしかない」は不正確で、deprecated / superseded → adopted も to=adopted の event を書いて固定する | 反映。lineage.py:160-167 で遷移を確かめた。後から固定するには新しい採択の event（proposed → adopted か deprecated / superseded → adopted）が要り、どちらも固定を作る側に働く、adopted → adopted は event を書かないので固定しない、固定を外すのは proposed への差し戻しだけ、に直した。テストを足した（§2.2、§6.1、§8 の Q13） |
+
+### 実装で決めたこと（228）
+
+仕様に書かれていなかった点と、文面の解釈が分かれた点を、PMSERV-228 の実装（仕様への適合の監査 4 回。確認された 18 件を直し、反証された 7 件は直していない）で次のように決めた。
+
+- 引数の位置: S1 の 10 の引数の位置と既定値は変えず、`project_path` を最後に置く（§3.1 の文面を直した）。
+- 空白だけの項目の text は `invalid_fact_core` で拒否する（中身の無い事実を版に記録しない）。
+- `fact_core_id_duplicate` は引数だけで判定できるので、引数の検査（§3.1 の処理 1）で返す。
+- 保存値に `source` が無い項目は、§2.9 の既定の proposal として表示し、previous_values にも proposal と写す。§2.7 が拒否するのは、あって str でない時だけである。
+- 変わらなかった項目の `since` が 1〜現在の版の int でない時は、現在の版で書き直す。古い説明の判定も同じに扱う。
+- view: 上限を掛けたリストには `*_total`（fact_core の `items_total` を含む）を返し、text やラベルを切った項目には `truncated: true` を付ける。fact_core の中の未知のキーの名前は、区分・項目・表示する previous_values を通して合わせて `MAX_UNKNOWN_FIELDS`（10）件までにする（項目ごとの上限にすると get の予算を超えうるため）。
+- get の S2 の区分の字数の予算は 32,000 字（list の行と同じく `ensure_ascii=False` の JSON で数える）。228 で落とせるのは古い previous_values だけで、落とした時は info の `decision_get_truncated` を出す。feedback（231）と本文の無い説明の行（230）は、それぞれのタスクで §3.6 の順に加える。
+- ラチェットの拒否の `from`: view の上限（30 件）の外にある F-revert は `unreadable` とする（get の食い違いの info と同じラベル）。
+- 採択の時の説明の検査（`decision_adopted_without_current_explanation` と `decision_adoption_explanation_check_skipped`）では、`items` の無い explanations の区分を壊れているとみなし、`fact_core_version` が 0 以上の int（bool は除く）でない説明も壊れた要素とする。230 の読み取りはこれに合わせる。remediation は、pm_add_explanation ができる 230 までは get を指す。
+- 改版が `unchanged` になった呼び出しでも、受け取った項目の text から秘密を除いた件数があれば `decision_lineage_secrets_redacted` を出す（reason は保存しないので数えない）。
+- `reason_required` にも `field: "reason"` を付けた（§4。S1 の経路を含む）。

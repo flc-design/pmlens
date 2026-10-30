@@ -464,6 +464,8 @@ pm-server hook post-tool-use   # PostToolUse hook handler
 | RecordedTiming | `before_impl`, `during_impl`, `post_hoc`, `unknown` |
 | DecisionKind | `spec_policy`, `premise_dependent`, `technical`, `unknown` |
 | EvaluationKind | `test`, `ai_review`, `outcome`, `other` |
+| FactSource | `proposal`, `observed` (reserved; pmlens writes only proposal) |
+| Reversibility | `code_revertable`, `external_irreversible`, `unknown` (treated like external_irreversible) |
 | LogCategory | `progress`, `decision`, `blocker`, `note`, `milestone` |
 | MemoryType | `observation`, `insight`, `lesson` |
 | KnowledgeCategory | `research`, `market`, `spike`, `requirement`, `constraint`, `tradeoff`, `risk_analysis`, `spec`, `api_design` |

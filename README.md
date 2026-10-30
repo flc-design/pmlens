@@ -748,7 +748,7 @@ Claude Code Session
         └── pmlens serve
               │
               ├── server.py    → 46 MCP tools + 2 compatibility aliases (FastMCP)
-              ├── models.py    → Pydantic v2 data models (18 models, 21 enums)
+              ├── models.py    → Pydantic v2 data models (18 models, 23 enums)
               ├── storage.py   → YAML read/write
               ├── workflow.py  → Workflow engine (state machine)
               ├── memory.py    → SQLite memory store + FTS5 search

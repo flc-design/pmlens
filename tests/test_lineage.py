@@ -490,15 +490,22 @@ class TestLineageView:
         for i in range(60):
             doc[f"extra{i}"] = i
         view = lineage_view(adr, _raw(adr, doc))
+        # fact_core is a known section since S2 (S2 spec §2.6); feedback stays
+        # unknown until its own task adds it.
         assert view.unknown_keys[:4] == [
-            "fact_core",
             "feedback",
             "key-<REDACTED:secret>",
             "7",
+            "k" * lineage.MAX_LABEL_CHARS,
         ]
-        assert view.unknown_keys[4] == "k" * lineage.MAX_LABEL_CHARS
+        assert view.unknown_keys[4] == "extra0"
         assert len(view.unknown_keys) == lineage.MAX_UNKNOWN_KEYS
         assert SECRET not in json.dumps(view.as_dict())
+        # A fact_core of the wrong shape is skipped and noted, its value never shown.
+        s2 = lineage_view(adr, _raw(adr, doc), include_s2=True)
+        assert s2.fact_core is None
+        assert "decision_lineage_items_skipped" in _codes(s2)
+        assert SECRET not in json.dumps(s2.as_dict())
 
     def test_events_follow_the_per_kind_allow_list(self):
         adr = _adr()
@@ -1755,19 +1762,23 @@ class TestWriteRefusal:
         assert lineage.LINEAGE_RESERVE_BYTES > 12_500  # a 4,000-character 3-byte reason
         assert lineage.MAX_APPEND_BYTES == MAX_LINEAGE_BYTES - lineage.LINEAGE_RESERVE_BYTES
         for change in (note, evaluation, lifecycle):
-            assert lineage.size_refusal("ADR-001", lineage.MAX_APPEND_BYTES, change) is None
+            appends = lineage.appends(change)
+            assert (
+                lineage.size_refusal("ADR-001", lineage.MAX_APPEND_BYTES, appends=appends) is None
+            )
             for size in (None, MAX_LINEAGE_BYTES + 1):
-                error = lineage.size_refusal("ADR-001", size, change)
+                error = lineage.size_refusal("ADR-001", size, appends=appends)
                 assert error["code"] == "decision_lineage_too_large"
                 assert error["remediation"]
         for size in (lineage.MAX_APPEND_BYTES + 1, MAX_LINEAGE_BYTES):
-            assert lineage.size_refusal("ADR-001", size, note)["code"] == (
-                "decision_lineage_too_large"
-            )
-            assert lineage.size_refusal("ADR-001", size, evaluation) is not None
-            assert lineage.size_refusal("ADR-001", size, lifecycle) is None
+            refused = lineage.size_refusal("ADR-001", size, appends=lineage.appends(note))
+            assert refused["code"] == "decision_lineage_too_large"
+            evaluated = lineage.size_refusal("ADR-001", size, appends=lineage.appends(evaluation))
+            assert evaluated is not None
+            assert lineage.size_refusal("ADR-001", size, appends=lineage.appends(lifecycle)) is None
         blank = LineageChange(note="   ", lifecycle="adopted", reason="r")
-        assert lineage.size_refusal("ADR-001", MAX_LINEAGE_BYTES, blank) is None
+        assert lineage.appends(blank) is False
+        assert lineage.size_refusal("ADR-001", MAX_LINEAGE_BYTES, appends=False) is None
 
     def test_a_string_repeated_through_aliases_is_refused_without_expanding_it(
         self, tmp_pm_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2160,6 +2171,53 @@ class TestOlderWriters:
         _old_version_rewrite(tmp_pm_path)
         assert self._state(tmp_pm_path) == before
         assert before[1]["status"] is DecisionStatus.ACCEPTED
+
+    @staticmethod
+    def _section(pm_path: Path, key: str) -> bytes:
+        """The bytes of one top-level section of the lineage file, key line included."""
+        lines = _path(pm_path).read_bytes().splitlines(keepends=True)
+        start = lines.index(f"{key}:\n".encode())
+        end = next(
+            (n for n in range(start + 1, len(lines)) if lines[n][:1] not in (b" ", b"-")),
+            len(lines),
+        )
+        return b"".join(lines[start:end])
+
+    def test_an_s2_section_keeps_its_bytes_through_s1_writers_and_a_0_16_rewrite(
+        self, tmp_pm_path: Path
+    ):
+        # D3 for S2 sections (S2 spec §6.1, §5.4): the S1 writer paths and an
+        # older pmlens rewriting decisions.yaml leave fact_core byte for byte.
+        _created(tmp_pm_path)
+        facts = [
+            {"kind": "what", "text": "Send the mail inside the request"},
+            {"kind": "change", "text": "Before: a queue. After: inline"},
+            {"kind": "revert", "text": "Revert the setting", "reversibility": "unknown"},
+            {"kind": "weak", "text": "A slow mail server slows every booking"},
+            {"kind": "uncertain", "text": "Peak volume", "confidence": "medium"},
+            {"kind": "alt", "text": "Keep the queue"},
+        ]
+        for expected in (0, 1):
+            facts[3]["text"] += "."  # a second version fills previous_values
+            result = change_decision_lineage(
+                tmp_pm_path,
+                "ADR-001",
+                LineageChange(fact_core=facts, expected_fact_core_version=expected),
+            )
+            assert result.status == "updated"
+        section = self._section(tmp_pm_path, "fact_core")
+        assert b"previous_values:" in section and b"F-alt.1" in section
+        steps = [
+            LineageChange(note="a small follow-up"),
+            LineageChange(lifecycle="adopted", reason="the user approved"),
+            LineageChange(note="after the adoption"),
+            LineageChange(lifecycle="deprecated", reason="no longer used"),
+        ]
+        for change in steps:
+            assert change_decision_lineage(tmp_pm_path, "ADR-001", change).status == "updated"
+            assert self._section(tmp_pm_path, "fact_core") == section
+        _old_version_rewrite(tmp_pm_path)
+        assert self._section(tmp_pm_path, "fact_core") == section
 
 
 # ─── Lock order (design §5.1) ────────────────────────────────────────────

@@ -467,6 +467,8 @@ pm-server hook post-tool-use   # PostToolUse フックハンドラ
 | RecordedTiming | `before_impl`, `during_impl`, `post_hoc`, `unknown` |
 | DecisionKind | `spec_policy`, `premise_dependent`, `technical`, `unknown` |
 | EvaluationKind | `test`, `ai_review`, `outcome`, `other` |
+| FactSource | `proposal`（提案）, `observed`（予約。pmlens は proposal だけを書く） |
+| Reversibility | `code_revertable`（コードを戻せば戻る）, `external_irreversible`（外部に作用して取り消せない）, `unknown`（不明。external_irreversible と同じく扱う） |
 | LogCategory | `progress`, `decision`, `blocker`, `note`, `milestone` |
 | MemoryType | `observation`, `insight`, `lesson` |
 | KnowledgeCategory | `research`, `market`, `spike`, `requirement`, `constraint`, `tradeoff`, `risk_analysis`, `spec`, `api_design` |

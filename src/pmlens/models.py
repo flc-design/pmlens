@@ -151,6 +151,26 @@ class EvaluationKind(StrEnum):
     OTHER = "other"
 
 
+class FactSource(StrEnum):
+    """Where a fact of an ADR's fact core came from. pmlens writes only proposal."""
+
+    PROPOSAL = "proposal"
+    OBSERVED = "observed"  # reserved for facts checked against commits and tests
+
+
+class Reversibility(StrEnum):
+    """How the decision can be undone, as its F-revert fact states it.
+
+    Only code_revertable lets a person who cannot judge the decision skip the
+    check before an irreversible effect; unknown is treated like
+    external_irreversible.
+    """
+
+    CODE_REVERTABLE = "code_revertable"
+    EXTERNAL_IRREVERSIBLE = "external_irreversible"
+    UNKNOWN = "unknown"
+
+
 class LogCategory(StrEnum):
     """Daily log entry category."""
 

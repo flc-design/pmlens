@@ -806,14 +806,30 @@ class _SizeCapExceededError(Exception):
     """The text a :class:`_CappedText` holds would exceed its cap."""
 
 
+def written_size(text: str) -> int:
+    """How many bytes ``_save_yaml(root=...)`` writes for ``text`` (S2 spec §2.8).
+
+    It writes the platform's newlines, so on Windows every newline becomes two
+    bytes on disk, and readers cap a file by its size on disk
+    (``lineage._read_bounded``). Comparing the LF text's UTF-8 length with a
+    cap would accept a lineage that is then too large to read back; every
+    size cap of a rewritten ledger counts through this one function instead.
+    """
+    size = len(text) if text.isascii() else len(text.encode("utf-8"))
+    if os.linesep != "\n":
+        size += text.count("\n") * (len(os.linesep.encode("utf-8")) - 1)
+    return size
+
+
 class _CappedText:
-    """A text stream for ``safe_dump`` that refuses to hold more than ``limit`` UTF-8 bytes.
+    """A text stream for ``safe_dump`` that refuses to hold more than ``limit`` bytes on disk.
 
     safe_dump writes a string out once per place it appears (PyYAML never
     gives a str an anchor), so a small lineage whose unknown keys repeat one
     long string through aliases expands on every rewrite: a 45 KB file took
     20 s and 300 MB to dump, under both locks. Counting while the emitter
-    writes stops after about ``limit`` bytes instead.
+    writes stops after about ``limit`` bytes instead. The bytes are counted as
+    ``_save_yaml`` writes them (:func:`written_size`).
     """
 
     def __init__(self, limit: int) -> None:
@@ -827,7 +843,7 @@ class _CappedText:
         Raises:
             _SizeCapExceededError: The text would exceed the cap.
         """
-        self._size += len(text) if text.isascii() else len(text.encode("utf-8"))
+        self._size += written_size(text)
         if self._size > self._limit:
             raise _SizeCapExceededError
         self._parts.append(text)
@@ -840,13 +856,20 @@ class _CappedText:
         return "".join(self._parts)
 
 
-def _dump_lineage_capped(doc: Mapping, decision_id: str, max_bytes: int) -> str | None:
-    """``lineage.dump_lineage``, giving up once the text would exceed ``max_bytes``.
+def _dump_yaml_capped(doc: Mapping, header_name: str, max_bytes: int) -> str | None:
+    """The text ``_save_yaml`` writes for ``doc``, giving up once it would exceed ``max_bytes``.
 
-    Produces the same text (header included) as ``lineage.dump_lineage`` and
-    ``_save_yaml``; lineage.py cannot hold this because it never writes, not
-    even to a stream. The time and memory a rewrite takes under the locks stay
-    proportional to the cap, whatever the loaded document repeats.
+    Produces the same text (header included) as ``_save_yaml`` with the LF
+    newlines it holds before writing; ``max_bytes`` is compared with what
+    goes to disk (:func:`written_size`). lineage.py cannot hold this because
+    it never writes, not even to a stream. The time and memory a rewrite takes
+    under a lock stay proportional to the cap, whatever the loaded document
+    repeats.
+
+    Args:
+        doc: The document.
+        header_name: The name in the file's comment header.
+        max_bytes: The cap, in bytes as written.
 
     Returns:
         The text, or ``None`` when it would be larger than ``max_bytes``.
@@ -858,7 +881,7 @@ def _dump_lineage_capped(doc: Mapping, decision_id: str, max_bytes: int) -> str 
     """
     out = _CappedText(max_bytes)
     try:
-        out.write(_yaml_header(_lineage.lineage_header_name(decision_id)))
+        out.write(_yaml_header(header_name))
         yaml.safe_dump(
             doc,
             out,
@@ -869,6 +892,11 @@ def _dump_lineage_capped(doc: Mapping, decision_id: str, max_bytes: int) -> str 
     except _SizeCapExceededError:
         return None
     return out.getvalue()
+
+
+def _dump_lineage_capped(doc: Mapping, decision_id: str, max_bytes: int) -> str | None:
+    """``lineage.dump_lineage`` under a cap: :func:`_dump_yaml_capped` with the lineage header."""
+    return _dump_yaml_capped(doc, _lineage.lineage_header_name(decision_id), max_bytes)
 
 
 def _lineage_write_target(pm_path: Path, decision_id: str) -> Path:
@@ -1015,11 +1043,14 @@ class LineageChangeResult:
         error: The error dict when ``status == "error"`` (nothing was written).
         lifecycle: The lineage lifecycle after the call.
         decision_status: decisions.yaml's status after the call (a redacted label).
-        changes: What changed (``lifecycle`` / ``decision_status`` / ``declared``).
+        changes: What changed (``lifecycle`` / ``decision_status`` / ``declared``,
+            or ``fact_core`` for a fact core call).
         links: The ADR's links after the call.
         events_added: Kinds of the events appended, in file order.
         warnings: Warning entries (``server._build_warning`` shape).
         next: A follow-up hint (the other side of a supersedes link), if any.
+        fact_core: ``{"version", "ids"}`` after a call that passed ``fact_core``
+            (``unchanged`` included); ``None`` for any other call (S2 spec §3.1).
     """
 
     status: str
@@ -1032,6 +1063,7 @@ class LineageChangeResult:
     events_added: list[str] = field(default_factory=list)
     warnings: list[dict] = field(default_factory=list)
     next: str | None = None
+    fact_core: dict | None = None
 
 
 def _read_lineage_for_write(pm_path: Path, decision: Decision) -> dict | None:
@@ -1103,15 +1135,17 @@ def _counterpart_hints(
 def change_decision_lineage(
     pm_path: Path, decision_id: str, change: LineageChange
 ) -> LineageChangeResult:
-    """Change one ADR's lineage and project its status (design §5.2).
+    """Change one ADR's lineage and project its status (design §5.2, S2 spec §5.2).
 
     Under the decisions lock and then the ADR's lineage lock: the lineage is
     loaded (or started from the status), the change is validated against the
-    current state and applied (:func:`lineage.apply_change`), the result is
-    serialised under a size cap and checked (:func:`lineage.size_refusal`:
-    notes and evaluations stop short of the cap so lifecycle and link changes
-    still fit), the lineage is saved, and decisions.yaml is rewritten only
-    when the projected status changed — and only that ADR's status. The ADR
+    current state and applied (:func:`lineage.apply_change`; a fact core call
+    is checked against its version there, D5), the result is serialised under
+    a size cap and checked in bytes as written (:func:`lineage.size_refusal`:
+    notes, evaluations and fact core versions stop short of the cap so
+    lifecycle and link changes still fit), the lineage is saved, and
+    decisions.yaml is rewritten only when the projected status changed — and
+    only that ADR's status (a fact core call never changes it). The ADR
     text is never touched. A failure to save decisions.yaml after the lineage
     was saved leaves the lineage (the source of truth) ahead; it is reported as
     ``decision_status_not_projected`` and repaired by calling again with the
@@ -1207,6 +1241,7 @@ def change_decision_lineage(
                 links=outcome.links,
                 events_added=outcome.events_added,
                 warnings=list(outcome.notices),
+                fact_core=outcome.fact_core,
             )
             if not outcome.changed or outcome.doc is None:
                 return result
@@ -1225,8 +1260,12 @@ def change_decision_lineage(
                         f"or move it out of .pm/{_lineage.LINEAGE_DIR} by hand.",
                     ),
                 )
+            # The bytes as written, so a lineage accepted near the cap still
+            # reads back where newlines are CRLF (S2 spec §2.8).
             too_large = _lineage.size_refusal(
-                decision_id, None if text is None else len(text.encode("utf-8")), change
+                decision_id,
+                None if text is None else written_size(text),
+                appends=_lineage.appends(change),
             )
             if too_large is not None:
                 return LineageChangeResult(status="error", decision_id=decision_id, error=too_large)

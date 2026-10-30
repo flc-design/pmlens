@@ -21,7 +21,13 @@ shown as *derived* from its status. No note, warning or error built here quotes
 an exception's text: ``str(exc)`` carries the offending YAML line or pydantic's
 ``input_value`` and can leak a secret (:func:`error_summary`).
 
-"design §N" below refers to docs/issues/DESIGN_decision-lineage-s1.md.
+S2 adds the ADR's fact core: its facts, versioned, with the version an
+adoption fixed (:func:`fact_core_refusal`, :func:`adopted_fact_core_version`,
+:func:`explanation_staleness`, and the ``fact_core`` argument of
+:func:`apply_change`).
+
+"design §N" below refers to docs/issues/DESIGN_decision-lineage-s1.md, "S2
+spec §N" to docs/issues/DESIGN_decision-lineage-s2.md.
 """
 
 from __future__ import annotations
@@ -39,14 +45,17 @@ import yaml
 
 from .ledger_errors import LedgerReadError
 from .models import (
+    ConfidenceLevel,
     Decision,
     DecisionKind,
     DecisionLifecycle,
     DecisionOrigin,
     DecisionStatus,
     EvaluationKind,
+    FactSource,
     PmServerError,
     RecordedTiming,
+    Reversibility,
 )
 from .redaction import redact_secrets
 from .safe_yaml import UnreadableValueError
@@ -118,16 +127,98 @@ LINEAGE_ANCHOR_MISSING = "decision_lineage_anchor_missing"
 LINEAGE_NO_SUCCESSOR = "decision_lineage_superseded_without_successor"
 LINEAGE_ITEMS_SKIPPED = "decision_lineage_items_skipped"
 LINEAGE_TOO_LARGE = "decision_lineage_too_large"
+LINEAGE_STARTED = "decision_lineage_started"
+LINEAGE_SECRETS_REDACTED = "decision_lineage_secrets_redacted"
 
-# Fields each event kind may show, in this order (design §2.4). Multi-event
-# calls also append their events in this order. ``at`` / ``kind`` / ``via`` are
-# common to every kind.
+# Fact core ids (S2 spec §2.2). ``re.fullmatch`` only, as for DECISION_ID_RE.
+# Numbers run 1-99 and are never reused, retired ones included.
+FACT_ID_RE = re.compile(
+    r"F-(?:what|change|revert|weak|uncertain)|F-(?:alt|conditions|premise)\.[1-9][0-9]?"
+)
+# Explanation ids (S2 spec §2.4). An adoption reads the explanations section
+# only to see whether one of the current version exists (S2 spec §3.1).
+EXPLANATION_ID_RE = re.compile(r"ADR-[0-9]{1,6}\.EX-[1-9][0-9]{0,5}")
+# Feedback ids (S2 spec §2.4). The fact core writer reads them only to tell a
+# readable feedback entry from one readers skip (S2 spec §2.7).
+FEEDBACK_ID_RE = re.compile(r"ADR-[0-9]{1,6}\.FB-[1-9][0-9]{0,5}")
+FACT_SINGLE_KINDS: tuple[str, ...] = ("what", "change", "revert", "weak", "uncertain")
+FACT_NUMBERED_KINDS: tuple[str, ...] = ("alt", "conditions", "premise")
+FACT_KINDS: tuple[str, ...] = FACT_SINGLE_KINDS + FACT_NUMBERED_KINDS
+# Every version from 1 on holds these; premise_dependent ADRs also need a
+# premise (S2 spec §2.2, Q6).
+REQUIRED_FACT_IDS: tuple[str, ...] = tuple(f"F-{kind}" for kind in FACT_SINGLE_KINDS)
+MAX_FACT_NUMBER = 99
+MAX_FACT_ITEMS = 30
+MAX_FACT_TEXT_CHARS = 500
+MAX_FACT_CORE_CHARS = 6_000
+# The keys a fact_core argument item may carry. ``source`` is not one: pmlens
+# writes proposal for every item, so no caller can mark a fact as observed.
+FACT_INPUT_KEYS = frozenset({"id", "kind", "text", "confidence", "reversibility"})
+REVERSIBILITIES: tuple[str, ...] = tuple(v.value for v in Reversibility)
+CONFIDENCES: tuple[str, ...] = tuple(v.value for v in ConfidenceLevel)
+CODE_REVERTABLE = Reversibility.CODE_REVERTABLE.value
+SOURCE_PROPOSAL = FactSource.PROPOSAL.value
+# How a stored reversibility that is not a vocabulary value is named in a
+# message or an error field: values written by hand are never quoted.
+REVERSIBILITY_OUT_OF_VOCABULARY = "out_of_vocabulary"
+REVERSIBILITY_UNREADABLE = "unreadable"
+# While an ADR adopted with a recorded fact core version is in one of these,
+# its fact core is fixed; only a move back to proposed lifts that (Q13).
+FACT_CORE_FIXED_LIFECYCLES = frozenset(
+    {
+        DecisionLifecycle.ADOPTED.value,
+        DecisionLifecycle.DEPRECATED.value,
+        DecisionLifecycle.SUPERSEDED.value,
+        DecisionLifecycle.REVERTED.value,
+    }
+)
+# Whether the lifecycle went through an adoption, read from the events
+# (:func:`adopted_fact_core_version`), never from the lifecycle value alone.
+ADOPTION_ADOPTED = "adopted"
+ADOPTION_NOT_ADOPTED = "not_adopted"
+ADOPTION_UNKNOWN = "unknown"
+# Caps of the S2 view (S2 spec §2.6): the writer's limits, or above what a
+# writer can put in a file of MAX_LINEAGE_BYTES.
+VIEW_RETIRED_IDS = len(FACT_NUMBERED_KINDS) * MAX_FACT_NUMBER
+VIEW_PREVIOUS_VALUES = 30
+SCAN_PREVIOUS_VALUES = 5_000
+MAX_CHANGED_IDS = len(FACT_SINGLE_KINDS) + VIEW_RETIRED_IDS
+PREVIOUS_TEXT_CHARS = 200
+# Explanations are scanned from the end up to this many entries (S2 spec §2.6).
+SCAN_EXPLANATIONS = 1_000
+# The keys each level of the fact core section may hold (S2 spec §2.1); others
+# are shown by name only, as ``unknown_fields`` (S2 spec §2.6).
+_FACT_CORE_KEYS = frozenset(
+    {"version", "recorded_reversibility", "items", "retired_ids", "previous_values"}
+)
+_FACT_ITEM_KEYS = frozenset({"id", "text", "source", "since", "confidence", "reversibility"})
+_PREVIOUS_VALUE_KEYS = frozenset(
+    {"id", "last_version", "text", "source", "confidence", "reversibility"}
+)
+
+# Fact core codes (S2 spec §4).
+FACT_CORE_AFTER_ADOPTION = "fact_core_after_adoption"
+FACT_CORE_VERSION_MISMATCH = "fact_core_version_mismatch"
+FACT_CORE_LOWERING_REFUSED = "fact_core_reversibility_lowering_refused"
+FACT_CORE_CHANGED_AFTER_ADOPTION = "decision_fact_core_changed_after_adoption"
+FACT_CORE_WRITTEN_AFTER_ADOPTION = "decision_fact_core_written_after_adoption"
+FACT_CORE_CHANGED_SINCE_ADOPTION = "decision_fact_core_changed_since_adoption"
+FACT_CORE_NO_CONDITIONS = "decision_fact_core_no_conditions"
+REVERSIBILITY_CHANGED_OUTSIDE_TOOLS = "decision_reversibility_changed_outside_tools"
+REVERSIBILITY_DECLARED_AFTER_REVIEW = "decision_reversibility_declared_after_review"
+ADOPTION_EXPLANATION_CHECK_SKIPPED = "decision_adoption_explanation_check_skipped"
+ADOPTED_WITHOUT_CURRENT_EXPLANATION = "decision_adopted_without_current_explanation"
+
+# Fields each event kind may show, in this order (design §2.4, S2 spec §2.5).
+# Multi-event calls also append their events in this order. ``at`` / ``kind`` /
+# ``via`` are common to every kind.
 _EVENT_FIELDS: dict[str, tuple[str, ...]] = {
     "created": ("lifecycle", "status"),
     "lineage_started": ("basis", "status", "lifecycle"),
-    "lifecycle": ("from", "to", "status", "reason"),
+    "lifecycle": ("from", "to", "status", "reason", "fact_core_version"),
     "link": ("op", "type", "target", "reason"),
     "declared": ("field", "value", "basis", "reason"),
+    "fact_core": ("version", "changed_ids", "reason", "edited_outside_tools"),
     "evaluation": ("evaluation_kind", "text"),
     "note": ("text",),
     "status_reprojected": ("from_status", "to_status"),
@@ -135,8 +226,27 @@ _EVENT_FIELDS: dict[str, tuple[str, ...]] = {
 EVENT_KINDS: tuple[str, ...] = tuple(_EVENT_FIELDS)
 _EVENT_COMMON: tuple[str, ...] = ("at", "kind", "via")
 _FREE_TEXT_FIELDS = frozenset({"text", "reason"})
+# Allow-listed event fields that are not strings (S2 spec §2.5): an int (bool
+# excluded), an int of 1 or more, or a list of ids each matching a pattern.
+_EVENT_INT_FIELDS = frozenset({"version"})
+_EVENT_POSITIVE_INT_FIELDS = frozenset({"fact_core_version"})
+_EVENT_ID_LIST_FIELDS: dict[str, re.Pattern[str]] = {
+    "changed_ids": FACT_ID_RE,
+    "edited_outside_tools": FACT_ID_RE,
+}
+# One S2 section joins at a time, with the task that shows it (S2 spec §2.6).
 _KNOWN_TOP_LEVEL = frozenset(
-    {"schema", "decision_id", "anchor", "recorded_at", "declared", "lifecycle", "links", "events"}
+    {
+        "schema",
+        "decision_id",
+        "anchor",
+        "recorded_at",
+        "declared",
+        "lifecycle",
+        "links",
+        "events",
+        "fact_core",
+    }
 )
 
 # Lifecycle -> decisions.yaml status (design §3.1). reverted is handled apart
@@ -725,6 +835,512 @@ def link_targets(raw: RawLineage, link_type: str) -> list[str]:
     return [item for item in items if is_decision_id(item)]
 
 
+# ─── Fact core (pure; S2 spec §2.2) ──────────────────
+
+# What a stored field holds when it is not there at all (``None`` is a value).
+_MISSING: object = object()
+
+
+def _is_positive_int(value: object) -> bool:
+    """True for an int of 1 or more; a bool (an int subclass) is not one."""
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 1
+
+
+def is_fact_id(value: object) -> bool:
+    """True when ``value`` is a string matching FACT_ID_RE whole."""
+    return isinstance(value, str) and FACT_ID_RE.fullmatch(value) is not None
+
+
+def fact_kind(fact_id: str) -> str:
+    """The kind of a fact id (``F-premise.2`` -> ``premise``, ``F-what`` -> ``what``)."""
+    return fact_id[2:].split(".", 1)[0]
+
+
+def _fact_number(fact_id: str) -> int | None:
+    """The number of a numbered fact id; ``None`` for one of the single items.
+
+    FACT_ID_RE allows ASCII digits only, so ``int`` cannot fail.
+    """
+    _, dot, number = fact_id.partition(".")
+    return int(number) if dot else None
+
+
+def _path_of(adr: str) -> str:
+    """The lineage file of ``adr`` as a remediation names it."""
+    return f".pm/{LINEAGE_DIR}/{adr}.yaml"
+
+
+def _fact_item_problem(item: object, seen: set[str]) -> str | None:
+    """Why a stored fact core item cannot be used, or ``None`` (S2 spec §2.7).
+
+    Readers skip such an item; the fact core writer refuses the whole file
+    (:func:`fact_core_refusal`). A value outside a vocabulary is not a problem:
+    it is shown redacted and copied redacted. The reason names fields, never
+    values.
+
+    Args:
+        item: One entry of ``fact_core.items``.
+        seen: The fact ids held by the entries before it, usable or not: an
+            id repeated after a broken entry is still a repeat (S2 spec §2.7).
+    """
+    if not isinstance(item, dict):
+        return "is not a mapping"
+    fact_id = item.get("id")
+    if not is_fact_id(fact_id):
+        return "has no valid fact id"
+    if fact_id in seen:
+        return "repeats an id used earlier"
+    if not isinstance(item.get("text"), str):
+        return "has no text string"
+    for name in ("source", "confidence", "reversibility"):
+        if name in item and not isinstance(item[name], str):
+            return f"has a {name} that is not a string"
+    if fact_id == "F-revert" and "reversibility" not in item:
+        return "has no reversibility"
+    if fact_id == "F-uncertain" and "confidence" not in item:
+        return "has no confidence"
+    return None
+
+
+def _previous_value_problem(element: object) -> str | None:
+    """Why an entry of ``fact_core.previous_values`` cannot be used, or ``None``."""
+    if not isinstance(element, dict):
+        return "is not a mapping"
+    if not is_fact_id(element.get("id")):
+        return "has no valid fact id"
+    if not _is_positive_int(element.get("last_version")):
+        return "has no last_version of 1 or more"
+    if not isinstance(element.get("text"), str):
+        return "has no text string"
+    for name in ("source", "confidence", "reversibility"):
+        if name in element and not isinstance(element[name], str):
+            return f"has a {name} that is not a string"
+    return None
+
+
+def _readable_fact_core(raw: object) -> dict | None:
+    """``raw`` when readers can show it as a fact core, else ``None`` (S2 spec §2.7).
+
+    A mapping whose ``version`` is an int of 1 or more and whose ``items`` is a
+    list. Its items are then taken one by one (:func:`_readable_items`).
+    """
+    if (
+        isinstance(raw, dict)
+        and _is_positive_int(raw.get("version"))
+        and isinstance(raw.get("items"), list)
+    ):
+        return raw
+    return None
+
+
+def _readable_items(items: list) -> tuple[list[dict], int]:
+    """The usable items among the first MAX_FACT_ITEMS entries, and how many were not.
+
+    Entries past the cap are counted without being read, so an alias-inflated
+    list costs no more than the cap.
+    """
+    seen: set[str] = set()
+    kept: list[dict] = []
+    skipped = max(0, len(items) - MAX_FACT_ITEMS)
+    for item in items[:MAX_FACT_ITEMS]:
+        problem = _fact_item_problem(item, seen)
+        if isinstance(item, dict) and is_fact_id(item.get("id")):
+            seen.add(item["id"])
+        if problem is not None:
+            skipped += 1
+            continue
+        kept.append(item)
+    return kept, skipped
+
+
+def _revert_value(items: Iterable[dict]) -> object:
+    """F-revert's stored reversibility among usable items (``_MISSING`` without one)."""
+    for item in items:
+        if item["id"] == "F-revert":
+            return item["reversibility"]
+    return _MISSING
+
+
+def _current_revert_value(raw_items: list, usable: list[dict]) -> object:
+    """F-revert's stored reversibility, as a change outside the tools is judged by it.
+
+    The judgement compares the reversibility itself (S2 spec §2.2), so an
+    F-revert skipped for another field (its text, source or confidence) still
+    gives the value it holds. Only a missing F-revert, or a reversibility that
+    is missing or not a string, reads as unreadable. The floor still treats a
+    skipped F-revert as absent (S2 spec §2.7).
+
+    Args:
+        raw_items: ``fact_core.items`` as loaded; only the first MAX_FACT_ITEMS
+            entries are looked at, as :func:`_readable_items` does.
+        usable: The usable items among them.
+    """
+    value = _revert_value(usable)
+    if value is not _MISSING:
+        return value
+    for item in raw_items[:MAX_FACT_ITEMS]:
+        if isinstance(item, dict) and item.get("id") == "F-revert":
+            return item.get("reversibility", _MISSING)
+    return _MISSING
+
+
+def reversibility_label(value: object) -> str:
+    """A stored reversibility as a vocabulary name, never quoting anything else.
+
+    Returns:
+        The value itself when it is in the vocabulary, ``out_of_vocabulary``
+        for another string, ``unreadable`` when missing or not a string.
+    """
+    if isinstance(value, str):
+        return value if value in REVERSIBILITIES else REVERSIBILITY_OUT_OF_VOCABULARY
+    return REVERSIBILITY_UNREADABLE
+
+
+def floor_reversibility(fact_core: object) -> str:
+    """The reversibility the floor and the ratchet read from a stored fact core.
+
+    Only a stored ``code_revertable`` reads as code_revertable. No readable
+    fact core, no usable F-revert, a skipped F-revert entry (a broken one, or
+    a repeat of a usable one: S2 spec §2.7), and a reversibility that is
+    missing, not a string or outside the vocabulary all read as ``unknown``,
+    which keeps a person able to judge in the loop (S2 spec §2.2, §3.5).
+
+    Args:
+        fact_core: The lineage's ``fact_core`` value, as loaded.
+
+    Returns:
+        One of the Reversibility values.
+    """
+    value = _floor_revert_value(fact_core)
+    if isinstance(value, str) and value in REVERSIBILITIES:
+        return value
+    return Reversibility.UNKNOWN.value
+
+
+def _floor_revert_value(fact_core: object) -> object:
+    """The stored F-revert reversibility the floor reads, ``_MISSING`` when it sees none.
+
+    The floor looks only at the first MAX_FACT_ITEMS entries, as the view
+    does, and sees F-revert only when exactly one entry there carries the id
+    and that entry is usable (S2 spec §2.7). The ratchet names its base from
+    this same value, so a refusal never names an entry the floor did not read
+    (S2 spec §2.2, §3.1 step 8).
+    """
+    readable = _readable_fact_core(fact_core)
+    if readable is None:
+        return _MISSING
+    raw_items = readable["items"]
+    revert_entries = sum(
+        1
+        for item in raw_items[:MAX_FACT_ITEMS]
+        if isinstance(item, dict) and item.get("id") == "F-revert"
+    )
+    if revert_entries != 1:
+        return _MISSING
+    return _revert_value(_readable_items(raw_items)[0])
+
+
+def lowers_reversibility(fact_core: object, new_value: object) -> bool:
+    """Whether writing ``new_value`` would lower F-revert's reversibility (Q12).
+
+    The ratchet: once a fact core exists (version 1 or more; only a missing
+    one is version 0), F-revert may become code_revertable only by the user's
+    own edit of the file. The base is the value stored now (a person's edit
+    included), read by :func:`floor_reversibility`, not ``recorded_reversibility``.
+    A first version is a declaration and is never lowering.
+
+    Args:
+        fact_core: The lineage's ``fact_core`` value, as loaded (``None`` when
+            there is none).
+        new_value: The reversibility the new version would hold.
+    """
+    return (
+        fact_core is not None
+        and new_value == CODE_REVERTABLE
+        and floor_reversibility(fact_core) != CODE_REVERTABLE
+    )
+
+
+def _changed_outside_tools(recorded: object, current: object) -> bool:
+    """Whether F-revert's stored value differs from what a tool last recorded.
+
+    A ``recorded_reversibility`` that is missing or not a vocabulary string
+    counts as a difference whose earlier value is unknown (S2 spec §2.2).
+    """
+    if not (isinstance(recorded, str) and recorded in REVERSIBILITIES):
+        return True
+    return not isinstance(current, str) or current != recorded
+
+
+def _scan_adoption(doc: Mapping) -> tuple[int | None, dict | None, str]:
+    """The latest event that set the lifecycle to adopted or proposed (S2 spec §2.2).
+
+    Events are walked from the end in file order; created and lineage_started
+    set their ``lifecycle``, a lifecycle event its ``to``.
+
+    Returns:
+        ``(index, event, adoption)``: the event's 0-based position and the
+        event (both ``None`` when there is none), and ``adopted`` /
+        ``not_adopted`` for an event setting adopted / proposed. Without
+        such an event, ``not_adopted`` when the first event is created (an
+        ADR recorded as superseded or deprecated), else ``unknown`` (a
+        lineage started from a deprecated or superseded status: whether it
+        was ever adopted is not known).
+    """
+    events = doc.get("events")
+    if not isinstance(events, list):
+        return None, None, ADOPTION_UNKNOWN
+    for index in range(len(events) - 1, -1, -1):
+        event = events[index]
+        if not isinstance(event, dict):
+            continue
+        kind = event.get("kind")
+        if kind in ("created", "lineage_started"):
+            target = event.get("lifecycle")
+        elif kind == "lifecycle":
+            target = event.get("to")
+        else:
+            continue
+        if target == DecisionLifecycle.ADOPTED:
+            return index, event, ADOPTION_ADOPTED
+        if target == DecisionLifecycle.PROPOSED:
+            return index, event, ADOPTION_NOT_ADOPTED
+    first = events[0] if events else None
+    if isinstance(first, dict) and first.get("kind") == "created":
+        return None, None, ADOPTION_NOT_ADOPTED
+    return None, None, ADOPTION_UNKNOWN
+
+
+def adopted_fact_core_version(doc: Mapping) -> tuple[int | None, bool, str]:
+    """The fact core version the ADR's adoption fixed (S2 spec §2.2, Q13).
+
+    Read from the latest event that set the lifecycle to adopted or proposed
+    (:func:`_scan_adoption`): when it adopted and holds ``fact_core_version``,
+    that value. The locked writer and the view share this function.
+
+    Args:
+        doc: An attributed lineage document.
+
+    Returns:
+        ``(value, malformed, adoption)``. ``value`` is the version when the
+        adopting event holds an int of 1 or more that is not above the current
+        version (a fact core removed by hand keeps it, so the ADR stays fixed);
+        otherwise ``None``. ``malformed`` is True when the adopting event holds
+        ``fact_core_version`` of another type or range. ``adoption`` is
+        ``adopted``, ``not_adopted`` or ``unknown``.
+    """
+    _, event, adoption = _scan_adoption(doc)
+    if event is None or adoption != ADOPTION_ADOPTED or "fact_core_version" not in event:
+        return None, False, adoption
+    value = event["fact_core_version"]
+    current = _readable_fact_core(doc.get("fact_core"))
+    if not _is_positive_int(value) or (current is not None and value > current["version"]):
+        return None, True, adoption
+    return value, False, adoption
+
+
+def _fixed_by_adoption(doc: Mapping, adopted: int | None) -> bool:
+    """Whether the fact core is fixed: adopted with a version, and not moved back."""
+    lifecycle = doc.get("lifecycle")
+    return (
+        adopted is not None
+        and isinstance(lifecycle, str)
+        and lifecycle in FACT_CORE_FIXED_LIFECYCLES
+    )
+
+
+def fact_core_refusal(doc: Mapping) -> dict | None:
+    """Why the fact core writer must not write this lineage's fact core, or ``None``.
+
+    One predicate for three places (S2 spec §2.2, §2.7, §3.1): the fact core
+    writer refuses with it, an adoption records the fact core version only
+    when it is ``None`` and a fact core exists, and the adoption's
+    ``decision_adoption_explanation_check_skipped`` follows it. Refused: a
+    ``fact_core`` that is not a mapping, a ``version`` that is not an int of 1
+    or more, ``items`` that is not a list, any item :func:`_fact_item_problem`
+    rejects, a missing single item, and ``retired_ids`` or ``previous_values``
+    entries of the wrong shape, so a broken or non-string value never travels
+    into a new version. A missing fact core is version 0, not a refusal, and a
+    missing or unknown ``recorded_reversibility`` is taken in by the next
+    version instead.
+
+    Args:
+        doc: A lineage document that passed :func:`write_refusal`.
+
+    Returns:
+        A ``decision_lineage_unreadable`` error dict naming the section and the
+        1-based entry (never a value), with a remediation addressed to the
+        user; or ``None``.
+    """
+    adr = doc.get("decision_id") if is_decision_id(doc.get("decision_id")) else "this ADR"
+    raw = doc.get("fact_core")
+    if raw is None:
+        return None
+    path = _path_of(adr)
+
+    def refuse(where: str, problem: str, remediation: str | None = None) -> dict:
+        return _error(
+            LINEAGE_UNREADABLE,
+            f"{adr}: {where} in the lineage file {problem}, so the fact core cannot be "
+            "written; nothing was written.",
+            remediation=remediation
+            or (
+                f"Tell the user. Only the user may fix {where} in {path} by hand, when no "
+                "assistant session is writing. Do not edit the lineage file yourself."
+            ),
+        )
+
+    if not isinstance(raw, dict):
+        return refuse("fact_core", "is not a mapping")
+    if not _is_positive_int(raw.get("version")):
+        return refuse("fact_core.version", "is not a whole number of 1 or more")
+    items = raw.get("items")
+    if not isinstance(items, list):
+        return refuse("fact_core.items", "is not a list")
+    seen: set[str] = set()
+    for position, item in enumerate(items, 1):
+        problem = _fact_item_problem(item, seen)
+        if problem is None:
+            seen.add(item["id"])
+            continue
+        remediation = None
+        if isinstance(item, dict) and item.get("id") == "F-revert" and "reversibility" in problem:
+            remediation = (
+                "Tell the user. Only the user may fix the one reversibility line of F-revert "
+                f"in {path} with code_revertable, external_irreversible or unknown, when no "
+                "assistant session is writing; recorded_reversibility needs no change. Do not "
+                "edit the lineage file yourself."
+            )
+        return refuse(f"entry {position} of fact_core.items", problem, remediation)
+    missing = [fact_id for fact_id in REQUIRED_FACT_IDS if fact_id not in seen]
+    if missing:
+        return refuse("fact_core.items", f"has no {', '.join(missing)}")
+    retired = raw.get("retired_ids")
+    if retired is not None:
+        if not isinstance(retired, list):
+            return refuse("fact_core.retired_ids", "is not a list")
+        for position, value in enumerate(retired, 1):
+            if not is_fact_id(value):
+                return refuse(f"entry {position} of fact_core.retired_ids", "is not a fact id")
+    previous = raw.get("previous_values")
+    if previous is not None:
+        if not isinstance(previous, list):
+            return refuse("fact_core.previous_values", "is not a list")
+        for position, element in enumerate(previous, 1):
+            problem = _previous_value_problem(element)
+            if problem is not None:
+                return refuse(f"entry {position} of fact_core.previous_values", problem)
+    return None
+
+
+def _fact_core_traces(doc: Mapping) -> str | None:
+    """Where a lineage without a fact core still refers to one, or ``None`` (S2 spec §2.2).
+
+    An explanation or feedback item recorded from a version of 1 or more, or
+    a fact_core event of version 1 or more, means the fact core was removed by
+    hand: a first version written over it would undo the ratchet. Only the
+    readable entries of explanations and feedback are looked at, mappings whose
+    id matches EXPLANATION_ID_RE / FEEDBACK_ID_RE (a broken section or entry is
+    no reason to refuse here, S2 spec §2.7); every event is.
+
+    Returns:
+        ``explanations``, ``feedback`` or ``events``; ``None`` without traces.
+    """
+    for section, pattern in (("explanations", EXPLANATION_ID_RE), ("feedback", FEEDBACK_ID_RE)):
+        part = doc.get(section)
+        entries = part.get("items") if isinstance(part, dict) else None
+        if isinstance(entries, list) and any(
+            isinstance(entry, dict)
+            and isinstance(entry.get("id"), str)
+            and pattern.fullmatch(entry["id"]) is not None
+            and _is_positive_int(entry.get("fact_core_version"))
+            for entry in entries
+        ):
+            return section
+    events = doc.get("events")
+    if isinstance(events, list) and any(
+        isinstance(event, dict)
+        and event.get("kind") == "fact_core"
+        and _is_positive_int(event.get("version"))
+        for event in events
+    ):
+        return "events"
+    return None
+
+
+@dataclass(frozen=True)
+class Staleness:
+    """Whether an explanation is stale and which facts changed since (S2 spec §2.3, D6).
+
+    Attributes:
+        stale: The explanation was written from another version than the
+            current one, or F-revert's reversibility was changed outside the
+            tools since the current version was written.
+        changed_ids: The ids whose value changed, appeared or was retired after
+            the explanation's version (F-revert added on a change outside the
+            tools), without repeats, at most MAX_CHANGED_IDS.
+        changed_ids_truncated: ``previous_values`` was longer than
+            SCAN_PREVIOUS_VALUES, so ids beyond the scan may be missing.
+    """
+
+    stale: bool
+    changed_ids: list[str] = field(default_factory=list)
+    changed_ids_truncated: bool = False
+
+
+def explanation_staleness(fact_core: object, written_from: int) -> Staleness:
+    """Decide whether an explanation written from ``written_from`` is stale; pure.
+
+    Only the fact core section decides it, never the events (moving events
+    out by hand changes nothing)::
+
+        changed_ids = {item.id | item.since > written_from}
+                    ∪ {pv.id | pv.last_version >= written_from}
+
+    ``previous_values`` is read up to SCAN_PREVIOUS_VALUES entries, past the
+    view's display cap, because retired ids alone can number more than that
+    cap. An item whose ``since`` is not an int from 1 to the current version
+    counts as changed in the current version.
+
+    Args:
+        fact_core: The lineage's ``fact_core`` value, as loaded. One readers
+            cannot show counts as version 0.
+        written_from: The explanation's ``fact_core_version``.
+
+    Returns:
+        The staleness and the changed ids.
+    """
+    readable = _readable_fact_core(fact_core)
+    if readable is None:
+        return Staleness(stale=written_from != 0)
+    current: int = readable["version"]
+    items, _ = _readable_items(readable["items"])
+    ids: dict[str, None] = {}
+    for item in items:
+        since = item.get("since")
+        if not _is_positive_int(since) or since > current:
+            since = current
+        if since > written_from:
+            ids[item["id"]] = None
+    truncated = False
+    previous = readable.get("previous_values")
+    if isinstance(previous, list):
+        truncated = len(previous) > SCAN_PREVIOUS_VALUES
+        for element in previous[:SCAN_PREVIOUS_VALUES]:
+            if _previous_value_problem(element) is None and element["last_version"] >= written_from:
+                ids[element["id"]] = None
+    outside = _changed_outside_tools(
+        readable.get("recorded_reversibility"), _current_revert_value(readable["items"], items)
+    )
+    if outside:
+        ids["F-revert"] = None
+    return Staleness(
+        stale=written_from != current or outside,
+        changed_ids=list(ids)[:MAX_CHANGED_IDS],
+        changed_ids_truncated=truncated,
+    )
+
+
 # ─── Read view ───────────────────────────────────────
 
 
@@ -763,9 +1379,12 @@ def _empty_links() -> dict[str, list[str]]:
 class LineageView:
     """What readers show for one ADR's lineage (design §2.7, §3.2).
 
-    Built only from allow-listed fields as plain strings, so it is bounded and
-    JSON-safe whatever the file holds. ``derived`` means the lifecycle and the
-    rest were inferred from the ADR's status, not taken from a lineage.
+    Built only from allow-listed fields as plain strings, ints and lists of
+    them, so it is bounded and JSON-safe whatever the file holds. ``derived``
+    means the lifecycle and the rest were inferred from the ADR's status, not
+    taken from a lineage. The S2 fields are filled only by a view built with
+    ``include_s2=True`` (``s2``); the attributes after ``s2`` are for the
+    notices of :func:`fact_core_notices` and are not part of :meth:`as_dict`.
     """
 
     decision_id: str
@@ -786,6 +1405,12 @@ class LineageView:
     projected_status: str | None = None
     status_mismatch: bool = False
     redactions: int = 0
+    fact_core: dict | None = None
+    adopted_fact_core_version: int | None = None
+    s2: bool = False
+    fact_core_adoption: str | None = None
+    # (recorded, current) reversibility labels when they disagree.
+    reversibility_change: tuple[str, str] | None = None
 
     @property
     def note_codes(self) -> set[str]:
@@ -793,8 +1418,8 @@ class LineageView:
         return {entry["code"] for entry in self.notes}
 
     def as_dict(self) -> dict:
-        """The ``lineage`` object of a read response."""
-        return {
+        """The ``lineage`` object of a read response (S2 keys only when ``s2``)."""
+        out = {
             "derived": self.derived,
             "schema": self.schema,
             "lifecycle": self.lifecycle,
@@ -803,11 +1428,24 @@ class LineageView:
             "declared_later": list(self.declared_later),
             "not_recorded": list(self.not_recorded),
             "links": {key: list(value) for key, value in self.links.items()},
-            "events": [dict(event) for event in self.events],
+            "events": [_plain_copy(event) for event in self.events],
             "events_total": self.events_total,
             "unknown_keys": list(self.unknown_keys),
             "notes": [dict(entry) for entry in self.notes],
         }
+        if self.s2:
+            out["fact_core"] = _plain_copy(self.fact_core)
+            out["adopted_fact_core_version"] = self.adopted_fact_core_version
+        return out
+
+
+def _plain_copy(value: object) -> object:
+    """A copy of a view value: dicts and lists are copied, scalars shared."""
+    if isinstance(value, dict):
+        return {key: _plain_copy(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_plain_copy(item) for item in value]
+    return value
 
 
 def _not_recorded(recorded_at: str | None, declared: Mapping[str, str]) -> list[str]:
@@ -832,6 +1470,32 @@ def _key_names(keys: Iterable[object], limit: int, notes: _ViewNotes) -> list[st
         text, _ = notes.text(str(key), MAX_LABEL_CHARS)
         names.append(text)
     return names
+
+
+class _UnknownNames:
+    """Names of unknown keys inside the fact core, under one cap for the section.
+
+    Unknown keys inside an S2 section are shown by name only (S2 spec §2.6).
+    The fact core's items are never cut to fit a get's budget (S2 spec §3.6),
+    so the section, its items and its previous values share MAX_UNKNOWN_FIELDS
+    names; names past the cap are counted as skipped.
+    """
+
+    def __init__(self, notes: _ViewNotes) -> None:
+        self.left = MAX_UNKNOWN_FIELDS
+        self.notes = notes
+
+    def add(self, out: dict, entry: dict, known: frozenset[str]) -> None:
+        """Put ``unknown_fields`` on ``out`` when ``entry`` has keys outside ``known``."""
+        extra = [key for key in entry if key not in known]
+        if not extra:
+            return
+        names = _key_names(extra, self.left, self.notes)
+        self.left -= len(names)
+        if len(extra) > len(names):
+            self.notes.skipped(len(extra) - len(names))
+        if names:
+            out["unknown_fields"] = names
 
 
 def _view_time(value: object, notes: _ViewNotes) -> tuple[str | None, bool]:
@@ -890,8 +1554,33 @@ def _view_links(raw: object, notes: _ViewNotes) -> dict[str, list[str]]:
     return links
 
 
+def _view_id_list(
+    value: object, pattern: re.Pattern[str], limit: int, notes: _ViewNotes
+) -> list[str] | None:
+    """A list of ids for a view: only strings matching ``pattern``, at most ``limit``.
+
+    Entries past ``limit`` are counted as skipped without being read, so a list
+    inflated through YAML aliases costs no more than the cap.
+
+    Returns:
+        The ids, or ``None`` when ``value`` is not a list (counted as skipped).
+    """
+    if not isinstance(value, list):
+        notes.skipped()
+        return None
+    ids: list[str] = []
+    for item in value[:limit]:
+        if isinstance(item, str) and pattern.fullmatch(item) is not None:
+            ids.append(item)
+        else:
+            notes.skipped()
+    if len(value) > limit:
+        notes.skipped(len(value) - limit)
+    return ids
+
+
 def _view_event(event: dict, notes: _ViewNotes) -> dict:
-    """One event through the per-kind allow-list (design §2.4)."""
+    """One event through the per-kind allow-list (design §2.4, S2 spec §2.5)."""
     out: dict[str, object] = {}
     truncated = False
     out["at"], cut = _view_time(event.get("at"), notes)
@@ -914,6 +1603,22 @@ def _view_event(event: dict, notes: _ViewNotes) -> dict:
         if name not in event:
             continue
         value = event[name]
+        if name in _EVENT_INT_FIELDS or name in _EVENT_POSITIVE_INT_FIELDS:
+            if (
+                isinstance(value, int)
+                and not isinstance(value, bool)
+                and (name in _EVENT_INT_FIELDS or value >= 1)
+            ):
+                out[name] = value
+            else:
+                notes.skipped()
+            continue
+        pattern = _EVENT_ID_LIST_FIELDS.get(name)
+        if pattern is not None:
+            ids = _view_id_list(value, pattern, MAX_CHANGED_IDS, notes)
+            if ids is not None:
+                out[name] = ids
+            continue
         if not isinstance(value, str):
             notes.skipped()
             continue
@@ -955,6 +1660,181 @@ def _view_events(raw: object, notes: _ViewNotes) -> tuple[list[dict], int, list[
     return shown, len(raw), declared_later
 
 
+def _drop_versions_above(events: list[dict], fact_core: dict | None, notes: _ViewNotes) -> None:
+    """Remove a shown ``fact_core_version`` above the current version (S2 spec §2.7).
+
+    Such a value is not shown, as ``adopted_fact_core_version`` is not, and is
+    counted as skipped. Without a readable fact core every value is kept (a
+    fact core removed by hand leaves the adoption fixed, S2 spec §2.2).
+
+    Args:
+        events: The shown events, changed in place.
+        fact_core: The readable fact core, or ``None``.
+        notes: Where the dropped values are counted.
+    """
+    if fact_core is None:
+        return
+    for event in events:
+        value = event.get("fact_core_version")
+        if isinstance(value, int) and value > fact_core["version"]:
+            del event["fact_core_version"]
+            notes.skipped()
+
+
+def _view_fact_fields(entry: dict, notes: _ViewNotes) -> tuple[str, dict[str, str], bool]:
+    """An item's source and, for its kind, its confidence or reversibility, redacted.
+
+    A missing source is the documented default, proposal (S2 spec §2.9).
+    Confidence is shown on F-uncertain and reversibility on F-revert only, the
+    way the writer copies them; values outside a vocabulary are shown as they
+    are, redacted.
+
+    Returns:
+        (source, ``{"confidence" | "reversibility": value}``, whether any was cut).
+    """
+    source, cut = notes.text(entry.get("source", SOURCE_PROPOSAL), MAX_LABEL_CHARS)
+    extra: dict[str, str] = {}
+    for name, owner in (("confidence", "F-uncertain"), ("reversibility", "F-revert")):
+        if entry["id"] == owner and name in entry:
+            extra[name], clipped = notes.text(entry[name], MAX_LABEL_CHARS)
+            cut |= clipped
+    return source, extra, cut
+
+
+def _view_fact_items(items: list[dict], notes: _ViewNotes, names: _UnknownNames) -> list[dict]:
+    """The usable items, their text cut to MAX_FACT_TEXT_CHARS and in total to MAX_FACT_CORE_CHARS.
+
+    The writer's total limit is applied here too, so a hand-written file of
+    MAX_FACT_ITEMS long items cannot inflate a response; an item cut by the
+    total is marked ``truncated`` and counted as skipped (S2 spec §2.6).
+    """
+    shown: list[dict] = []
+    budget = MAX_FACT_CORE_CHARS
+    for item in items:
+        text, cut = notes.text(item["text"], MAX_FACT_TEXT_CHARS)
+        if len(text) > budget:
+            text = text[:budget]
+            cut = True
+            notes.skipped()
+        budget -= len(text)
+        source, extra, clipped = _view_fact_fields(item, notes)
+        since = item.get("since")
+        out: dict[str, object] = {
+            "id": item["id"],
+            "text": text,
+            "source": source,
+            "since": since if _is_positive_int(since) else None,
+            **extra,
+        }
+        names.add(out, item, _FACT_ITEM_KEYS)
+        if cut or clipped:
+            out["truncated"] = True
+        shown.append(out)
+    return shown
+
+
+def _view_previous_values(
+    raw: object, notes: _ViewNotes, names: _UnknownNames
+) -> tuple[list[dict], int]:
+    """The latest previous value of each id, newest first, and the list's length.
+
+    The latest is the entry with the highest ``last_version``; on a tie, the
+    later one in the file (an absorbed change outside the tools comes before
+    the change made in the same version, S2 spec §2.2). Up to
+    SCAN_PREVIOUS_VALUES entries are read, and VIEW_PREVIOUS_VALUES ids shown.
+    """
+    if raw is None:
+        return [], 0
+    if not isinstance(raw, list):
+        notes.skipped()
+        return [], 0
+    latest: dict[str, tuple[int, int, dict]] = {}
+    for position, element in enumerate(raw[:SCAN_PREVIOUS_VALUES]):
+        if _previous_value_problem(element) is not None:
+            notes.skipped()
+            continue
+        rank = (element["last_version"], position)
+        known = latest.get(element["id"])
+        if known is None or rank > known[:2]:
+            latest[element["id"]] = (*rank, element)
+    if len(raw) > SCAN_PREVIOUS_VALUES:
+        notes.skipped(len(raw) - SCAN_PREVIOUS_VALUES)
+    ordered = sorted(latest.values(), key=lambda found: found[:2], reverse=True)
+    if len(ordered) > VIEW_PREVIOUS_VALUES:
+        notes.skipped(len(ordered) - VIEW_PREVIOUS_VALUES)
+    shown: list[dict] = []
+    for last_version, _, element in ordered[:VIEW_PREVIOUS_VALUES]:
+        text, cut = notes.text(element["text"], PREVIOUS_TEXT_CHARS)
+        source, extra, clipped = _view_fact_fields(element, notes)
+        out: dict[str, object] = {
+            "id": element["id"],
+            "last_version": last_version,
+            "text": text,
+            "source": source,
+            **extra,
+        }
+        names.add(out, element, _PREVIOUS_VALUE_KEYS)
+        if cut or clipped:
+            out["truncated"] = True
+        shown.append(out)
+    return shown, len(raw)
+
+
+def _view_fact_core(raw: object, notes: _ViewNotes) -> tuple[dict | None, tuple[str, str] | None]:
+    """The ``fact_core`` of an S2 view (S2 spec §2.6, §2.7).
+
+    Keys this version does not know, on the section, an item or a shown
+    previous value, are named in that level's ``unknown_fields`` (never their
+    values), so a reader can tell the file holds more than is shown.
+
+    Returns:
+        The fact core (``None`` when there is none, or when it is not a
+        mapping with an int ``version`` of 1 or more and a list of ``items``,
+        which is counted as skipped), and the ``(recorded, current)``
+        reversibility labels when F-revert's value differs from what a tool
+        last recorded.
+    """
+    if raw is None:
+        return None, None
+    readable = _readable_fact_core(raw)
+    if readable is None:
+        notes.skipped()
+        return None, None
+    items, skipped = _readable_items(readable["items"])
+    if skipped:
+        notes.skipped(skipped)
+    retired_raw = readable.get("retired_ids")
+    retired: list[str] = []
+    retired_total = 0
+    if retired_raw is not None:
+        retired = _view_id_list(retired_raw, FACT_ID_RE, VIEW_RETIRED_IDS, notes) or []
+        retired_total = len(retired_raw) if isinstance(retired_raw, list) else 0
+    names = _UnknownNames(notes)
+    section_names: dict[str, list[str]] = {}
+    names.add(section_names, readable, _FACT_CORE_KEYS)
+    shown_items = _view_fact_items(items, notes, names)
+    previous, previous_total = _view_previous_values(readable.get("previous_values"), notes, names)
+    recorded = readable.get("recorded_reversibility")
+    current = _current_revert_value(readable["items"], items)
+    outside = _changed_outside_tools(recorded, current)
+    view = {
+        "version": readable["version"],
+        "items": shown_items,
+        "items_total": len(readable["items"]),
+        "retired_ids": retired,
+        "retired_ids_total": retired_total,
+        "previous_values": previous,
+        "previous_values_total": previous_total,
+        "recorded_reversibility": (
+            recorded if isinstance(recorded, str) and recorded in REVERSIBILITIES else None
+        ),
+        "reversibility_changed_outside_tools": outside,
+        **section_names,
+    }
+    change = (reversibility_label(recorded), reversibility_label(current)) if outside else None
+    return view, change
+
+
 def _attributed_doc(
     decision: Decision, raw: RawLineage, *, duplicate: bool = False
 ) -> tuple[dict | None, str | None]:
@@ -994,8 +1874,9 @@ def lineage_view(
     *,
     duplicate: bool = False,
     include_events: bool = True,
+    include_s2: bool = False,
 ) -> LineageView:
-    """Build what readers show for one ADR; pure, no I/O (design §2.7).
+    """Build what readers show for one ADR; pure, no I/O (design §2.7, S2 spec §2.6).
 
     The lineage is attributed to the ADR only when the ADR id is valid and
     unique, the file was read, it is a mapping whose ``decision_id`` names this
@@ -1012,6 +1893,10 @@ def lineage_view(
             unknown top-level keys are then left empty, so their text is
             neither redacted nor cut. Everything else is the same as with
             True.
+        include_s2: True for a reader that shows the S2 sections (a get):
+            ``fact_core`` and ``adopted_fact_core_version`` are then built,
+            with the list caps of S2 spec §2.6 (both ``None`` for a derived
+            view). A list row and the draft guard leave it False.
 
     Returns:
         The view; its notes carry codes and counts only.
@@ -1032,6 +1917,7 @@ def lineage_view(
             not_recorded=_not_recorded(None, declared),
             notes=notes.as_list(),
             redactions=notes.redactions,
+            s2=include_s2,
         )
 
     doc, why_not = _attributed_doc(decision, raw, duplicate=duplicate)
@@ -1078,9 +1964,20 @@ def lineage_view(
     unknown_keys: list[str] = []
     if include_events:
         events, events_total, declared_later = _view_events(doc.get("events"), notes)
+        _drop_versions_above(events, _readable_fact_core(doc.get("fact_core")), notes)
         unknown_keys = _key_names(
             (key for key in doc if key not in _KNOWN_TOP_LEVEL), MAX_UNKNOWN_KEYS, notes
         )
+
+    fact_core: dict | None = None
+    revert_change: tuple[str, str] | None = None
+    adopted: int | None = None
+    adoption: str | None = None
+    if include_s2:
+        fact_core, revert_change = _view_fact_core(doc.get("fact_core"), notes)
+        adopted, malformed, adoption = adopted_fact_core_version(doc)
+        if malformed:
+            notes.skipped()
 
     projected: str | None = None
     mismatch = False
@@ -1107,7 +2004,89 @@ def lineage_view(
         projected_status=projected,
         status_mismatch=mismatch,
         redactions=notes.redactions,
+        fact_core=fact_core,
+        adopted_fact_core_version=adopted,
+        s2=include_s2,
+        fact_core_adoption=adoption,
+        reversibility_change=revert_change,
     )
+
+
+def fact_core_notices(view: LineageView) -> list[dict]:
+    """The info notices a reader of an S2 view adds for its fact core (S2 spec §2.6).
+
+    ``decision_reversibility_changed_outside_tools`` when F-revert's value
+    differs from what a tool last recorded, ``decision_fact_core_written_after_adoption``
+    for facts the adoption did not fix on an ADR that went through one (or may
+    have), and ``decision_fact_core_changed_since_adoption`` when the fixed
+    version is not the current one. Values are named by vocabulary only.
+
+    Args:
+        view: A view built with ``include_s2=True``.
+
+    Returns:
+        Warning entries in the shape of ``server._build_warning``.
+    """
+    if not view.s2 or view.derived:
+        return []
+    adr = view.decision_id
+    out: list[dict] = []
+    if view.reversibility_change is not None:
+        recorded, current = view.reversibility_change
+        if current == REVERSIBILITY_UNREADABLE:
+            remediation = (
+                "Tell the user. Until the user fixes the one reversibility line of F-revert in "
+                f"{_path_of(adr)} with code_revertable, external_irreversible or unknown, the "
+                "fact core cannot be written. Do not edit the lineage file yourself."
+            )
+        else:
+            remediation = (
+                "Tell the user. The next fact core revision with pm_update_decision records "
+                "the change in a new version."
+            )
+        out.append(
+            notice(
+                "info",
+                REVERSIBILITY_CHANGED_OUTSIDE_TOOLS,
+                f"{adr}: F-revert's reversibility was changed outside pmlens's tools "
+                f"(recorded {recorded}, now {current}). Explanations of the current version "
+                "are shown as stale, and the floor follows the value now in the file.",
+                remediation,
+            )
+        )
+    current_version = view.fact_core["version"] if view.fact_core is not None else 0
+    if (
+        view.fact_core is not None
+        and view.adopted_fact_core_version is None
+        and view.fact_core_adoption in (ADOPTION_ADOPTED, ADOPTION_UNKNOWN)
+    ):
+        if view.fact_core_adoption == ADOPTION_ADOPTED:
+            message = (
+                f"{adr}: its fact core was written after the ADR was adopted, so it is not "
+                "what the user accepted."
+            )
+        else:
+            message = (
+                f"{adr}: whether this ADR was ever adopted is not known from its record (its "
+                "lineage was started from its status); its fact core is not what the user "
+                "accepted."
+            )
+        out.append(notice("info", FACT_CORE_WRITTEN_AFTER_ADOPTION, message))
+    if (
+        view.adopted_fact_core_version is not None
+        and view.adopted_fact_core_version != current_version
+    ):
+        out.append(
+            notice(
+                "info",
+                FACT_CORE_CHANGED_SINCE_ADOPTION,
+                f"{adr}: the user adopted version {view.adopted_fact_core_version} of the fact "
+                f"core, but the file now holds version {current_version}; it was changed by "
+                "hand after the adoption.",
+                "Tell the user.",
+            )
+        )
+    return out
 
 
 def effective_lifecycle(
@@ -1445,9 +2424,12 @@ def write_refusal(doc: object, decision: Decision) -> tuple[str, str] | None:
 
 @dataclass(frozen=True)
 class LineageChange:
-    """One pm_update_decision call's requested changes (design §4.3).
+    """One pm_update_decision call's requested changes (design §4.3, S2 spec §3.1).
 
     ``None`` (or an empty string for the texts) means "not requested".
+    ``fact_core`` is the whole new list of facts (``{id or kind, text,
+    confidence?, reversibility?}``) and goes with ``expected_fact_core_version``
+    (0 for the first version), ``reason`` and nothing else.
     """
 
     lifecycle: str | None = None
@@ -1459,6 +2441,8 @@ class LineageChange:
     note: str | None = None
     origin: str | None = None
     recorded_timing: str | None = None
+    fact_core: Sequence[Mapping[str, object]] | None = None
+    expected_fact_core_version: int | None = None
     via: str = "pm_update_decision"
 
 
@@ -1481,6 +2465,10 @@ class ChangeOutcome:
             only for what changed.
         notices: Warning entries (server._build_warning shape).
         added_links: ``{link_type: [ids]}`` actually added by this call.
+        fact_core: ``{"version", "ids"}`` of the fact core after a call that
+            passed ``fact_core`` (``unchanged`` included), so the caller learns
+            the numbers it was given; ``None`` for any other call. Its
+            ``changes`` then hold ``fact_core`` (S2 spec §3.1).
     """
 
     error: dict | None = None
@@ -1494,6 +2482,7 @@ class ChangeOutcome:
     changes: dict = field(default_factory=dict)
     notices: list[dict] = field(default_factory=list)
     added_links: dict[str, list[str]] = field(default_factory=dict)
+    fact_core: dict | None = None
 
 
 def _given(text: str | None) -> bool:
@@ -1536,12 +2525,143 @@ def _link_argument_error(argument: str, value: object) -> dict | None:
     return None
 
 
+def _fact_item_argument_error(index: int, item: object, seen: set[str]) -> dict | None:
+    """Check one item of the fact_core argument by its shape alone (S2 spec §2.2).
+
+    Args:
+        index: The item's 0-based position (returned as ``item_index``).
+        item: The item as passed.
+        seen: The ids of the earlier items; this item's id is added when known
+            from the argument (a given id, or the kind of a single item).
+    """
+
+    def invalid(message: str, code: str = "invalid_fact_core") -> dict:
+        return _error(code, f"fact_core item {index}: {message}", item_index=index)
+
+    if not isinstance(item, Mapping):
+        return invalid("must be a mapping {id or kind, text}")
+    if any(key not in FACT_INPUT_KEYS for key in item):
+        # Key names are not echoed: they are the caller's text.
+        return invalid(
+            "takes only id, kind, text, confidence and reversibility; pmlens sets "
+            "source and since itself"
+        )
+    fact_id = item.get("id")
+    kind = item.get("kind")
+    if fact_id is not None and not is_fact_id(fact_id):
+        return invalid(
+            "id must be one of F-what, F-change, F-revert, F-weak, F-uncertain or "
+            "F-alt.N / F-conditions.N / F-premise.N (N from 1 to 99)",
+            "invalid_fact_core_id",
+        )
+    if kind is not None and (not isinstance(kind, str) or kind not in FACT_KINDS):
+        return invalid(f"kind must be one of: {', '.join(FACT_KINDS)}")
+    if fact_id is None and kind is None:
+        return invalid("needs its id, or only its kind for a new numbered item")
+    if fact_id is not None and kind is not None and fact_kind(fact_id) != kind:
+        return invalid("id and kind name different kinds")
+    item_kind = fact_kind(fact_id) if fact_id is not None else kind
+    text = item.get("text")
+    if not isinstance(text, str) or not text.strip():
+        return invalid("text must be a non-empty string")
+    if len(text) > MAX_FACT_TEXT_CHARS:
+        return _error(
+            "text_too_long",
+            f"fact_core item {index}: text is longer than {MAX_FACT_TEXT_CHARS} characters",
+            field="fact_core",
+            item_index=index,
+        )
+    for name, owner, vocabulary in (
+        ("confidence", "uncertain", CONFIDENCES),
+        ("reversibility", "revert", REVERSIBILITIES),
+    ):
+        value = item.get(name)
+        if item_kind == owner:
+            if not isinstance(value, str) or value not in vocabulary:
+                return invalid(f"F-{owner} needs {name}, one of: {', '.join(vocabulary)}")
+        elif value is not None:
+            return invalid(f"{name} goes on F-{owner} only")
+    known_id = fact_id
+    if known_id is None and kind in FACT_SINGLE_KINDS:
+        known_id = f"F-{kind}"
+    if known_id is not None:
+        if known_id in seen:
+            return _error(
+                "fact_core_id_duplicate",
+                f"fact_core item {index}: {known_id} is already in the list",
+                item_index=index,
+            )
+        seen.add(known_id)
+    return None
+
+
+def _fact_core_argument_error(change: LineageChange) -> dict | None:
+    """Argument-only checks of a fact_core call (S2 spec §3.1 step 1)."""
+    if change.fact_core is None:
+        if change.expected_fact_core_version is not None:
+            return _error(
+                "invalid_fact_core_version",
+                "expected_fact_core_version is passed only with fact_core",
+            )
+        return None
+    combined = [
+        name
+        for name, value in (
+            ("lifecycle", change.lifecycle),
+            ("add_links", change.add_links),
+            ("remove_links", change.remove_links),
+            ("evaluation", change.evaluation),
+            ("note", change.note),
+            ("origin", change.origin),
+            ("recorded_timing", change.recorded_timing),
+        )
+        if value is not None
+    ]
+    if combined:
+        return _error(
+            "fact_core_not_combinable",
+            f"fact_core cannot be combined with {', '.join(combined)}: revise the facts in one "
+            "call, and adopt in another after the user has read an explanation of the "
+            "current version",
+        )
+    expected = change.expected_fact_core_version
+    if expected is None:
+        return _error(
+            "fact_core_version_required",
+            "expected_fact_core_version is required with fact_core (0 for the first version)",
+        )
+    if not isinstance(expected, int) or isinstance(expected, bool) or expected < 0:
+        return _error(
+            "invalid_fact_core_version",
+            "expected_fact_core_version must be a whole number of 0 or more",
+        )
+    items = change.fact_core
+    if isinstance(items, (str, bytes, Mapping)) or not isinstance(items, Sequence):
+        return _error("invalid_fact_core", "fact_core must be a list of {id or kind, text} items")
+    if len(items) > MAX_FACT_ITEMS:
+        return _error("fact_core_too_large", f"fact_core may hold at most {MAX_FACT_ITEMS} items")
+    seen: set[str] = set()
+    for index, item in enumerate(items):
+        problem = _fact_item_argument_error(index, item, seen)
+        if problem is not None:
+            return problem
+    if sum(len(item["text"]) for item in items) > MAX_FACT_CORE_CHARS:
+        return _error(
+            "fact_core_too_large",
+            f"the texts of fact_core may hold at most {MAX_FACT_CORE_CHARS} characters in all",
+        )
+    return None
+
+
 def validate_change(change: LineageChange) -> dict | None:
     """Argument-only checks for a lineage change (no file state needed).
 
     Returns:
         An error dict, or ``None`` when the arguments are acceptable.
     """
+    problem = _fact_core_argument_error(change)
+    if problem is not None:
+        return problem
     if change.lifecycle is not None and not is_known_lifecycle(change.lifecycle):
         return _error("invalid_lifecycle", f"lifecycle must be one of: {', '.join(LIFECYCLES)}")
     kinds = [item.value for item in EvaluationKind]
@@ -1578,7 +2698,11 @@ def validate_change(change: LineageChange) -> dict | None:
         ("evaluation", change.evaluation),
     ):
         if text is not None and len(text) > MAX_TEXT_CHARS:
-            return _error("text_too_long", f"{name} is longer than {MAX_TEXT_CHARS} characters")
+            return _error(
+                "text_too_long",
+                f"{name} is longer than {MAX_TEXT_CHARS} characters",
+                field=name,  # S2 spec §4: the S1 code with ``field``
+            )
     needs_reason = (
         (any(change.remove_links.values()) if change.remove_links else False)
         or change.origin is not None
@@ -1588,6 +2712,7 @@ def validate_change(change: LineageChange) -> dict | None:
         return _error(
             "reason_required",
             "reason is required to remove links or to fill in a declared value",
+            field="reason",  # S2 spec §4: the S1 code with ``field``
         )
     return None
 
@@ -1597,21 +2722,23 @@ def _dedupe(items: Iterable[str]) -> list[str]:
     return list(dict.fromkeys(items))
 
 
-def appends_text(change: LineageChange) -> bool:
-    """Whether ``change`` appends a note or an evaluation.
+def appends(change: LineageChange) -> bool:
+    """Whether ``change`` adds a note, an evaluation or a fact core version.
 
-    Those are the events a caller can add without limit, so they stop at
-    MAX_APPEND_BYTES (:func:`size_refusal`).
+    Those are what a caller can add without limit, so they stop at
+    MAX_APPEND_BYTES (:func:`size_refusal`); S2's lineage-only writers do too
+    (S2 spec §2.8, §5.2).
     """
-    return _given(change.note) or _given(change.evaluation)
+    return _given(change.note) or _given(change.evaluation) or change.fact_core is not None
 
 
-def size_refusal(decision_id: str, size: int | None, change: LineageChange) -> dict | None:
+def size_refusal(decision_id: str, size: int | None, appends: bool) -> dict | None:
     """The ``decision_lineage_too_large`` error for a rewritten lineage, or ``None``.
 
     Every change must leave the file within MAX_LINEAGE_BYTES (what readers
-    accept). A change that appends a note or an evaluation must also leave it
-    within MAX_APPEND_BYTES, so the last LINEAGE_RESERVE_BYTES stay free for
+    accept). A write that appends (a note, an evaluation, a fact core version:
+    :func:`appends`) must also leave it within MAX_APPEND_BYTES, so the last
+    LINEAGE_RESERVE_BYTES stay free for
     lifecycle, link and declared changes: a lineage filled with notes can
     still be adopted, rejected or superseded (design §2.6). That room is not
     guaranteed, since repeated link and lifecycle changes use it too, and the
@@ -1619,9 +2746,10 @@ def size_refusal(decision_id: str, size: int | None, change: LineageChange) -> d
 
     Args:
         decision_id: The ADR id.
-        size: The new text's size in UTF-8 bytes; ``None`` when the capped
-            dump gave up because it exceeds MAX_LINEAGE_BYTES.
-        change: The change that produced it.
+        size: The new text's size in bytes as written (``storage.written_size``:
+            UTF-8, with the platform's newlines, S2 spec §2.8); ``None`` when
+            the capped dump gave up because it exceeds MAX_LINEAGE_BYTES.
+        appends: Whether the write appends (:func:`appends` for a change).
 
     Returns:
         The error dict (with a remediation), or ``None`` when the size is fine.
@@ -1629,7 +2757,8 @@ def size_refusal(decision_id: str, size: int | None, change: LineageChange) -> d
     path = f".pm/{LINEAGE_DIR}/{decision_id}.yaml"
     trim = (
         f"move older note and evaluation events out of {path} by hand (for example into a "
-        f"file outside .pm/{LINEAGE_DIR}), keeping its lifecycle, link and declared events"
+        f"file outside .pm/{LINEAGE_DIR}), keeping its lifecycle, link, declared and "
+        "fact_core events"
     )
     if size is None or size > MAX_LINEAGE_BYTES:
         return _error(
@@ -1642,42 +2771,50 @@ def size_refusal(decision_id: str, size: int | None, change: LineageChange) -> d
                 "is written out in full at every repeat; replace such repeats by hand."
             ),
         )
-    if appends_text(change) and size > MAX_APPEND_BYTES:
+    if appends and size > MAX_APPEND_BYTES:
         return _error(
             LINEAGE_TOO_LARGE,
-            f"{decision_id}: notes and evaluations are not added once the lineage would pass "
+            f"{decision_id}: notes, evaluations and fact core versions are not added once the "
+            "lineage would pass "
             f"{MAX_APPEND_BYTES} bytes, so that room is kept for lifecycle and link changes; "
             "nothing was written",
             remediation=(
                 "Lifecycle, link and declared changes usually still fit: make them in a call "
-                "without note and evaluation. Repeated link and lifecycle changes use up that "
-                "room too, so one of them can be refused as well; then shorten its reason. To "
-                f"add more notes or evaluations, or when even a short reason does not fit, {trim}."
+                "without note and evaluation, and without fact_core. Repeated link and "
+                "lifecycle changes use up that room too, so one of them can be refused as "
+                "well; then shorten its reason. A note, an evaluation or a fact core revision "
+                "refused here is written only after the file is trimmed: to add more notes or "
+                "evaluations, a new fact core version, or when even a short reason does not "
+                f"fit, {trim}, then make the call again."
             ),
         )
     return None
 
 
 def _keep_one_reason(events: list[dict]) -> None:
-    """Keep a call's reason on the last of its lifecycle, link and declared events.
+    """Keep a call's reason on the last of its lifecycle, link, declared and fact_core events.
 
     A call has one reason. Copying it to every event let one call with 50
     links and a 4,000-character reason fill most of the size cap, so it is
     stored once (design §2.4). It goes on the last such event because readers
     show the file's last RECENT_EVENTS events: a call's events are contiguous
-    and its lifecycle, link and declared events come before its evaluation,
-    note and status_reprojected ones (the order of ``_EVENT_FIELDS``), so a
-    window that shows any of them also shows the one with the reason.
+    and its lifecycle, link, declared and fact_core events come before its
+    evaluation, note and status_reprojected ones (the order of
+    ``_EVENT_FIELDS``), so a window that shows any of them also shows the one
+    with the reason. A fact_core event is never combined with the others (S2
+    spec §3.1), so it always keeps its own reason (S2 spec §2.5).
 
     That event keeps ``reason`` even when the call gave none (an empty
-    string; only add_links can be called without one). Same-second calls share
+    string; only add_links and fact_core can be called without one).
+    Same-second calls share
     ``at`` and ``via``, so this is what tells them apart: a lifecycle, link or
     declared event without ``reason`` belongs to the call of the next event
     that has one.
 
     Args:
-        events: The call's new events in file order; each lifecycle, link and
-            declared event carries the reason (possibly empty) on entry.
+        events: The call's new events in file order; each lifecycle, link,
+            declared and fact_core event carries the reason (possibly empty)
+            on entry.
     """
     carriers = [event for event in events if "reason" in event]
     for event in carriers[:-1]:
@@ -1698,6 +2835,656 @@ def _with_anchor(doc: dict, decision: Decision) -> dict:
     return out
 
 
+def _with_fact_core(doc: dict, fact_core: dict) -> dict:
+    """``doc`` with ``fact_core`` set; a new key goes before the S2 sections and events.
+
+    The other keys keep their order and values (S2 spec §2.1 shows the layout).
+    """
+    if "fact_core" in doc:
+        out = dict(doc)
+        out["fact_core"] = fact_core
+        return out
+    out = {}
+    for key, value in doc.items():
+        if "fact_core" not in out and key in ("explanations", "feedback", "events"):
+            out["fact_core"] = fact_core
+        out[key] = value
+    if "fact_core" not in out:
+        out["fact_core"] = fact_core
+    return out
+
+
+def _status_mismatch_notice(
+    adr: str, status_label: str, lifecycle: str, projection: DecisionStatus
+) -> dict:
+    """``decision_status_mismatch``: a call that names no lifecycle left the status alone."""
+    return notice(
+        "warning",
+        "decision_status_mismatch",
+        f"{adr}: decisions.yaml says status={status_label}, but the lineage lifecycle "
+        f"is {lifecycle} (status {_status_text(projection)}). This "
+        "call left the status as it was.",
+        f"Ask the user which one is right. To follow the lineage, call "
+        f"pm_update_decision again with lifecycle={lifecycle}. To follow the "
+        f"status, move the lifecycle to the matching value (allowed from "
+        f"{lifecycle}: {', '.join(allowed_to(lifecycle)) or 'none'}).",
+    )
+
+
+def _explanation_entries(doc: Mapping) -> list | None:
+    """The explanation entries an adoption looks at, or ``None`` when the section is broken.
+
+    Broken as in the S2 spec §2.7 table: ``explanations`` that is not a
+    mapping or whose ``items`` is not a list, or an entry that is not a
+    mapping, has no id matching EXPLANATION_ID_RE or no ``fact_core_version``
+    of 0 or more (a bool is not one). A missing section has no entries. Only
+    the last SCAN_EXPLANATIONS entries are looked at (S2 spec §2.6).
+    """
+    part = doc.get("explanations")
+    if part is None:
+        return []
+    entries = part.get("items") if isinstance(part, dict) else None
+    if not isinstance(entries, list):
+        return None
+    scanned = entries[-SCAN_EXPLANATIONS:]
+    for entry in scanned:
+        if not isinstance(entry, dict):
+            return None
+        entry_id = entry.get("id")
+        version = entry.get("fact_core_version")
+        if not (isinstance(entry_id, str) and EXPLANATION_ID_RE.fullmatch(entry_id)):
+            return None
+        if not (isinstance(version, int) and not isinstance(version, bool) and version >= 0):
+            return None
+    return scanned
+
+
+def _adoption_record(doc: Mapping, adr: str) -> tuple[int | None, dict | None]:
+    """The fact core version an adoption records, and the info notice it carries.
+
+    Only a fact core the writer could write (:func:`fact_core_refusal` is
+    ``None``) is recorded, so the adoption fixes exactly what readers show
+    in full (S2 spec §2.2, §3.1). An ADR without a fact core gets neither: its
+    lifecycle event keeps the S1 shape. An ADR with one is adopted whatever
+    its explanations hold; the notice only says what was checked (S2 spec §3.1).
+
+    Returns:
+        ``(version, None)`` when an explanation of the current version that is
+        not stale exists; ``(version, decision_adopted_without_current_explanation)``
+        when none does; ``decision_adoption_explanation_check_skipped`` (with
+        the version, or ``None`` and "not fixed" for a fact core the writer
+        refuses) when ``fact_core`` or ``explanations`` cannot be read; and
+        ``(None, None)`` without a fact core.
+    """
+    fact_core = doc.get("fact_core")
+    if fact_core is None:
+        return None, None
+    readable = fact_core_refusal(doc) is None
+    entries = _explanation_entries(doc)
+    if not readable or entries is None:
+        broken = [
+            name
+            for name, ok in (("fact_core", readable), ("explanations", entries is not None))
+            if not ok
+        ]
+        message = (
+            f"{adr}: {' and '.join(broken)} in the lineage file cannot be read, so whether an "
+            "explanation of the fact core's current version exists was not checked."
+        )
+        if not readable:
+            message += (
+                " The adopted version was not recorded, so this ADR's fact core is not fixed."
+            )
+        return (
+            fact_core["version"] if readable else None,
+            notice(
+                "info",
+                ADOPTION_EXPLANATION_CHECK_SKIPPED,
+                message,
+                "Tell the user. The adoption itself was recorded.",
+            ),
+        )
+    current: int = fact_core["version"]
+    # Explanations of the current version are stale only through a change of
+    # F-revert outside the tools (S2 spec §2.3), so one check covers them all.
+    outside = explanation_staleness(fact_core, current).stale
+    if not outside and any(entry["fact_core_version"] == current for entry in entries):
+        return current, None
+    why = (
+        "F-revert's reversibility was changed outside pmlens's tools, so its explanations are stale"
+        if outside
+        else "no explanation written from that version is on record"
+    )
+    return current, notice(
+        "info",
+        ADOPTED_WITHOUT_CURRENT_EXPLANATION,
+        f"{adr}: it was adopted with version {current} of its fact core, but {why}; the "
+        "user adopted it without a current explanation.",
+        "Tell the user. The adoption itself was recorded; pm_decision_query action=get "
+        "shows the facts it was adopted on.",
+    )
+
+
+def _resolve_fact_ids(
+    adr: str,
+    items: Sequence[Mapping[str, object]],
+    stored: Mapping[str, dict],
+    used_ids: Iterable[object],
+    retired: set[str],
+) -> list[tuple[str, Mapping[str, object]]] | dict:
+    """Give every item of the fact_core argument its id (S2 spec §2.2).
+
+    A numbered item passed by kind alone gets the highest number its kind has
+    used (current, retired and previous ids alike) plus one; numbers are never
+    reused. A numbered id must name a current item.
+
+    Returns:
+        ``[(id, item)]`` in argument order, or an error dict
+        (``fact_core_id_unknown`` / ``fact_core_id_retired`` /
+        ``fact_core_ids_exhausted``).
+    """
+    highest = dict.fromkeys(FACT_NUMBERED_KINDS, 0)
+    for used in used_ids:
+        if is_fact_id(used):
+            number = _fact_number(used)
+            if number is not None:
+                kind = fact_kind(used)
+                highest[kind] = max(highest[kind], number)
+    resolved: list[tuple[str, Mapping[str, object]]] = []
+    for index, item in enumerate(items):
+        fact_id = item.get("id")
+        kind = item.get("kind")
+        if fact_id is None:
+            if kind in FACT_SINGLE_KINDS:
+                fact_id = f"F-{kind}"
+            else:
+                number = highest[kind] + 1
+                if number > MAX_FACT_NUMBER:
+                    return _error(
+                        "fact_core_ids_exhausted",
+                        f"{adr}: the {kind} items have used every number up to "
+                        f"{MAX_FACT_NUMBER}, retired ones included, and numbers are never "
+                        "reused",
+                        item_index=index,
+                    )
+                highest[kind] = number
+                fact_id = f"F-{kind}.{number}"
+        elif _fact_number(fact_id) is not None and fact_id not in stored:
+            if fact_id in retired:
+                return _error(
+                    "fact_core_id_retired",
+                    f"{adr}: {fact_id} was retired and its number is never used again; pass "
+                    "a new item with its kind and no id",
+                    item_index=index,
+                )
+            return _error(
+                "fact_core_id_unknown",
+                f"{adr}: {fact_id} is not in the current fact core; pass a new item with its "
+                "kind and no id",
+                item_index=index,
+            )
+        resolved.append((fact_id, item))
+    return resolved
+
+
+def _previous_value(
+    item: dict, last_version: int, cache: ScrubCache, reversibility: str | None = None
+) -> dict:
+    """A stored item as an entry of ``previous_values``, every value redacted.
+
+    Every field of that version is copied (text, source, and confidence or
+    reversibility for the item that owns it), redacted and cut as readers show
+    them. ``reversibility`` replaces the stored one (an absorbed change made
+    outside the tools records what the tool had written, S2 spec §2.2). The
+    redactions are counted by :func:`_stored_hits`, once per stored item.
+
+    Returns:
+        The entry.
+    """
+    text, _, _ = _scrub_clip(item["text"], MAX_FACT_TEXT_CHARS, cache)
+    source, _, _ = _scrub_clip(item.get("source", SOURCE_PROPOSAL), MAX_LABEL_CHARS, cache)
+    entry: dict[str, object] = {
+        "id": item["id"],
+        "last_version": last_version,
+        "text": text,
+        "source": source,
+    }
+    if item["id"] == "F-uncertain":
+        entry["confidence"], _, _ = _scrub_clip(item["confidence"], MAX_LABEL_CHARS, cache)
+    if item["id"] == "F-revert":
+        if reversibility is None:
+            entry["reversibility"], _, _ = _scrub_clip(
+                item["reversibility"], MAX_LABEL_CHARS, cache
+            )
+        else:
+            entry["reversibility"] = reversibility
+    return entry
+
+
+def _stored_hits(item: dict, cache: ScrubCache) -> int:
+    """How many redactions a stored item's values hold (S2 spec §3.1 step 7).
+
+    Text, source, confidence and reversibility are each counted, whichever
+    of them the item has; a usable item holds strings only (S2 spec §2.7).
+    """
+    return sum(
+        cache.scrub(item[name])[1]
+        for name in ("text", "source", "confidence", "reversibility")
+        if isinstance(item.get(name), str)
+    )
+
+
+def _stored_differs(stored: dict, new: dict, cache: ScrubCache) -> bool:
+    """Whether a new item's values differ from the stored item's, compared redacted.
+
+    The stored text (and confidence or reversibility of the item that owns
+    one) is redacted before the comparison: readers only ever show the
+    redacted value, so handing back what was read is no change (S2 spec §2.2).
+    ``source`` is never compared.
+    """
+    if cache.scrub(stored["text"])[0] != new["text"]:
+        return True
+    for name in ("confidence", "reversibility"):
+        if name in new and cache.scrub(stored[name])[0] != new[name]:
+            return True
+    return False
+
+
+def _has_feedback(doc: Mapping) -> bool:
+    """Whether the lineage holds a feedback entry (read leniently)."""
+    part = doc.get("feedback")
+    entries = part.get("items") if isinstance(part, dict) else None
+    return isinstance(entries, list) and any(isinstance(entry, dict) for entry in entries)
+
+
+def _apply_fact_core(
+    doc: dict, decision: Decision, change: LineageChange, now: str, *, started: bool
+) -> ChangeOutcome:
+    """Create or revise an ADR's fact core; pure, no I/O (S2 spec §2.2, §3.1).
+
+    ``doc`` passed :func:`write_refusal` or was just started. Refusals come in
+    the order of S2 spec §3.1: what the fact core writer reads (its section
+    and the adopting event, §2.7), ``fact_core_after_adoption``, traces of a
+    removed fact core, the version (D5), numbering and required items, the
+    reversibility ratchet. A call that changes nothing is ``unchanged``,
+    unless F-revert's reversibility was changed outside the tools: that is
+    taken into a new version. The status is never projected (the lifecycle
+    does not change), and nothing of ``doc`` is changed in place: the new
+    document shares only what it does not change (copy-on-write, §2.7).
+
+    Returns:
+        The outcome; ``fact_core`` and ``changes["fact_core"]`` are set unless
+        there is an error.
+    """
+    adr = decision.id
+    lifecycle: str = doc["lifecycle"]
+    stored_links = doc.get("links") if isinstance(doc.get("links"), dict) else {}
+    links = {t: list(stored_links.get(t) or []) for t in LINK_TYPES}
+    status_label = scrub_label(decision.status)
+    notices: list[dict] = []
+    if not started:
+        projection = project_status(lifecycle, links["superseded_by"])
+        if projection != decision.status:
+            notices.append(_status_mismatch_notice(adr, status_label, lifecycle, projection))
+
+    # 2. What the fact core writer reads must be whole (S2 spec §2.7).
+    refusal = fact_core_refusal(doc)
+    if refusal is not None:
+        return ChangeOutcome(error=refusal)
+    adopted, malformed, adoption = adopted_fact_core_version(doc)
+    if malformed:
+        position = (_scan_adoption(doc)[0] or 0) + 1
+        return ChangeOutcome(
+            error=_error(
+                LINEAGE_UNREADABLE,
+                f"{adr}: fact_core_version of entry {position} of events in the lineage file "
+                "is not a whole number from 1 to the current version, so whether the fact "
+                "core is fixed cannot be told; nothing was written.",
+                remediation=(
+                    f"Tell the user. Only the user may fix or remove that value in "
+                    f"{_path_of(adr)} by hand (removing it lifts the fix). Do not edit the "
+                    "lineage file yourself."
+                ),
+            )
+        )
+    fact_core: dict | None = doc.get("fact_core")
+    current = fact_core["version"] if fact_core is not None else 0
+
+    # 3. Fixed by the adoption (Q13).
+    if _fixed_by_adoption(doc, adopted):
+        return ChangeOutcome(
+            error=_error(
+                FACT_CORE_AFTER_ADOPTION,
+                f"{adr}: the user adopted version {adopted} of its fact core, so the fact "
+                f"core is fixed while the ADR is {lifecycle}; nothing was written.",
+                adopted_fact_core_version=adopted,
+                current_version=current,
+                lifecycle=lifecycle,
+                remediation=(
+                    "Tell the user. Only if the user asks for the change, move the ADR back "
+                    "to proposed with pm_update_decision (lifecycle=proposed and a reason), "
+                    "revise the fact core, explain it again and let the user adopt it again. "
+                    "Otherwise record the change as a new ADR linked with amends."
+                ),
+            )
+        )
+
+    # 4. A fact core removed by hand is not written over (S2 spec §2.2).
+    if fact_core is None:
+        where = _fact_core_traces(doc)
+        if where is not None:
+            return ChangeOutcome(
+                error=_error(
+                    LINEAGE_UNREADABLE,
+                    f"{adr}: the lineage file has no fact_core, but its {where} refer to a "
+                    "fact core version: fact_core was removed by hand, and a first version "
+                    "is not written over that; nothing was written.",
+                    remediation=(
+                        f"Tell the user. Only the user may restore fact_core in "
+                        f"{_path_of(adr)} (for example from version control). Do not edit "
+                        "the lineage file yourself."
+                    ),
+                )
+            )
+
+    # 5. The version (D5).
+    expected = change.expected_fact_core_version
+    if expected != current:
+        return ChangeOutcome(
+            error=_error(
+                FACT_CORE_VERSION_MISMATCH,
+                f"{adr}: the fact core is at version {current}, not {expected}; nothing "
+                "was written.",
+                current_version=current,
+                remediation=(
+                    "Read the current fact core (pm_decision_query action=get), redo the "
+                    "change on it, and pass its version as expected_fact_core_version."
+                ),
+            )
+        )
+
+    # 6. Numbering and the required items.
+    stored_items: list[dict] = list(fact_core["items"]) if fact_core is not None else []
+    stored = {item["id"]: item for item in stored_items}
+    retired_before: list = list(fact_core.get("retired_ids") or []) if fact_core else []
+    previous_before: list = list(fact_core.get("previous_values") or []) if fact_core else []
+    items = change.fact_core or ()
+    resolved = _resolve_fact_ids(
+        adr,
+        items,
+        stored,
+        [
+            *stored,
+            *retired_before,
+            *(entry["id"] for entry in previous_before),
+        ],
+        set(retired_before),
+    )
+    if isinstance(resolved, dict):
+        return ChangeOutcome(error=resolved)
+    new_ids = [fact_id for fact_id, _ in resolved]
+    # ``missing`` holds kinds, the values the argument's ``kind`` takes (S2 spec §2.2).
+    missing = [fact_kind(fact_id) for fact_id in REQUIRED_FACT_IDS if fact_id not in new_ids]
+    declared = doc.get("declared")
+    decision_kind = declared.get("decision_kind") if isinstance(declared, dict) else None
+    if decision_kind == DecisionKind.PREMISE_DEPENDENT and not any(
+        fact_kind(fact_id) == "premise" for fact_id in new_ids
+    ):
+        missing.append("premise")
+    if missing:
+        return ChangeOutcome(
+            error=_error(
+                "fact_core_item_required",
+                f"{adr}: the fact core needs an item of each kind: {', '.join(missing)}"
+                + (
+                    " (a premise_dependent ADR states at least one premise)"
+                    if "premise" in missing
+                    else ""
+                ),
+                missing=missing,
+            )
+        )
+
+    # 7. Redact, then compare redacted values (S2 spec §2.2).
+    new_version = current + 1
+    cache = ScrubCache()
+    hits = 0
+    new_items: list[dict] = []
+    added: list[str] = []
+    edited: list[str] = []
+    for fact_id, item in resolved:
+        text, found = scrub_text(str(item["text"]))
+        hits += found
+        entry: dict[str, object] = {"id": fact_id, "text": text}
+        # Plain strings: safe_dump rejects StrEnum members.
+        if fact_id == "F-uncertain":
+            entry["confidence"] = str(item["confidence"])
+        if fact_id == "F-revert":
+            entry["reversibility"] = str(item["reversibility"])
+        entry["source"] = SOURCE_PROPOSAL
+        old = stored.get(fact_id)
+        if old is None:
+            added.append(fact_id)
+            entry["since"] = new_version
+        elif _stored_differs(old, entry, cache):
+            edited.append(fact_id)
+            entry["since"] = new_version
+        else:
+            since = old.get("since")
+            entry["since"] = since if _is_positive_int(since) and since <= current else current
+        new_items.append(entry)
+    removed = [fact_id for fact_id in stored if fact_id not in new_ids]
+    new_revert = next(entry["reversibility"] for entry in new_items if entry["id"] == "F-revert")
+
+    # 8. The reversibility ratchet (Q12), whatever caused the revision.
+    if lowers_reversibility(fact_core, new_revert):
+        # The base is named from the entry the floor read, not from ``stored``,
+        # which also holds entries past the cap (S2 spec §2.2, §3.1 step 8).
+        base = _floor_revert_value(fact_core)
+        before = reversibility_label(base)
+        if base is _MISSING:
+            remediation = (
+                "Tell the user. Keep asking a person able to judge before any irreversible "
+                "effect. F-revert is not among the first "
+                f"{MAX_FACT_ITEMS} items of the fact core in {_path_of(adr)}, so the floor "
+                "does not read it; only the user may fix that file, when no assistant "
+                "session is writing. Do not edit the lineage file yourself."
+            )
+        else:
+            remediation = (
+                "Tell the user. Keep asking a person able to judge before any "
+                "irreversible effect. If such a person says it can be reverted in code, "
+                "record their words with pm_add_feedback; only the user may change the "
+                f"one reversibility line in {_path_of(adr)}, when no assistant session is "
+                "writing. Do not edit the lineage file yourself."
+            )
+        return ChangeOutcome(
+            error=_error(
+                FACT_CORE_LOWERING_REFUSED,
+                f"This tool cannot lower F-revert's reversibility from {before} to "
+                f"{CODE_REVERTABLE}; the floor that asks a person able to judge stays on.",
+                **{"from": before, "to": CODE_REVERTABLE},
+                remediation=remediation,
+            )
+        )
+
+    # 9. Unchanged, or a new version taking in a change made outside the tools.
+    recorded = fact_core.get("recorded_reversibility") if fact_core is not None else None
+    outside = fact_core is not None and _changed_outside_tools(
+        recorded, stored["F-revert"]["reversibility"]
+    )
+    summary_changes = {
+        "from_version": current,
+        "to_version": current,
+        "changed_ids": [],
+        "added_ids": [],
+        "retired_ids": [],
+    }
+    outcome = ChangeOutcome(
+        status_before=status_label,
+        new_status=_status_text(decision.status),
+        lifecycle=lifecycle,
+        links=links,
+        notices=notices,
+        changes={"fact_core": summary_changes},
+        fact_core={"version": current, "ids": list(stored)},
+    )
+    if not (added or edited or removed or outside):
+        # Nothing is written, but the secrets removed from the items passed in
+        # still count: the caller pasted them and may need to revoke them
+        # (S2 spec §3.1 step 7). The reason is not stored, so it is not counted.
+        if hits:
+            notices.append(
+                notice(
+                    "warning",
+                    LINEAGE_SECRETS_REDACTED,
+                    f"{hits} secret-like string(s) were removed from the fact core items "
+                    "passed in; nothing was written.",
+                    "If a real credential was pasted, revoke it.",
+                )
+            )
+        return outcome
+
+    if outside:
+        for entry in new_items:
+            if entry["id"] == "F-revert":
+                entry["since"] = new_version
+    previous_added: list[dict] = []
+    for item in stored_items:
+        fact_id = item["id"]
+        # Every stored value leaves the file redacted: written again, copied
+        # to previous_values, or (a kept item's source) replaced by proposal.
+        # Each is counted once (S2 spec §3.1 step 7).
+        hits += _stored_hits(item, cache)
+        if fact_id == "F-revert" and outside and recorded in REVERSIBILITIES:
+            previous_added.append(_previous_value(item, current, cache, reversibility=recorded))
+        if fact_id in edited or fact_id in removed:
+            previous_added.append(_previous_value(item, current, cache))
+    changed_ids = [
+        entry["id"]
+        for entry in new_items
+        if entry["id"] in added or entry["id"] in edited or (outside and entry["id"] == "F-revert")
+    ] + removed
+    retired_now = [fact_id for fact_id in removed if _fact_number(fact_id) is not None]
+
+    new_fact_core = dict(fact_core) if fact_core is not None else {}
+    new_fact_core["version"] = new_version
+    new_fact_core["recorded_reversibility"] = new_revert
+    new_fact_core["items"] = new_items
+    new_fact_core["retired_ids"] = retired_before + retired_now
+    new_fact_core["previous_values"] = previous_before + previous_added
+
+    reason_text, reason_hits = scrub_text(change.reason) if _given(change.reason) else ("", 0)
+    hits += reason_hits
+    event: dict[str, object] = {
+        "at": now,
+        "kind": "fact_core",
+        "version": new_version,
+        "changed_ids": changed_ids,
+        "reason": reason_text,
+    }
+    if outside:
+        event["edited_outside_tools"] = ["F-revert"]
+    event["via"] = change.via
+    _keep_one_reason([event])
+
+    new_doc = _with_fact_core(doc, new_fact_core)
+    if doc.get("anchor") is None:
+        new_doc = _with_anchor(new_doc, decision)
+        notices.append(
+            notice(
+                "info",
+                LINEAGE_ANCHOR_MISSING,
+                f"{adr}: the lineage had no anchor; it is now tied to the ADR's current date "
+                "and title.",
+            )
+        )
+    new_doc["events"] = list(doc.get("events") or []) + [event]
+
+    if started:
+        notices.append(
+            notice(
+                "info",
+                LINEAGE_STARTED,
+                f"{adr} had no lineage; one was started from its status. When it was recorded "
+                "and who decided it are not recorded.",
+            )
+        )
+    if adopted is None and adoption != ADOPTION_NOT_ADOPTED:
+        if adoption == ADOPTION_UNKNOWN:
+            message = (
+                f"{adr}: whether this ADR was ever adopted is not known from its record (its "
+                "lineage was started from its status); the fact core just written is not "
+                "what the user accepted."
+            )
+        elif fact_core is None:
+            message = (
+                f"{adr} was adopted before it had a fact core; these facts were written by an "
+                "assistant after the adoption and are not what the user accepted."
+            )
+        else:
+            message = (
+                f"{adr} was adopted without a recorded fact core; this revision was written "
+                "after the adoption and is not what the user accepted."
+            )
+        notices.append(
+            notice(
+                "info",
+                FACT_CORE_CHANGED_AFTER_ADOPTION,
+                message,
+                "Show the user what you wrote and check it with them. To fix these facts, the "
+                "user may move the ADR back to proposed and adopt it again.",
+            )
+        )
+    if fact_core is None:
+        if new_revert == CODE_REVERTABLE and (
+            lifecycle != DecisionLifecycle.PROPOSED or _has_feedback(doc)
+        ):
+            notices.append(
+                notice(
+                    "info",
+                    REVERSIBILITY_DECLARED_AFTER_REVIEW,
+                    f"{adr}: the first fact core says F-revert is {CODE_REVERTABLE}, declared "
+                    "by an assistant after the user had seen this ADR. No floor applies to "
+                    "it, and this tool cannot lower it again once raised.",
+                    "Tell the user.",
+                )
+            )
+        if not any(fact_kind(fact_id) == "conditions" for fact_id in new_ids):
+            notices.append(
+                notice(
+                    "info",
+                    FACT_CORE_NO_CONDITIONS,
+                    f"{adr}: the first fact core has no F-conditions item.",
+                    "Record each condition the proposal or the user stated as its own "
+                    "conditions item; never invent one. Ask the user whether a condition is "
+                    "missing.",
+                )
+            )
+    if hits:
+        notices.append(
+            notice(
+                "warning",
+                LINEAGE_SECRETS_REDACTED,
+                f"{hits} secret-like string(s) were removed from the fact core before saving.",
+                "If a real credential was pasted, revoke it.",
+            )
+        )
+    summary_changes.update(
+        to_version=new_version,
+        changed_ids=changed_ids,
+        added_ids=added,
+        retired_ids=retired_now,
+    )
+    if outside:
+        summary_changes["edited_outside_tools"] = ["F-revert"]
+    outcome.changed = True
+    outcome.doc = new_doc
+    outcome.events_added = (["lineage_started"] if started else []) + ["fact_core"]
+    outcome.fact_core = {"version": new_version, "ids": new_ids}
+    return outcome
+
+
 def apply_change(
     doc: dict | None,
     decision: Decision,
@@ -1707,7 +3494,9 @@ def apply_change(
 ) -> ChangeOutcome:
     """Apply one lineage change to a loaded document; pure, no I/O (design §4.3).
 
-    Order: declared backfill, links, lifecycle, evaluation, note. Events are
+    A call with ``fact_core`` only creates or revises the fact core
+    (:func:`_apply_fact_core`, S2 spec §3.1). Otherwise the order is:
+    declared backfill, links, lifecycle, evaluation, note. Events are
     appended with one ``at`` in the order of design §2.4, and the call's reason
     is stored once, on the last lifecycle, link or declared event
     (:func:`_keep_one_reason`). The status is decided
@@ -1748,6 +3537,8 @@ def apply_change(
         if refusal is not None:
             return ChangeOutcome(error=_error(refusal[0], refusal[1]))
     anchor_missing = doc.get("anchor") is None
+    if change.fact_core is not None:
+        return _apply_fact_core(doc, decision, change, now, started=started)
 
     stored_links = doc.get("links") if isinstance(doc.get("links"), dict) else {}
     links_before = {t: list(stored_links.get(t) or []) for t in LINK_TYPES}
@@ -1865,7 +3656,9 @@ def apply_change(
             )
         if not reason_text:
             return ChangeOutcome(
-                error=_error("reason_required", "reason is required to change the lifecycle")
+                error=_error(
+                    "reason_required", "reason is required to change the lifecycle", field="reason"
+                )
             )
         lifecycle_after = target
 
@@ -1895,17 +3688,7 @@ def apply_change(
         new_status: DecisionStatus | str = status_before
         lineage_projection = project_status(lifecycle_before, links_before["superseded_by"])
         notices.append(
-            notice(
-                "warning",
-                "decision_status_mismatch",
-                f"{adr}: decisions.yaml says status={status_label}, but the lineage lifecycle "
-                f"is {lifecycle_before} (status {_status_text(lineage_projection)}). This "
-                "call left the status as it was.",
-                f"Ask the user which one is right. To follow the lineage, call "
-                f"pm_update_decision again with lifecycle={lifecycle_before}. To follow the "
-                f"status, move the lifecycle to the matching value (allowed from "
-                f"{lifecycle_before}: {', '.join(allowed_to(lifecycle_before)) or 'none'}).",
-            )
+            _status_mismatch_notice(adr, status_label, lifecycle_before, lineage_projection)
         )
     else:
         new_status = projected
@@ -1924,17 +3707,23 @@ def apply_change(
 
     if lifecycle_changed:
         changes["lifecycle"] = {"from": lifecycle_before, "to": lifecycle_after}
-        buckets["lifecycle"].append(
-            {
-                "at": now,
-                "kind": "lifecycle",
-                "from": lifecycle_before,
-                "to": lifecycle_after,
-                "status": new_status_value,
-                "reason": reason_text,
-                "via": via,
-            }
-        )
+        event: dict = {
+            "at": now,
+            "kind": "lifecycle",
+            "from": lifecycle_before,
+            "to": lifecycle_after,
+            "status": new_status_value,
+            "reason": reason_text,
+        }
+        if lifecycle_after == DecisionLifecycle.ADOPTED:
+            # An adoption fixes the fact core it was made on (Q13, S2 spec §3.1).
+            version, adoption_notice = _adoption_record(doc, adr)
+            if version is not None:
+                event["fact_core_version"] = version
+            if adoption_notice is not None:
+                notices.append(adoption_notice)
+        event["via"] = via
+        buckets["lifecycle"].append(event)
         reason_used = True
     elif status_changed:
         buckets["status_reprojected"].append(
@@ -2005,7 +3794,7 @@ def apply_change(
         notices.append(
             notice(
                 "info",
-                "decision_lineage_started",
+                LINEAGE_STARTED,
                 f"{adr} had no lineage; one was started from its status. When it was recorded "
                 "and who decided it are not recorded.",
             )
@@ -2035,7 +3824,7 @@ def apply_change(
         notices.append(
             notice(
                 "warning",
-                "decision_lineage_secrets_redacted",
+                LINEAGE_SECRETS_REDACTED,
                 f"{redactions} secret-like string(s) were removed from reason / note / "
                 "evaluation before saving.",
                 "If a real credential was pasted, revoke it.",

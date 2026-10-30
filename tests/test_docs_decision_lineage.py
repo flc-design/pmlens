@@ -70,6 +70,8 @@ _LINEAGE_ENUMS = (
     "RecordedTiming",
     "DecisionKind",
     "EvaluationKind",
+    "FactSource",
+    "Reversibility",
 )
 
 
