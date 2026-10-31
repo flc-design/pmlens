@@ -366,10 +366,14 @@ def test_content_aliases_are_absent_from_lens_wire_surface(desktop_write: bool) 
 @pytest.mark.smoke
 @pytest.mark.parametrize("desktop_write", [False, True], ids=["lens", "desktop"])
 def test_lens_wire_surface_reads_decisions_but_cannot_write_them(desktop_write: bool) -> None:
-    """Decision Lineage S1 (D9): the ADR reader is on the Lens wire, its writers are not."""
+    """Decision Lineage S1 (D9): the ADR reader is on the Lens wire, its writers are not.
+
+    S2 adds the decision posture's change tool to the writers (S2 spec §6.1 D9);
+    pm_status, which shows the posture, stays on the wire.
+    """
     tools = set(_mcp_session(lens=True, desktop_write=desktop_write).tools)
-    assert "pm_decision_query" in tools
-    assert not {"pm_add_decision", "pm_update_decision"} & tools
+    assert {"pm_decision_query", "pm_status"} <= tools
+    assert not {"pm_add_decision", "pm_update_decision", "pm_update_decision_posture"} & tools
 
 
 @pytest.mark.smoke

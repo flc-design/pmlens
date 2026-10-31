@@ -11,7 +11,9 @@ through a bounded reader (:func:`read_lineage_raw`), lists the lineage
 directory only to find links pointing at an ADR (:func:`scan_linked_from`),
 and otherwise only builds values: views for readers (:func:`lineage_view`) and
 new documents for the writers in ``storage`` (:func:`new_lineage_doc`,
-:func:`apply_change`).
+:func:`apply_change`). Its bounded reader is also the one policy.py reads
+``.pm/decision_policy.yaml`` through (:func:`read_bounded_yaml`); ``os.open``
+appears only in :func:`_read_bounded`.
 ``storage`` imports this module and owns every lock and write; this module does
 not import ``storage`` (tests/test_lineage.py pins both with an AST check).
 
@@ -657,20 +659,27 @@ def anchor_state(doc: Mapping, decision: Decision) -> str:
 
 
 class _NotRegularOrTooLargeError(Exception):
-    """The path is not a regular file of at most MAX_LINEAGE_BYTES."""
+    """The path is not a regular file of at most the reader's size limit."""
 
 
-def _read_bounded(path: Path) -> bytes:
-    """Read a regular file of at most MAX_LINEAGE_BYTES, without following links.
+def _read_bounded(path: Path, limit: int = MAX_LINEAGE_BYTES) -> bytes:
+    """Read a regular file of at most ``limit`` bytes, without following links.
 
     ``O_NOFOLLOW`` refuses a symlink and ``O_NONBLOCK`` keeps a FIFO from
     blocking the open; the checks run on the opened descriptor, so swapping the
-    path between a check and the open cannot slip past them.
+    path between a check and the open cannot slip past them. This is the one
+    ``os.open`` of the module (tests/test_lineage.py pins it); other bounded
+    readers go through :func:`read_bounded_yaml`.
+
+    Args:
+        path: The file.
+        limit: The largest size accepted, in bytes (MAX_LINEAGE_BYTES for a
+            lineage; decision_policy.yaml has its own, S2 spec §2.10).
 
     Raises:
         FileNotFoundError: The file (or its directory) does not exist.
         OSError: The file could not be opened or read (a symlink included).
-        _NotRegularOrTooLargeError: Not a regular file, or larger than the cap.
+        _NotRegularOrTooLargeError: Not a regular file, or larger than ``limit``.
     """
     flags = (
         os.O_RDONLY
@@ -685,9 +694,9 @@ def _read_bounded(path: Path) -> bytes:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode):
             raise _NotRegularOrTooLargeError("not a regular file")
-        if info.st_size > MAX_LINEAGE_BYTES:
+        if info.st_size > limit:
             raise _NotRegularOrTooLargeError("larger than the size limit")
-        remaining = MAX_LINEAGE_BYTES + 1
+        remaining = limit + 1
         while remaining > 0:
             chunk = os.read(fd, remaining)
             if not chunk:
@@ -697,7 +706,7 @@ def _read_bounded(path: Path) -> bytes:
     finally:
         os.close(fd)
     payload = b"".join(chunks)
-    if len(payload) > MAX_LINEAGE_BYTES:
+    if len(payload) > limit:
         raise _NotRegularOrTooLargeError("larger than the size limit")
     return payload
 
@@ -735,6 +744,68 @@ def _nested_deeper_than(data: object, limit: int) -> bool:
             continue  # a set's members are hashable scalars
         stack.extend((child, depth + 1) for child in reversed(list(children)))
     return False
+
+
+@dataclass(frozen=True)
+class BoundedYaml:
+    """What :func:`read_bounded_yaml` found at one path.
+
+    Attributes:
+        exists: Whether something is at the path.
+        data: The ``safe_load`` result when it could be read and parsed.
+        unreadable: Whether something is there but could not be read, parsed
+            or kept (see :func:`read_bounded_yaml`).
+        detail: A content-free reason when it is unreadable (exception type,
+            YAML line and column).
+        size: How many bytes were read (0 when nothing was read).
+    """
+
+    exists: bool
+    data: object = None
+    unreadable: bool = False
+    detail: str | None = None
+    size: int = 0
+
+
+def read_bounded_yaml(path: Path, limit: int) -> BoundedYaml:
+    """Read and parse one YAML file without locking, creating, following links or raising.
+
+    The bounded reader every ledger read outside storage goes through (the
+    lineage files and .pm/decision_policy.yaml, S2 spec §2.10): a symlink,
+    anything but a regular file, a file over ``limit`` bytes, an OS error,
+    invalid UTF-8, invalid YAML and lists or mappings nested more than
+    MAX_LINEAGE_DEPTH levels deep all come back as ``unreadable`` with a
+    reason that quotes nothing from the file (:func:`error_summary`). A FIFO
+    does not block the open.
+
+    Args:
+        path: The file; its directory is the caller's to check.
+        limit: The largest size accepted, in bytes.
+
+    Returns:
+        What was found; ``exists`` is False when nothing is at ``path``.
+    """
+    try:
+        payload = _read_bounded(path, limit)
+    except FileNotFoundError:
+        return BoundedYaml(exists=False)
+    except _NotRegularOrTooLargeError as exc:
+        return BoundedYaml(exists=True, unreadable=True, detail=str(exc))
+    except OSError as exc:
+        return BoundedYaml(exists=True, unreadable=True, detail=error_summary(exc))
+    size = len(payload)
+    try:
+        data = yaml.safe_load(payload.decode("utf-8"))
+    except Exception as exc:  # noqa: BLE001 - a read never raises; the type is reported
+        return BoundedYaml(exists=True, unreadable=True, detail=error_summary(exc), size=size)
+    if _nested_deeper_than(data, MAX_LINEAGE_DEPTH):
+        return BoundedYaml(
+            exists=True,
+            unreadable=True,
+            detail=f"nested more than {MAX_LINEAGE_DEPTH} levels deep",
+            size=size,
+        )
+    return BoundedYaml(exists=True, data=data, size=size)
 
 
 @dataclass(frozen=True)
@@ -785,36 +856,18 @@ def read_lineage_raw(pm_path: Path, decision_id: str) -> RawLineage:
         return RawLineage(
             decision_id, exists=True, error=LINEAGE_UNREADABLE, detail="symlinked directory"
         )
-    try:
-        payload = _read_bounded(directory / f"{decision_id}.yaml")
-    except FileNotFoundError:
+    found = read_bounded_yaml(directory / f"{decision_id}.yaml", MAX_LINEAGE_BYTES)
+    if not found.exists:
         return RawLineage(decision_id, exists=False)
-    except _NotRegularOrTooLargeError as exc:
-        return RawLineage(decision_id, exists=True, error=LINEAGE_UNREADABLE, detail=str(exc))
-    except OSError as exc:
-        return RawLineage(
-            decision_id, exists=True, error=LINEAGE_UNREADABLE, detail=error_summary(exc)
-        )
-    size = len(payload)
-    try:
-        data = yaml.safe_load(payload.decode("utf-8"))
-    except Exception as exc:  # noqa: BLE001 - a read never raises; the type is reported
+    if found.unreadable:
         return RawLineage(
             decision_id,
             exists=True,
             error=LINEAGE_UNREADABLE,
-            detail=error_summary(exc),
-            size=size,
+            detail=found.detail,
+            size=found.size,
         )
-    if _nested_deeper_than(data, MAX_LINEAGE_DEPTH):
-        return RawLineage(
-            decision_id,
-            exists=True,
-            error=LINEAGE_UNREADABLE,
-            detail=f"nested more than {MAX_LINEAGE_DEPTH} levels deep",
-            size=size,
-        )
-    return RawLineage(decision_id, exists=True, data=data, size=size)
+    return RawLineage(decision_id, exists=True, data=found.data, size=found.size)
 
 
 def link_targets(raw: RawLineage, link_type: str) -> list[str]:

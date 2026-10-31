@@ -492,6 +492,16 @@ class TestWidenedSurfaces:
         } <= _ALL_TOOLS
         # The ADR writer is a full-mode tool only (design §8.2, D9).
         assert "pm_update_decision" not in _RO_SEED
+        # Decision posture (S2 spec §6.3): the writer takes its own lock, so it
+        # is a ledger writer; pm_status reads the posture through
+        # read_decision_policy, which must sit in the RO closure for the
+        # disjointness checks below to look at it. The change tool is full
+        # mode only.
+        assert "change_decision_posture" in _GRAPH.ledger_writers
+        assert {"read_decision_policy", "read_policy_raw", "policy_view"} <= _RO_CLOSURE
+        assert "pm_update_decision_posture" in _ALL_TOOLS
+        assert "pm_update_decision_posture" not in _RO_SEED
+        assert "change_decision_posture" in _GRAPH.reachable({"pm_update_decision_posture"})
 
     def test_ro_surface_never_writes_a_ledger(self):
         leaked = _RO_CLOSURE & _GRAPH.ledger_writers

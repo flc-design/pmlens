@@ -1,6 +1,6 @@
 # PM Lens Cheatsheet
 
-> **46 MCP tools + 2 compatibility aliases** for Claude Code, Codex CLI, Cursor and Grok Build.
+> **47 MCP tools + 2 compatibility aliases** for Claude Code, Codex CLI, Cursor and Grok Build.
 > Version 0.17.0 | Python 3.11+ | PyPI: `pmlens`
 
 ---
@@ -27,7 +27,7 @@ Claude Code session:
 
 | Tool | Description | Key Params |
 |------|-------------|------------|
-| `pm_init` | Initialize .pm/ directory, auto-detect project info | `project_path?`, `project_name?` |
+| `pm_init` | Initialize .pm/ directory, auto-detect project info; `decision_posture` only when the user chose it (new projects only) | `project_path?`, `project_name?`, `decision_posture?` |
 | `pm_status` | Project status: phases, tasks, blockers, velocity | `project_path?` |
 | `pm_list` | List all registered projects | _(none)_ |
 | `pm_discover` | Scan for projects and register them | `scan_path="."` |
@@ -91,6 +91,7 @@ The names below are the standard ones; the legacy names remain as aliases. See t
 | `pm_add_decision` | Record an ADR (ID auto-generated). Saved as proposed; `accepted` only when the user accepted the content | `title`, `context`, `decision`, `status="proposed"`, `origin?`, `recorded_timing?`, `decision_kind?` |
 | `pm_decision_query` | Read ADRs and their lineage, changing nothing (Lens-safe). `lifecycle="proposed"` lists ADRs awaiting the user's review; list pages with `limit` / `offset` | `action="list"`, `decision_id?` (get), `lifecycle?`, `limit=50`, `offset=0` |
 | `pm_update_decision` | Move an ADR's lifecycle (e.g. proposed → adopted once the user approves), change its links, append an evaluation or a note; the text never changes (full mode only) | `decision_id`, `lifecycle?`, `reason?`, `add_links?`, `remove_links?`, `evaluation?`, `note?` |
+| `pm_update_decision_posture` | Change the project's decision posture (bold / cautious / unset) when the user asks, with their reason; kept in a history (full mode only) | `decision_posture`, `reason` |
 | `pm_velocity` | Velocity and trend analysis | `weeks=4` |
 | `pm_risks` | Auto-detected + manual risks | `project_path?` |
 
@@ -466,6 +467,7 @@ pm-server hook post-tool-use   # PostToolUse hook handler
 | EvaluationKind | `test`, `ai_review`, `outcome`, `other` |
 | FactSource | `proposal`, `observed` (reserved; pmlens writes only proposal) |
 | Reversibility | `code_revertable`, `external_irreversible`, `unknown` (treated like external_irreversible) |
+| DecisionPosture | `bold` (new or exploratory work), `cautious` (maintenance and fixes), `unset` (not chosen yet; acts as cautious) |
 | LogCategory | `progress`, `decision`, `blocker`, `note`, `milestone` |
 | MemoryType | `observation`, `insight`, `lesson` |
 | KnowledgeCategory | `research`, `market`, `spike`, `requirement`, `constraint`, `tradeoff`, `risk_analysis`, `spec`, `api_design` |

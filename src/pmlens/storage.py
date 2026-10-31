@@ -33,6 +33,12 @@ lock while a lineage lock is held, or a second lineage lock, raises
 labels are not ranked and behave as before. Lineage files are read through
 ``lineage.read_lineage_raw`` (bounded, lock-free) and written only through
 ``_save_yaml`` from the two composite functions above.
+
+The project's decision posture (S2) has a lock of its own,
+``.pm/.locks/decision_policy.lock``, taken alone: ``change_decision_posture``
+takes no other lock while it holds it, and no writer takes it inside another
+lock. The label is not ranked, so the run-time check above does not cover it;
+tests/test_decision_posture.py pins the convention.
 """
 
 from __future__ import annotations
@@ -53,6 +59,7 @@ from filelock import Timeout as FileLockTimeout
 from pydantic import BaseModel
 
 from . import lineage as _lineage
+from . import policy as _policy
 from . import safe_yaml as _safe_yaml
 from .ledger_errors import LedgerReadError, LedgerWriteRefused, build_record, build_records
 from .lineage import LineageChange, LineageWriteRefused
@@ -66,6 +73,7 @@ from .models import (
     Milestone,
     PmServerError,
     Project,
+    ProjectNotFoundError,
     Registry,
     RegistryEntry,
     Risk,
@@ -1314,6 +1322,195 @@ def change_decision_lineage(
     result.warnings.extend(notices)
     result.next = hint
     return result
+
+
+# ─── Decision posture (S2 spec §2.10, §3.8) ──────────
+
+
+@dataclass
+class PostureChangeResult:
+    """Result of :func:`change_decision_posture`.
+
+    Attributes:
+        status: ``updated`` (the posture changed and the history gained an
+            entry), ``unchanged`` (it already had that value), ``not_changed``
+            (``only_if_unset`` and a posture other than unset is set) or
+            ``error``.
+        decision_posture: The posture afterwards: the value set, or the
+            stored one for ``unchanged`` / ``not_changed``, labelled as
+            :func:`policy.posture_label` does (redacted when it is not a known
+            value, ``None`` when it is not a string).
+        previous: For ``updated``, the posture before, labelled the same way
+            (what the history entry records as ``from``); otherwise ``None``.
+        history_total: The history entries afterwards, counted as pm_status
+            counts them.
+        warnings: Notices (``_build_warning`` shape): ``decision_posture_changed``
+            for an update, ``decision_policy_secrets_redacted`` when the
+            saved text needed redaction.
+        error: For ``error``, the error dict; nothing was written.
+    """
+
+    status: str
+    decision_posture: str | None = None
+    previous: str | None = None
+    history_total: int = 0
+    warnings: list[dict] = field(default_factory=list)
+    error: dict | None = None
+
+
+def _is_global_pm_dir(pm_path: Path) -> bool:
+    """Whether ``pm_path`` is the global ``~/.pm`` (registry, memory), not a project's.
+
+    An explicit ``project_path`` or ``PM_PROJECT_PATH`` of the home directory
+    resolves to it, since the resolver only asks for a ``.pm`` directory there.
+    Both the module's ``GLOBAL_PM_DIR`` and the current ``$HOME`` are checked.
+    Comparing resolved paths alone misses another spelling of the same
+    directory (a case variant on a case-insensitive file system keeps its
+    case through ``resolve()``), so existing paths are also compared as files
+    (``os.path.samefile``: device and inode).
+    """
+    try:
+        target = pm_path.resolve()
+        candidates = {GLOBAL_PM_DIR.resolve(), (Path.home() / PM_DIR).resolve()}
+    except (OSError, RuntimeError):
+        return False
+    if target in candidates:
+        return True
+    for candidate in candidates:
+        try:
+            if os.path.samefile(target, candidate):
+                return True
+        except OSError:
+            # A path that does not exist is no other name for the global .pm.
+            continue
+    return False
+
+
+def change_decision_posture(
+    pm_path: Path, to: str, reason: str, via: str, *, only_if_unset: bool = False
+) -> PostureChangeResult:
+    """Change the project's decision posture (S2 spec §3.8, §5.3).
+
+    Takes the ``decision_policy`` lock and no other, and does everything
+    inside it: the bounded read of decision_policy.yaml
+    (:func:`policy.read_policy_raw`), the writer's refusals (unreadable file,
+    a history that is not a list, unknown schema), ``unchanged`` when the
+    posture already has the value (no history entry), ``not_changed`` for
+    ``only_if_unset`` when a posture other than unset is set (pm_init sets a
+    new project's posture only then; deciding on a value read outside the
+    lock could overwrite one set meanwhile), the refusal of a value safe_dump
+    would change (:func:`policy.unwritable_value_refusal`), then the reason's redaction, the
+    appended history entry, the serialisation under MAX_POLICY_BYTES counted
+    in bytes as written (:func:`written_size`) and the atomic write. Every
+    key the file holds besides the posture and the history is written back
+    as loaded; the loaded document is not modified.
+
+    ``reason`` is not checked here: the change tool requires one before
+    calling, and pm_init passes an empty one (the server must not invent a
+    reason).
+
+    Args:
+        pm_path: The project's ``.pm`` directory.
+        to: bold, cautious or unset.
+        reason: The user's reason, saved after redaction.
+        via: The tool that asked for the change (``pm_init`` or
+            ``pm_update_decision_posture``).
+        only_if_unset: Change only a posture that is unset (no file included).
+
+    Returns:
+        The result; an expected failure is ``status="error"`` with nothing
+        written.
+
+    Raises:
+        ProjectNotFoundError: ``pm_path`` is the global ``~/.pm``, not a
+            project's; nothing is written and no lock is taken (S2 spec §6.3:
+            decision_policy.yaml is written only to a project's ``.pm``).
+        PmServerError: The lock timed out.
+        LedgerWriteRefused: ``.pm/.locks`` or decision_policy.yaml is a link
+            (or not what it should be). Nothing is written.
+    """
+    if _is_global_pm_dir(pm_path):
+        # The resolver takes any directory holding a .pm for an explicit
+        # project_path or PM_PROJECT_PATH, so $HOME reaches here; pm_cleanup
+        # does not look for this file in ~/.pm (S2 spec §6.3).
+        raise ProjectNotFoundError(
+            "The home directory's .pm holds pmlens's global data, not a project; the "
+            "decision posture was not changed. Pass the project's directory as "
+            "project_path."
+        )
+    if to not in _policy.POSTURES:
+        return PostureChangeResult(
+            status="error",
+            error=_lineage._error(
+                _policy.INVALID_POSTURE,
+                f"decision_posture must be one of {', '.join(_policy.POSTURES)}",
+            ),
+        )
+    with _yaml_transaction(pm_path, _policy.POLICY_FILE):
+        raw = _policy.read_policy_raw(pm_path)
+        refusal = _policy.posture_write_refusal(raw)
+        if refusal is not None:
+            return PostureChangeResult(status="error", error=refusal)
+        doc = raw.data
+        stored = _policy.stored_posture(doc)
+        if isinstance(stored, str) and stored == to:
+            return PostureChangeResult(
+                status="unchanged", decision_posture=to, history_total=_policy.history_count(doc)
+            )
+        previous, label_hits = _policy.posture_label(stored)
+        if only_if_unset and not (isinstance(stored, str) and stored == _policy.UNSET):
+            return PostureChangeResult(
+                status="not_changed",
+                decision_posture=previous,
+                history_total=_policy.history_count(doc),
+            )
+        unwritable = _policy.unwritable_value_refusal(doc)
+        if unwritable is not None:
+            return PostureChangeResult(status="error", error=unwritable)
+        scrubbed, reason_hits = _lineage.scrub_text(reason)
+        entry = _policy.history_entry(_lineage._utc_now(), previous, to, scrubbed, via)
+        new_doc = _policy.posture_changed_doc(doc, to, entry)
+        try:
+            text = _dump_yaml_capped(new_doc, _policy.POLICY_FILE, _policy.MAX_POLICY_BYTES)
+        except (RecursionError, yaml.YAMLError) as exc:
+            # The reader's depth check keeps deep files out; the type alone
+            # is reported, never the text.
+            return PostureChangeResult(
+                status="error",
+                error=_lineage._error(
+                    _policy.POLICY_UNREADABLE,
+                    "decision_policy.yaml cannot be written back "
+                    f"({_lineage.error_summary(exc)}); nothing was written. Fix it by hand or "
+                    "move it out of .pm, then try again.",
+                ),
+            )
+        if text is None:
+            return PostureChangeResult(
+                status="error",
+                error=_lineage._error(
+                    _policy.POLICY_TOO_LARGE,
+                    f"decision_policy.yaml would exceed {_policy.MAX_POLICY_BYTES} bytes; "
+                    "nothing was written.",
+                    remediation=(
+                        "Shorten the reason. If the history is full, move older entries out of "
+                        ".pm/decision_policy.yaml by hand (keep the latest one); pmlens never "
+                        "drops them itself. A value the file repeats through YAML aliases "
+                        "(&name, *name) is written out in full at every repeat; replace such "
+                        "repeats by hand."
+                    ),
+                ),
+            )
+        _save_yaml(pm_path / _policy.POLICY_FILE, new_doc, _policy.POLICY_FILE, root=pm_path)
+    warnings = [_policy.posture_changed_notice(previous, to)]
+    if label_hits + reason_hits:
+        warnings.append(_policy.secrets_notice(label_hits + reason_hits))
+    return PostureChangeResult(
+        status="updated",
+        decision_posture=to,
+        previous=previous,
+        history_total=_policy.history_count(new_doc),
+        warnings=warnings,
+    )
 
 
 # ─── Milestones ──────────────────────────────────────

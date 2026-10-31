@@ -23,6 +23,7 @@ from pydantic import ValidationError
 
 from . import __version__
 from . import lineage as _lineage
+from . import policy as _policy
 from . import storage as _storage
 from .auto_memory import (
     _MAX_INGEST_BYTES,
@@ -87,6 +88,7 @@ from .storage import (
     add_knowledge_with_next_id,
     add_task_with_next_id,
     change_decision_lineage,
+    change_decision_posture,
     get_builtin_templates_dir_status,
     init_pm_directory,
     list_workflow_templates,
@@ -751,13 +753,32 @@ def _build_next_actions(active_tasks: list[dict], all_tasks: list[Task]) -> list
 
 
 @_tool()
-def pm_init(project_path: str | None = None, project_name: str | None = None) -> dict:
+def pm_init(
+    project_path: str | None = None,
+    project_name: str | None = None,
+    decision_posture: str | None = None,
+) -> dict:
     """Initialize PM for a project.
 
     Creates .pm/ directory, auto-detects project info, and registers in global registry.
     project_path defaults to current directory.
     project_name defaults to directory name or detected from config files.
+    decision_posture: bold or cautious, only when the user chose it. It is set
+    only for a new project; an existing one keeps its posture (change it with
+    pm_update_decision_posture and the user's reason).
     """
+    # Checked before anything is created (S2 spec §3.7); unset is the default
+    # already, so init never sets it.
+    if decision_posture is not None and decision_posture not in _INIT_POSTURES:
+        return {
+            "status": "error",
+            "code": _policy.INVALID_POSTURE,
+            "message": (
+                f"decision_posture must be {' or '.join(_INIT_POSTURES)}; omit it when the "
+                "user has not chosen one"
+            ),
+            "field": "decision_posture",
+        }
     root = Path(project_path).resolve() if project_path else Path.cwd().resolve()
 
     # ADR-053: an MCP host running with cwd=$HOME (Claude Desktop does) would
@@ -777,7 +798,8 @@ def pm_init(project_path: str | None = None, project_name: str | None = None) ->
 
     # Only create project.yaml if it doesn't already exist (idempotent)
     project_yaml = pm_path / "project.yaml"
-    if project_yaml.exists():
+    created = not project_yaml.exists()
+    if not created:
         project = load_project(pm_path)
     else:
         project = Project(
@@ -800,16 +822,183 @@ def pm_init(project_path: str | None = None, project_name: str | None = None) ->
 
     claudemd_result = ensure_claudemd(root)
 
+    # The posture comes last, once everything above is in place: a failure to
+    # set it is a warning and pm_init still succeeds (S2 spec §3.7).
+    posture_warnings = _init_decision_posture(pm_path, decision_posture, created=created)
+    view = _policy.read_decision_policy(pm_path)
+
     result = {
         "status": "initialized",
         "path": str(root),
         "project": project.model_dump(mode="json"),
         "claudemd": claudemd_result,
+        "decision_posture": view.as_dict(),
     }
+    warnings: list[dict] = []
     linked = _pm_symlink_warning(pm_path)
     if linked is not None:
-        result["warnings"] = [linked]
+        warnings.append(linked)
+    warnings.extend(posture_warnings)
+    # What the file says now (unreadable, unknown value, …), once per code.
+    reported = {w["code"] for w in warnings}
+    warnings.extend(w for w in view.warnings if w["code"] not in reported)
+    if decision_posture is None and _posture_is_unset(view):
+        warnings.append(_posture_unset_notice())
+    if warnings:
+        result["warnings"] = warnings
     return result
+
+
+# pm_init sets a new project's posture to one of these; unset is the default.
+_INIT_POSTURES: tuple[str, ...] = (_policy.BOLD, _policy.CAUTIOUS)
+_POSTURE_TOOL = "pm_update_decision_posture"
+# What pm_init says when the writer refuses decision_policy.yaml, by code.
+_INIT_POLICY_PROBLEM = ".pm/decision_policy.yaml cannot be written. "
+_INIT_POLICY_FIX = "Fix .pm/decision_policy.yaml by hand, "
+_INIT_POLICY_PROBLEMS: dict[str, str] = {
+    _policy.POLICY_UNREADABLE: ".pm/decision_policy.yaml cannot be read or written back. ",
+    _policy.POLICY_SCHEMA_UNSUPPORTED: (
+        ".pm/decision_policy.yaml uses a schema this pmlens cannot write. "
+    ),
+    _policy.POLICY_TOO_LARGE: ".pm/decision_policy.yaml is at its size limit. ",
+}
+_INIT_POLICY_FIXES: dict[str, str] = {
+    _policy.POLICY_UNREADABLE: (
+        "Fix .pm/decision_policy.yaml by hand or move it out of .pm (git can restore an "
+        "earlier version), "
+    ),
+    _policy.POLICY_SCHEMA_UNSUPPORTED: "Update pmlens on every host that uses this .pm, ",
+    _policy.POLICY_TOO_LARGE: (
+        "Move older history entries out of .pm/decision_policy.yaml by hand (keep the latest one), "
+    ),
+}
+
+
+def _init_decision_posture(pm_path: Path, posture: str | None, *, created: bool) -> list[dict]:
+    """Set a new project's decision posture for pm_init (S2 spec §3.7).
+
+    Only a project whose project.yaml this call created is set, and only while
+    its posture is unset; ``storage.change_decision_posture`` decides that
+    under the posture lock (``only_if_unset``). The reason is empty: the
+    server never writes one on the user's behalf, and ``via: pm_init`` records
+    the path. An existing project keeps its posture, since a change needs the
+    user's reason, which pm_init does not take.
+
+    ``posture`` is bold or cautious (already checked) or ``None`` when it was
+    omitted; ``created`` is whether this pm_init call created project.yaml.
+    Returns the warnings for pm_init's response (``_build_warning`` shape).
+    """
+    if posture is None:
+        return []
+    if not created:
+        view = _policy.read_decision_policy(pm_path)
+        if view.state == _policy.STATE_READ and view.value == posture:
+            return []  # already what the user chose: nothing to say
+        return [
+            _posture_not_changed_notice(
+                "pm_init sets the decision posture only for a new project, so this "
+                "project's posture was not changed."
+            )
+        ]
+    try:
+        outcome = change_decision_posture(pm_path, posture, "", "pm_init", only_if_unset=True)
+    except (PmServerError, OSError):
+        # LedgerWriteRefused (a linked .locks or decision_policy.yaml), a lock
+        # timeout, or a failed write. The text is never quoted; a link is also
+        # reported by symlinks_in_pm_refused.
+        return [
+            _build_warning(
+                level="warning",
+                code=_policy.POSTURE_NOT_SET,
+                message=(
+                    "The decision posture was not set: pmlens could not take the lock on "
+                    ".pm/decision_policy.yaml or write it (a link in .pm, or a lock held too "
+                    "long). The project itself was initialized."
+                ),
+                remediation=(
+                    "Replace any link in .pm with the real file or directory, or wait a "
+                    f"moment, then set the posture the user chose with {_POSTURE_TOOL} and "
+                    "their reason."
+                ),
+            )
+        ]
+    if outcome.error is not None:
+        # decision_policy.yaml cannot be read, uses a newer schema or is full:
+        # the same code, as a warning, since pm_init itself succeeded. The
+        # writer's text says "try again", which suits the change tool; here a
+        # second pm_init finds project.yaml and does not set the posture, so
+        # the remediation names the change tool, as for decision_posture_not_set.
+        code = outcome.error["code"]
+        problem = _INIT_POLICY_PROBLEMS.get(code, _INIT_POLICY_PROBLEM)
+        fix = _INIT_POLICY_FIXES.get(code, _INIT_POLICY_FIX)
+        return [
+            _build_warning(
+                level="warning",
+                code=code,
+                message=(
+                    f"The decision posture was not set: {problem}The project itself was "
+                    "initialized."
+                ),
+                remediation=(
+                    f"{fix}then set the posture the user chose with {_POSTURE_TOOL} and their "
+                    "reason; running pm_init again does not set it."
+                ),
+            )
+        ]
+    if outcome.status == "not_changed":
+        return [
+            _posture_not_changed_notice(
+                ".pm/decision_policy.yaml already sets a decision posture, so pm_init did "
+                "not change it."
+            )
+        ]
+    return outcome.warnings  # updated: decision_posture_changed; unchanged: none
+
+
+def _posture_not_changed_notice(why: str) -> dict:
+    """The ``decision_posture_not_changed`` info pm_init returns (S2 spec §3.7)."""
+    return _build_warning(
+        level="info",
+        code=_policy.POSTURE_NOT_CHANGED,
+        message=f"{why} Changing a posture needs the user's reason, which pm_init does not take.",
+        remediation=(
+            f"If the user wants another posture, change it with {_POSTURE_TOOL} and their reason."
+        ),
+    )
+
+
+def _posture_is_unset(view: _policy.PolicyView) -> bool:
+    """Whether the posture is unset in a file that could be read, or there is no file.
+
+    An unreadable file also shows unset, but it carries its own warning, and
+    the change tool refuses it until it is fixed by hand.
+    """
+    return view.state != _policy.STATE_UNREADABLE and view.value == _policy.UNSET
+
+
+def _posture_unset_notice() -> dict:
+    """The ``decision_posture_unset`` info of pm_init and pm_status (S2 spec §3.7, §3.9).
+
+    The message is the same in both modes. A Lens host has no change tool, so
+    its remediation points at a full-mode host instead of naming the tool.
+    """
+    if PM_LENS_ENABLED:
+        how = f"Once the user has chosen, it is set from {_FULL_MODE_HOST}."
+    else:
+        how = f"Once the user has chosen, set it with {_POSTURE_TOOL} and their reason."
+    return _build_warning(
+        level="info",
+        code=_policy.POSTURE_UNSET,
+        message=(
+            "The project's decision posture is not set, so it acts as cautious. pmlens "
+            "cannot ask the user itself: ask them which posture the project should have."
+        ),
+        remediation=(
+            "bold suits new or exploratory work: ambitious options are fine while a change "
+            "can be reverted in code. cautious suits maintenance and fixes: conservative, "
+            f"easy-to-revert options. Until one is chosen, the project acts as cautious. {how}"
+        ),
+    )
 
 
 # Entries in .pm pmlens writes; a symlink at any of them is refused on write
@@ -827,6 +1016,7 @@ _PM_WRITE_ENTRIES = (
     "project.yaml",
     "tasks.yaml",
     "decisions.yaml",
+    _policy.POLICY_FILE,
     "knowledge.yaml",
     "workflows.yaml",
     "milestones.yaml",
@@ -863,7 +1053,8 @@ def _pm_symlink_warning(pm_path: Path) -> dict | None:
 def pm_status(project_path: str | None = None) -> dict:
     """Get current project status.
 
-    Returns phase progress, task counts, blockers, overdue items, and velocity.
+    Returns phase progress, task counts, blockers, overdue items, velocity, and
+    the project's decision posture with its last change.
     """
     pm_path = _get_pm_path(project_path)
     project = load_project(pm_path)
@@ -1035,6 +1226,12 @@ def pm_status(project_path: str | None = None) -> dict:
         status_warnings.append(hook_warning)
 
     status_warnings.extend(_decision_ledger_warnings(pm_path))
+    # The decision posture (S2 spec §3.9): read without a lock and without
+    # creating anything, so it is safe under Lens as well.
+    posture = _policy.read_decision_policy(pm_path)
+    status_warnings.extend(posture.warnings)
+    if _posture_is_unset(posture):
+        status_warnings.append(_posture_unset_notice())
     linked = _pm_symlink_warning(pm_path)
     if linked is not None:
         status_warnings.append(linked)
@@ -1053,6 +1250,7 @@ def pm_status(project_path: str | None = None) -> dict:
         "phases": phase_info,
         "blockers": blockers,
         "active_tasks": active_tasks,
+        "decision_posture": posture.as_dict(),
         "health": project.health.model_dump(),
         "claudemd": get_claudemd_status(root),
         "rules": get_rules_status(root),
@@ -4115,6 +4313,64 @@ def pm_update_decision(
     if outcome.next:
         response["next"] = outcome.next
     return response
+
+
+# ─── Decision posture (S2 spec §3.8, full mode only) ──
+# Not in RO_ALLOWLIST: Lens never registers it. The tool checks the arguments;
+# the lock, the file's refusals, the history and the write live in
+# storage.change_decision_posture.
+
+
+@_tool()
+def pm_update_decision_posture(
+    decision_posture: str,
+    reason: str,
+    project_path: str | None = None,
+) -> dict:
+    """Change the project's decision posture, which sets how you lean when the user
+    cannot judge a kind of decision: bold (new or exploratory work: ambitious
+    options are fine while a change can be reverted in code) or cautious
+    (maintenance and fixes: conservative, easy-to-revert options); unset means
+    not chosen yet and acts as cautious.
+
+    Use it only when the user asks to change it, with the user's reason. Do not
+    use it on your own judgment or to infer the posture from the project's
+    status. Every change is kept in the history and shown by pm_status.
+    """
+    # Argument checks come before the project is resolved and before any lock
+    # (S2 spec §3.8); none of them quotes the value given.
+    if decision_posture not in _policy.POSTURES:
+        return {
+            "status": "error",
+            "code": _policy.INVALID_POSTURE,
+            "message": f"decision_posture must be one of {', '.join(_policy.POSTURES)}",
+            "field": "decision_posture",
+        }
+    if not (isinstance(reason, str) and reason.strip()):
+        return {
+            "status": "error",
+            "code": "reason_required",
+            "message": "reason is required: give the user's reason for the change",
+            "field": "reason",
+        }
+    if len(reason) > _policy.MAX_REASON_CHARS:
+        return {
+            "status": "error",
+            "code": "text_too_long",
+            "message": f"reason is longer than {_policy.MAX_REASON_CHARS} characters",
+            "field": "reason",
+        }
+    pm_path = _get_pm_path(project_path)
+    outcome = change_decision_posture(pm_path, decision_posture, reason, _POSTURE_TOOL)
+    if outcome.error is not None:
+        return outcome.error
+    return {
+        "status": outcome.status,
+        "decision_posture": outcome.decision_posture,
+        "previous": outcome.previous,
+        "history_total": outcome.history_total,
+        "warnings": outcome.warnings,
+    }
 
 
 # ─── Decision query (ADR-056 S1, read-only, Lens-safe) ─

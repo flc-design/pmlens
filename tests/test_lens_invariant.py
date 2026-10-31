@@ -424,6 +424,9 @@ def _seed_decisions(pm_dir: Path) -> None:
     lineage event carrying ``caused_by: !!binary``. No FIFO, symlink or
     oversized file: a reader that blocks would time the sweep out instead of
     failing it (those live in tests/test_decision_query.py).
+
+    The project's decision posture is bold with one history entry (S2 spec
+    §6.3), so pm_status reads a real .pm/decision_policy.yaml under Lens.
     """
     import datetime as dt
 
@@ -476,6 +479,14 @@ def _seed_decisions(pm_dir: Path) -> None:
     for adr_id, doc in docs.items():
         (lineage_dir / f"{adr_id}.yaml").write_text(dump_lineage(doc, adr_id), encoding="utf-8")
     (lineage_dir / "ADR-004.yaml").write_text("lifecycle: [unclosed\n", encoding="utf-8")
+    (pm_dir / "decision_policy.yaml").write_text(
+        "# PM Lens - decision_policy.yaml\n"
+        "schema: 1\n"
+        "decision_posture: bold\n"
+        "history:\n"
+        f"- {{at: '{now}', from: unset, to: bold, reason: '', via: pm_init}}\n",
+        encoding="utf-8",
+    )
 
 
 # PMSERV-217: a zero-arg call never exercised a tool with a required argument
@@ -539,6 +550,9 @@ _EXPECTED_REACH = {
     "decision_unreadable_noted": True,
     "decision_unknown_keys_only_names": True,
     "decision_page": [["ADR-002", "ADR-003"], True, 3],
+    # The seeded decision posture (S2 spec §6.3) and its one history entry.
+    "status_posture": "bold",
+    "status_posture_history": [1, "pm_init"],
 }
 
 # Runs inside the subprocess: import pmlens.server fresh (so PM_LENS /
@@ -627,6 +641,13 @@ _T6_SWEEP_SCRIPT = textwrap.dedent("""
                 and unknown["decision"]["unknown_keys"] == ["review_note", "blob"]
                 and unknown["lineage"]["events"][-1].get("unknown_fields") == ["caused_by"]
             )
+        if "pm_status" in tool_names:
+            posture = srv.pm_status()["decision_posture"]
+            reach["status_posture"] = posture["value"]
+            reach["status_posture_history"] = [
+                posture["history_total"],
+                (posture["last_change"] or {}).get("via"),
+            ]
     except Exception as e:  # noqa: BLE001 - reported and asserted by the test
         reach["error"] = f"{type(e).__name__}: {e}"
 

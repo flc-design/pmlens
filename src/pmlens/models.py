@@ -171,6 +171,20 @@ class Reversibility(StrEnum):
     UNKNOWN = "unknown"
 
 
+class DecisionPosture(StrEnum):
+    """How to lean when the user cannot judge a kind of decision (the project's posture).
+
+    Kept in .pm/decision_policy.yaml, not in project.yaml, so an older pmlens
+    that rewrites project.yaml cannot drop it. bold suits new or exploratory
+    work, cautious maintenance and fixes; unset (not chosen yet, or no file)
+    acts as cautious.
+    """
+
+    BOLD = "bold"
+    CAUTIOUS = "cautious"
+    UNSET = "unset"
+
+
 class LogCategory(StrEnum):
     """Daily log entry category."""
 

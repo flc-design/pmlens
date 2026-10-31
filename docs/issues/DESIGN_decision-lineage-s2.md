@@ -1247,7 +1247,7 @@ S1 の `change_decision_lineage`（storage.py:1103-1279）をそのまま使い�
 - **tests/test_launch_surfaces.py**（:367-373）: Lens の tools/list に pm_decision_brief があり、3 つの書き手が無い。full モードで D10 の経路を wire で 1 往復する（`list[dict]` と `dict | None` の引数の JSON スキーマの確認になる）。
 - **tests/test_server_instructions.py**: MCP instructions は S2 では変えない（S3 の 241）。名指しの検査は自動で効く。
 - **prompt_pack**: `.pm/decision_policy.yaml` を出力先にすると拒否されることを tests/test_prompt_pack.py に足す（ADR-060 の 4 の許可リスト方式で既に塞がれている: prompt_pack.py:806-816）。予約名の一覧（prompt_pack.py:504-515）には足さない（ADR-060 の 5）。
-- **pm_cleanup** の project_only_files（server.py:4905-4910）には足さない。decision_policy.yaml は解決したプロジェクトの `.pm` にだけ書かれ、`~/.pm` に取り残される経路が無い。
+- **pm_cleanup** の project_only_files（server.py:4905-4910）には足さない。decision_policy.yaml は解決したプロジェクトの `.pm` にだけ書かれ、`~/.pm` に取り残される経路が無い（`project_path` や `PM_PROJECT_PATH` にホームディレクトリを渡すと解決は `~/.pm` を返すので、書き手がロックの前に `~/.pm` を拒否してこれを保つ。§9 の「実装で決めたこと（255）」）。
 - **git 不使用**: S2 のどの経路も subprocess を使わない（tests/test_ro_surface_disjoint.py の full-mode 検査で固定済み）。
 
 ### 6.4 保証・規約・観測・緩和策の区分
@@ -1664,3 +1664,26 @@ ADR-056 の「保証と規約と緩和策を区別して表示でき、検証能
 - 採択の時の説明の検査（`decision_adopted_without_current_explanation` と `decision_adoption_explanation_check_skipped`）では、`items` の無い explanations の区分を壊れているとみなし、`fact_core_version` が 0 以上の int（bool は除く）でない説明も壊れた要素とする。230 の読み取りはこれに合わせる。remediation は、pm_add_explanation ができる 230 までは get を指す。
 - 改版が `unchanged` になった呼び出しでも、受け取った項目の text から秘密を除いた件数があれば `decision_lineage_secrets_redacted` を出す（reason は保存しないので数えない）。
 - `reason_required` にも `field: "reason"` を付けた（§4。S1 の経路を含む）。
+
+### 実装で決めたこと（255）
+
+仕様に書かれていなかった点と、文面の解釈が分かれた点を、PMSERV-255 の実装で次のように決めた。
+
+- 読み手の置き場: `policy.py` の `read_policy_raw`（有界な読み取り。lineage の `read_bounded_yaml` を通す）と純関数の `policy_view`、両者をつないだ `read_decision_policy`。`read_lineage_raw` も `read_bounded_yaml` を通すようにし、`os.open` は `_read_bounded` の 1 か所のままにした（返す値は変えていない）。decision_policy.yaml がリンクの時は、O_NOFOLLOW の無い環境のために `is_symlink()` でも確かめる。
+- `decision_posture: null`（値の無いキー）は、キーが無いのと同じく unset として扱う（§2.10 の「str でない」には数えない）。
+- `history_total` は、末尾から 1,000 件の窓の中の mapping の数である（窓の外の要素は数えない）。最後の mapping が窓の外にあれば、履歴が無いものとして食い違いを判定する。
+- `history` が null でもリストでもない時（mapping・文字列など）、変更ツールは `decision_policy_unreadable`（message で history を挙げる）で拒否する。追記すると元の値を置き換えて履歴を失うためで、読み取りは §2.10 のとおり履歴 0 件として読む。
+- 変更の `from` と応答の `previous` には、現在の値を `posture_label` で書く: 語彙の値はそのまま、語彙外の文字列は redact して 100 字で切った値、str でなければ null。`decision_posture_changed` の message は語彙の値だけを名指しし、それ以外は「a value pmlens does not recognise」にする。`decision_policy_secrets_redacted` の件数は reason と `from` の redact の合計。
+- `unchanged`（§3.8 の順で redact の前に返る）では reason を保存しないので、`decision_policy_secrets_redacted` を出さない。
+- `change_decision_posture` は `to` が語彙外なら、ロックを取る前に `invalid_decision_posture` を返す（ツールの層の検査に加えた防御。reason は §3.8 のとおり検査しない）。
+- 読めない・壊れた状態の warning の remediation は、Lens でも使えるように変更ツールの名前を書かない（ユーザーに確かめる・手で直す、を案内する）。`decision_posture_unset` は、モードで文面が変わるのでサーバーが作る。
+- pm_init の `decision_posture` の検査は `guard_not_home_root` と `init_pm_directory` の前、関数の最初で行う。`invalid_decision_posture` と、変更ツールの `invalid_decision_posture`・`reason_required`・`text_too_long` には `field` を付ける（S1 の `reason_required` に合わせた）。変更ツールの引数の検査は、プロジェクトを探す前に行う（pm_update_decision と同じ）。
+- 既存のプロジェクトへの pm_init で、渡した値が保存されている値と同じ（読める状態で）なら、`decision_posture_not_changed` を付けない（§4 の「同じ値なら何も付けない」を既存のプロジェクトにも当てた）。渡した値で設定されなかった時（`decision_posture_not_changed`・`decision_posture_not_set`・ファイルの拒否）は、`decision_posture_unset` を重ねて出さない（ユーザーは既に選んでいる）。
+- pm_init は `change_decision_posture` の `PmServerError`（`LedgerWriteRefused` を含む）に加えて `OSError`（書き込みの失敗）も `decision_posture_not_set` にする。project.yaml を作った後に pm_init が失敗すると、次の pm_init は既存のプロジェクトとして姿勢を設定しないため。
+- pm_init の応答には、姿勢の設定の結果の後に、読み直した view の warnings（読めない・schema・未知の値・履歴との食い違い）を code ごとに 1 回だけ足す（設定の拒否と同じ code は重ねない）。§4 の「出す場所」で init に無い `decision_posture_unknown`・`decision_posture_history_mismatch` も、リポジトリが同梱したファイルについて init で見えるようにした。
+- `decision_posture_unset` は、ファイルが読めない時（value は unset と表示する）には出さない（pm_status と pm_init）。`decision_policy_unreadable` が出ていて、変更ツールは手で直すまで拒否するため。
+- 変更ツールの応答は、常に `status`・`decision_posture`・`previous`・`history_total`・`warnings` の 5 つのキーを返す（`previous` は `updated` の時の変更前の値を上の `posture_label` の規則で示し、それ以外は null）。
+- pm_status の `decision_posture` キーは `active_tasks` の後に置く。tests/test_lens_invariant.py の到達の証明には、§6.3 の `status_posture` に加えて、`history_total` と `last_change.via` の `status_posture_history` を足した。
+- `change_decision_posture` は、`pm_path` が全体の `~/.pm`（`GLOBAL_PM_DIR`、または今の `$HOME` の `.pm`。どちらも resolve して比べ、存在するパスは `os.path.samefile`（デバイスと inode）でも比べる。大文字小文字を区別しないファイルシステムでは綴りの違う `$HOME` も同じディレクトリを指し、resolve は綴りを変えないので、パスの比較だけでは通っていた（監査 2 回目））なら、ロックも作成もせずに `ProjectNotFoundError`（固定の文面。パスを含めない）を送出する。解決（utils.resolve_project_path）は明示の `project_path` と `PM_PROJECT_PATH` では `.pm` ディレクトリがあるかしか見ないので、ホームディレクトリを渡すと `~/.pm` に decision_policy.yaml と `.locks` が書かれ、§6.3 の pm_cleanup の行の前提（`~/.pm` に取り残される経路が無い）が崩れていた（監査 1 回目）。新しい code は足さず、プロジェクトが見つからない時と同じ例外にした。pm_init も同じ書き手を通る（`guard_not_home_root` が先に拒否する）。他の書き込みツールが共有する解決の弱さは S2 の範囲外として変えていない。
+- 書き手は、ファイルのどこか（未知のキー・履歴の中を含む）に `!!omap` / `!!pairs` があれば、`decision_policy_unreadable`（message でタグを挙げる。キーや値は出さない）で書かずに拒否する（`policy.unwritable_value_refusal`。`unchanged` と `not_changed` の判定の後、書く時だけ）。safe_load はこれらを tuple のリストにし、safe_dump は tuple をタグの無い普通のリストとして書くので、書き直すと未知のキーの値と型が変わり、「値ごと保持する」（§2.10）が黙って破れていた（監査 3 回目）。他の safe_load の型（`!!set`・`!!binary`・日付・エイリアス）はそのまま書き戻せる。読み取りは変えない。S1 の lineage の書き手も同じ PyYAML の制約を持つが、S2 の範囲外として変えていない。
+- pm_init で書き手がファイルを拒否した時（読めない・schema が新しい・上限）の warning は、書き手のエラーの文面（変更ツール向けの「then try again」）を流用せず、pm_init 用の固定文にする。message は「姿勢は設定されなかった。プロジェクトは初期化された」、remediation は code ごとの直し方に続けて変更ツールの名前と「pm_init をもう一度呼んでも設定されない」を書く（`decision_posture_not_set` と同じ理由。project.yaml を作った後の pm_init は既存のプロジェクトとして扱うため。監査 3 回目）。pm_init は Lens に出ないので、変更ツールを名指ししてよい。

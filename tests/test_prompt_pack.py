@@ -375,6 +375,33 @@ class TestPmPromptPackTool:
         assert target.read_text(encoding="utf-8") == "schema: 1\n"
         assert sorted(p.name for p in lineage_dir.iterdir()) == ["ADR-001.yaml"]
 
+    def test_out_path_cannot_overwrite_the_decision_policy(self, tmp_path):
+        # Decision Lineage S2 (S2 spec §1.6, §6.3): decision_policy.yaml is not
+        # added to the reserved names. It is protected because, inside .pm,
+        # a pack may go under .pm/exports only (ADR-060). A link outside .pm
+        # that names the file, or a different case, does not get past that.
+        pm_path = _seed(tmp_path, [_task(id="P-1", tags=["x"])])
+        policy = pm_path / "decision_policy.yaml"
+        policy.write_text("schema: 1\ndecision_posture: bold\n", encoding="utf-8")
+        before = policy.read_bytes()
+        alias = tmp_path / "POLICY.md"
+        alias.symlink_to(policy)
+
+        for out_path in (
+            policy,
+            pm_path / "Decision_Policy.YAML",
+            pm_path / "exports" / ".." / "decision_policy.yaml",
+            alias,
+        ):
+            res = srv.pm_prompt_pack(
+                filter_tag="x", out_path=str(out_path), project_path=str(tmp_path)
+            )
+            assert res["status"] == "error", out_path
+            assert "go under .pm/exports" in res["message"], out_path
+
+        assert policy.read_bytes() == before
+        assert alias.is_symlink()
+
     def test_reserved_names_are_matched_whatever_their_case(self, tmp_path):
         # macOS (APFS) and Windows are case-insensitive by default: there,
         # ".pm/DECISION_LINEAGE/ADR-001.yaml" and ".pm/TASKS.yaml" are the very

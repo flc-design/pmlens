@@ -36,7 +36,7 @@
 ## 特徴
 
 - **🔌 マルチホストファースト** — `pmlens install --target=auto` 一発で **Claude Code / Codex CLI / Cursor / Grok Build に登録**。プロジェクトのルールも `CLAUDE.md` と `AGENTS.md` の両方に自動同期 (ADR-008)。プロジェクト途中でホストを切り替えてもコンテキストを失わない — 同じ `.pm/` データ、同じワークフロー
-- **46 の MCP ツール + 互換名2個** — タスク CRUD、子イシュー、ステータス、ブロッカー、ベロシティ、ダッシュボード、プロンプトパック、ADR、セッションメモリ、ワークフロー、ナレッジレコード、マルチホストルール注入、クロスホスト Outbox ブリッジ、コンテンツパイプライン（記録済み知見 → redact 済み下書き） 等
+- **47 の MCP ツール + 互換名2個** — タスク CRUD、子イシュー、ステータス、ブロッカー、ベロシティ、ダッシュボード、プロンプトパック、ADR、セッションメモリ、ワークフロー、ナレッジレコード、マルチホストルール注入、クロスホスト Outbox ブリッジ、コンテンツパイプライン（記録済み知見 → redact 済み下書き） 等
 - **ワークフローエンジン** — テンプレートベースの開発ワークフロー（ループ、ユーザーゲート、チェイン対応：Discovery → Development）
 - **ナレッジレコード** — カジュアルなメモリとフォーマルな ADR の中間に位置する構造化された知見記録（research、tradeoff、spec 等）
 - **Super Research スキル** — 3 並列エージェント（Domain Expert、Critical Analyst、Lateral Thinker）+ Depth Check（6 次元）+ Fact Check + Cross-Check
@@ -262,7 +262,7 @@ pmlens uninstall --target auto
 
 ---
 
-## MCP ツール一覧（46ツール + 互換名2個）
+## MCP ツール一覧（47ツール + 互換名2個）
 
 ### プロジェクト管理
 
@@ -285,6 +285,7 @@ pmlens uninstall --target auto
 | `pm_add_decision` | ADR 追加（context、decision、consequences を構造化）。既定は `proposed` で記録し、`status="accepted"` はユーザーが内容そのものを受け入れた時だけ渡す（規約であり、誰が受け入れたかを pmlens は確かめられないので、accepted で記録すると伝えるべき警告 `decision_created_accepted` を返す）。申告（`origin`・`recorded_timing`・`decision_kind`、既定は `unknown`）と記録時刻は `.pm/decision_lineage/ADR-NNN.yaml` に申告のまま保存し、検証はしない |
 | `pm_decision_query` | ADR と lineage を、何も変えずに読む（読み取り専用。Lens モードでも使える）。`action="list"` は ADR を status・lifecycle・申告された origin 付きで、`offset` から `limit` 件（既定 50）ずつ返し、`has_more` / `next_offset` で続きを示す（`lifecycle="proposed"` でユーザーの確認待ちの一覧。長い title はここでは切り、`get` は全文を返す）。`action="get"` は ADR の本文、申告、双方向の関係、最近の events を返す。使える lineage の無い ADR は status から導いた値（`derived`）で示し、記録の無い項目は `not_recorded` に出す。申告と events は記録されたままを示し、検証はしない。未知のキーは名前だけを返し、秘密らしき文字列は応答で伏せる |
 | `pm_update_decision` | ADR の lifecycle（`proposed` / `adopted` / `deprecated` / `superseded` / `rejected` / `reverted`）を決まった遷移表に沿って移し、関係（`supersedes` / `superseded_by` / `amends`）を変え、evaluation（AI の記録として示し、人間のレビューとはしない）や note を追記する。ADR の本文は変えない。`decisions.yaml` の `status` は lifecycle の射影として書き直す（`adopted` → `accepted`、`rejected` → `deprecated`）。lifecycle を変える時は `reason` が必須。`adopted` にするのはユーザーが ADR の内容そのものを受け入れた時だけ、`rejected` にするのはユーザーが判断した後だけ。pmlens はそれを確かめられないので、lifecycle を変えるたびに伝えるべき警告 `decision_lifecycle_changed` を返す。申告の `origin`（`ai_auto` だけ）と `recorded_timing` は、`unknown` のままなら reason を添えて後から入れられる。full モードだけ（Lens には出ない） |
+| `pm_update_decision_posture` | プロジェクトの姿勢を変える（`bold` は新規開発・挑戦的な制作向け、`cautious` は保守・改修・修正向け、`unset` は未設定で `cautious` として振る舞う）。`.pm/decision_policy.yaml` に変更の履歴と一緒に保存する。ユーザーが求めた時だけ、その `reason`（必須。保存の前に redact する）を添えて使う。変更のたびに伝えるべき警告 `decision_posture_changed` を返す。`pm_init(decision_posture=…)` が設定するのは新しいプロジェクトの時だけで、`pm_status` が現在の値と最後の変更を示す。full モードだけ（Lens には出ない） |
 
 #### ADR の lifecycle: pmlens が保証することと、規約であること
 
@@ -733,8 +734,8 @@ Claude Code Session
   └── MCP Server (stdio)
         └── pmlens serve
               │
-              ├── server.py    → 46 MCP ツール + 互換名2個 (FastMCP)
-              ├── models.py    → Pydantic v2 データモデル (18 models, 23 enums)
+              ├── server.py    → 47 MCP ツール + 互換名2個 (FastMCP)
+              ├── models.py    → Pydantic v2 データモデル (18 models, 24 enums)
               ├── storage.py   → YAML 読み書き
               ├── workflow.py  → ワークフローエンジン (state machine)
               ├── memory.py    → SQLite メモリストア + FTS5 検索

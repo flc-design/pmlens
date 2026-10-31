@@ -72,6 +72,7 @@ _LINEAGE_ENUMS = (
     "EvaluationKind",
     "FactSource",
     "Reversibility",
+    "DecisionPosture",
 )
 
 

@@ -51,7 +51,12 @@ from pmlens.lineage import (
     project_status,
 )
 from pmlens.models import Consequences, Decision, DecisionStatus, PmServerError
-from pmlens.server import pm_add_decision, pm_decision_query, pm_update_decision
+from pmlens.server import (
+    pm_add_decision,
+    pm_decision_query,
+    pm_update_decision,
+    pm_update_decision_posture,
+)
 
 NOW = "2026-10-05T03:12:00Z"
 SECRET = "AKIA" + "Q" * 16
@@ -963,6 +968,23 @@ class TestD8:
         ):
             assert absent not in _UPDATE_PARAMETERS
 
+    def test_b_the_posture_tool_takes_exactly_the_designed_arguments(self):
+        # S2 spec §3.8, §6.1 D8 (b): the posture, the user's reason and the
+        # project; nothing that sets who decided or how it was confirmed.
+        assert _TOOL_PARAMETERS["pm_update_decision_posture"] == [
+            "decision_posture",
+            "reason",
+            "project_path",
+        ]
+        signature = inspect.signature(pm_update_decision_posture)
+        required = [
+            name
+            for name, parameter in signature.parameters.items()
+            if parameter.default is inspect.Parameter.empty
+        ]
+        assert required == ["decision_posture", "reason"]
+        assert _TOOL_PARAMETERS["pm_init"][-1] == "decision_posture"
+
     def test_c_decision_kind_is_only_declared_when_recording(self):
         assert [t for t, names in _TOOL_PARAMETERS.items() if "decision_kind" in names] == [
             "pm_add_decision"
@@ -1025,7 +1047,10 @@ class TestToolDescriptions:
         assert "ai_proposed_human_decided (you proposed it and the user decided its content)" in doc
         assert "Recording as accepted returns a warning to relay to the user" in doc
 
-    @pytest.mark.parametrize("tool", [pm_add_decision, pm_update_decision, pm_decision_query])
+    @pytest.mark.parametrize(
+        "tool",
+        [pm_add_decision, pm_update_decision, pm_decision_query, pm_update_decision_posture],
+    )
     def test_descriptions_carry_no_ticket_or_adr_numbers(self, tool: Callable):
         doc = _description(tool)
         assert not re.search(r"PMSERV|ADR-\d|docs/", doc), tool.__name__

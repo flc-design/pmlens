@@ -2403,6 +2403,10 @@ _LEDGER_ERRORS_TREE = ast.parse(
 _SAFE_YAML_TREE = ast.parse(
     (Path(pmlens.__file__).parent / "safe_yaml.py").read_text(encoding="utf-8")
 )
+# policy.py (S2 spec §6.3) reads .pm/decision_policy.yaml through lineage's
+# bounded reader, under lineage.py's rules plus the import of lineage itself.
+_POLICY_TREE = ast.parse((Path(pmlens.__file__).parent / "policy.py").read_text(encoding="utf-8"))
+_POLICY_IMPORTS = _ALLOWED_IMPORTS | {".lineage"}
 _LEDGER_ERRORS_IMPORTS = frozenset(
     {
         "__future__",
@@ -2532,6 +2536,19 @@ def _write_violations(tree: ast.AST, allowed: frozenset[str] = _ALLOWED_IMPORTS)
     return found
 
 
+def _imported_modules(tree: ast.AST) -> set[str]:
+    """Every module part and imported name, to look for one module by name."""
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            names.update((node.module or "").split("."))
+            names.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                names.update(alias.name.split("."))
+    return names
+
+
 class TestModuleBoundary:
     def test_lineage_does_not_import_storage(self):
         for node in ast.walk(_LINEAGE_TREE):
@@ -2546,6 +2563,20 @@ class TestModuleBoundary:
 
     def test_lineage_makes_no_write_calls(self):
         assert _write_violations(_LINEAGE_TREE) == []
+
+    def test_policy_does_not_import_storage_and_lineage_does_not_import_policy(self):
+        assert "storage" not in _imported_modules(_POLICY_TREE)
+        assert "policy" not in _imported_modules(_LINEAGE_TREE)
+        assert ".lineage" in _import_names(_POLICY_TREE)  # the allowance is used
+
+    def test_policy_makes_no_write_calls_and_opens_nothing_itself(self):
+        assert _write_violations(_POLICY_TREE, _POLICY_IMPORTS) == []
+        opens = [
+            node
+            for node in ast.walk(_POLICY_TREE)
+            if isinstance(node, ast.Call) and _call_name(node) in {"open", "_read_bounded"}
+        ]
+        assert opens == []  # it reads through lineage.read_bounded_yaml only
 
     def test_ledger_errors_makes_no_write_calls(self):
         # lineage.py imports it, so it is held to the same rules, with no os.
