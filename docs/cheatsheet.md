@@ -1,6 +1,6 @@
 # PM Lens Cheatsheet
 
-> **48 MCP tools + 2 compatibility aliases** for Claude Code, Codex CLI, Cursor and Grok Build.
+> **49 MCP tools + 2 compatibility aliases** for Claude Code, Codex CLI, Cursor and Grok Build.
 > Version 0.17.0 | Python 3.11+ | PyPI: `pmlens`
 
 ---
@@ -92,6 +92,7 @@ The names below are the standard ones; the legacy names remain as aliases. See t
 | `pm_decision_query` | Read ADRs and their lineage, changing nothing (Lens-safe). `lifecycle="proposed"` lists ADRs awaiting the user's review; list pages with `limit` / `offset` | `action="list"`, `decision_id?` (get), `lifecycle?`, `limit=50`, `offset=0` |
 | `pm_update_decision` | Move an ADR's lifecycle (e.g. proposed → adopted once the user approves), change its links, append an evaluation or a note; the text never changes (full mode only) | `decision_id`, `lifecycle?`, `reason?`, `add_links?`, `remove_links?`, `evaluation?`, `note?` |
 | `pm_add_explanation` | Save an explanation of an ADR written from its current fact core; every current fact must lead a paragraph, the accuracy is never checked (shown as unconfirmed), and a revision marks older ones stale (full mode only) | `decision_id`, `fact_core_version`, `paragraphs`, `question?` |
+| `pm_add_feedback` | Record the user's reply to an ADR in their own words (8 kinds, incl. `check_answer`); the declared `respondent_scope` is never checked, approval changes no lifecycle, replies are never scored (full mode only) | `decision_id`, `feedback_kind`, `text`, `explanation_id?`, `fact_ids?`, `respondent_scope="unknown"` |
 | `pm_update_decision_posture` | Change the project's decision posture (bold / cautious / unset) when the user asks, with their reason; kept in a history (full mode only) | `decision_posture`, `reason` |
 | `pm_velocity` | Velocity and trend analysis | `weeks=4` |
 | `pm_risks` | Auto-detected + manual risks | `project_path?` |
@@ -468,6 +469,8 @@ pm-server hook post-tool-use   # PostToolUse hook handler
 | EvaluationKind | `test`, `ai_review`, `outcome`, `other` |
 | FactSource | `proposal`, `observed` (reserved; pmlens writes only proposal) |
 | Reversibility | `code_revertable`, `external_irreversible`, `unknown` (treated like external_irreversible) |
+| FeedbackKind | `premise_mismatch`, `what_if`, `unacceptable`, `try_alternative`, `approve`, `reject`, `comment`, `check_answer` (the answer to the question after an explanation; approve and reject do not change the lifecycle) |
+| RespondentScope | `can_judge`, `cannot_judge`, `unknown` (the default; a declaration pmlens never checks) |
 | DecisionPosture | `bold` (new or exploratory work), `cautious` (maintenance and fixes), `unset` (not chosen yet; acts as cautious) |
 | LogCategory | `progress`, `decision`, `blocker`, `note`, `milestone` |
 | MemoryType | `observation`, `insight`, `lesson` |

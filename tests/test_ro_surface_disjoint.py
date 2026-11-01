@@ -511,8 +511,14 @@ class TestWidenedSurfaces:
         assert "_append_to_lineage" in _GRAPH.reachable({"record_lineage_explanation"})
         assert "_append_to_lineage" in _GRAPH.reachable({"pm_add_explanation"})
         assert not {"_append_to_lineage", "record_lineage_explanation"} & _RO_CLOSURE
+        # Feedback goes the same way (S2 spec §5.1, §6.3).
+        assert "_append_to_lineage" in _GRAPH.reachable({"record_lineage_feedback"})
+        assert "_append_to_lineage" in _GRAPH.reachable({"pm_add_feedback"})
+        assert "record_lineage_feedback" not in _RO_CLOSURE
         assert "pm_add_explanation" in _ALL_TOOLS
         assert "pm_add_explanation" not in _RO_SEED
+        assert "pm_add_feedback" in _ALL_TOOLS
+        assert "pm_add_feedback" not in _RO_SEED
 
     def test_ro_surface_never_writes_a_ledger(self):
         leaked = _RO_CLOSURE & _GRAPH.ledger_writers

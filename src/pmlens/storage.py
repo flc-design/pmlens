@@ -1551,6 +1551,71 @@ def record_lineage_explanation(
     )
 
 
+def record_lineage_feedback(
+    pm_path: Path,
+    decision_id: str,
+    *,
+    feedback_kind: object,
+    text: object,
+    explanation_id: object = None,
+    fact_ids: object = None,
+    respondent_scope: object = "unknown",
+) -> LineageAppendResult:
+    """Record what the user said about an ADR (S2 spec §3.4).
+
+    The arguments are checked by their shape first, before any file is read
+    (:func:`lineage.feedback_call_error`, the check the tool also runs before
+    the project is resolved). Then :func:`_append_to_lineage` takes the ADR's
+    lineage lock alone, starts a lineage from the ADR's status when it has
+    none (``decision_lineage_started``), and :func:`lineage.add_feedback_doc`
+    checks the reply against the lineage as it is under the lock and numbers
+    it. The lifecycle, the status and decisions.yaml never change, approve
+    and reject included.
+
+    Args:
+        pm_path: The project's ``.pm`` directory.
+        decision_id: The ADR id.
+        feedback_kind: One of the eight feedback kinds.
+        text: The user's words.
+        explanation_id: The explanation replied to (required for check_answer).
+        fact_ids: Facts of the current version the reply is about.
+        respondent_scope: can_judge, cannot_judge or unknown, as declared.
+
+    Returns:
+        The result; ``fields`` holds the feedback id, its kind, the fact core
+        version it was recorded against, the declared scope, the review label
+        derived from it and the ``next`` step.
+    """
+    problem = _lineage.feedback_call_error(
+        decision_id, feedback_kind, text, explanation_id, fact_ids, respondent_scope
+    )
+    if problem is not None:
+        if not _lineage.is_decision_id(decision_id):
+            decision_id = _lineage.scrub_label(decision_id)
+        return LineageAppendResult(status="error", decision_id=decision_id, error=problem)
+
+    def apply(doc: dict, adr: Decision, now: str) -> _lineage.AppendOutcome:
+        return _lineage.add_feedback_doc(
+            doc,
+            adr,
+            now,
+            feedback_kind=feedback_kind,
+            text=text,
+            explanation_id=explanation_id,
+            fact_ids=fact_ids,
+            respondent_scope=respondent_scope,
+        )
+
+    return _append_to_lineage(
+        pm_path,
+        decision_id,
+        apply,
+        when_missing="start",
+        via=_lineage.FEEDBACK_VIA,
+        section="feedback",
+    )
+
+
 # ─── Decision posture (S2 spec §2.10, §3.8) ──────────
 
 

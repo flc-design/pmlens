@@ -490,21 +490,22 @@ class TestLineageView:
         for i in range(60):
             doc[f"extra{i}"] = i
         view = lineage_view(adr, _raw(adr, doc))
-        # fact_core is a known section since S2 (S2 spec §2.6); feedback stays
-        # unknown until its own task adds it.
-        assert view.unknown_keys[:4] == [
-            "feedback",
+        # fact_core, explanations and feedback are known sections since S2 (S2
+        # spec §2.6), so they are not listed as unknown keys.
+        assert view.unknown_keys[:3] == [
             "key-<REDACTED:secret>",
             "7",
             "k" * lineage.MAX_LABEL_CHARS,
         ]
-        assert view.unknown_keys[4] == "extra0"
+        assert view.unknown_keys[3] == "extra0"
         assert len(view.unknown_keys) == lineage.MAX_UNKNOWN_KEYS
         assert SECRET not in json.dumps(view.as_dict())
-        # A fact_core of the wrong shape is skipped and noted, its value never shown.
+        # A fact_core and a feedback of the wrong shape are skipped and noted
+        # (one each), their values never shown.
         s2 = lineage_view(adr, _raw(adr, doc), include_s2=True)
         assert s2.fact_core is None
-        assert "decision_lineage_items_skipped" in _codes(s2)
+        assert s2.feedback == {"items": [], "feedback_total": 0}
+        assert _note_count(s2, "decision_lineage_items_skipped") == 2
         assert SECRET not in json.dumps(s2.as_dict())
 
     def test_events_follow_the_per_kind_allow_list(self):
@@ -525,6 +526,8 @@ class TestLineageView:
         ]
         view = lineage_view(adr, _raw(adr, _doc(adr, events=events)))
         evaluation, transition, future, note = view.events
+        # caused_by is an evaluation field since S2 (S2 spec §2.5): a value that
+        # is not a list of feedback ids is skipped and counted, never shown.
         assert evaluation == {
             "at": NOW,
             "kind": "evaluation",
@@ -532,7 +535,7 @@ class TestLineageView:
             "evaluation_kind": "ai_review",
             "text": "looks fine",
             "recorded_as": "assistant_recorded_unverified",
-            "unknown_fields": ["caused_by", "<REDACTED:secret>"],
+            "unknown_fields": ["<REDACTED:secret>"],
         }
         assert transition == {"at": NOW, "kind": "lifecycle", "from": "proposed", "to": "adopted"}
         assert future == {
@@ -542,7 +545,8 @@ class TestLineageView:
             "unknown_fields": ["payload", "text"],
         }
         assert len(note["text"]) == lineage.MAX_TEXT_CHARS and note["truncated"] is True
-        assert _note_count(view, "decision_lineage_items_skipped") == 1  # the dict reason
+        # The bytes caused_by and the dict reason.
+        assert _note_count(view, "decision_lineage_items_skipped") == 2
         json.dumps(view.as_dict())
 
     def test_only_the_last_twenty_events_are_shown(self):

@@ -171,6 +171,35 @@ class Reversibility(StrEnum):
     UNKNOWN = "unknown"
 
 
+class FeedbackKind(StrEnum):
+    """What a recorded reply about an ADR says. Replies are recorded, never scored.
+
+    approve and reject change neither the lifecycle nor the status; check_answer
+    is the reply to the question asked after an explanation.
+    """
+
+    PREMISE_MISMATCH = "premise_mismatch"
+    WHAT_IF = "what_if"
+    UNACCEPTABLE = "unacceptable"
+    TRY_ALTERNATIVE = "try_alternative"
+    APPROVE = "approve"
+    REJECT = "reject"
+    COMMENT = "comment"
+    CHECK_ANSWER = "check_answer"
+
+
+class RespondentScope(StrEnum):
+    """Whether the person who replied can judge this kind of decision, as declared.
+
+    A declaration made when the reply is recorded; pmlens never checks it, and
+    it is shown as declared, never as a review that took place.
+    """
+
+    CAN_JUDGE = "can_judge"
+    CANNOT_JUDGE = "cannot_judge"
+    UNKNOWN = "unknown"
+
+
 class DecisionPosture(StrEnum):
     """How to lean when the user cannot judge a kind of decision (the project's posture).
 

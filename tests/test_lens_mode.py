@@ -73,6 +73,7 @@ _KNOWN_MUTATORS: frozenset[str] = frozenset(
         "pm_update_decision",
         "pm_update_decision_posture",
         "pm_add_explanation",
+        "pm_add_feedback",
         "pm_discover",
         "pm_cleanup",
         "pm_update_claudemd",

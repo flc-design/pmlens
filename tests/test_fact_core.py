@@ -19,6 +19,10 @@ What this file pins, by the S2 specification's numbering
 * ``changed_ids`` / ``stale`` from the fact core alone (§2.3, D6 for 228).
 * The S2 view of the fact core, its caps and unknown key names (§2.6), the
   event type rules.
+* caused_by on fact_core versions and evaluations (§2.5, §2.7, §3.1;
+  PMSERV-231): the argument checks, feedback of the same ADR that is on
+  record, a broken feedback section, the refusal order, and the ratchet
+  holding with caused_by.
 * Through the tools (§3.1, §3.6, §5.2): pm_update_decision's arguments, the
   refusal order, the response keys (S1 calls keep theirs), every error code
   leaving the files' bytes alone, D5 with two threads, S1 writers not stopped
@@ -2858,8 +2862,11 @@ class TestGetThroughTheTool:
 
     def test_the_docstrings_name_the_fact_core(self):
         query = " ".join((pm_decision_query.__doc__ or "").split())
-        # S2 spec §3.6; explanations join the line in the explanation task.
-        assert "recent events, the fact core and explanations (stale ones marked)" in query
+        # S2 spec §3.6: explanations and feedback joined the line in their tasks.
+        assert (
+            "recent events, the fact core, explanations (stale ones marked) and recorded "
+            "feedback" in query
+        )
         update = " ".join((pm_update_decision.__doc__ or "").split())
         for phrase in (
             "never infer a premise",
@@ -2871,6 +2878,24 @@ class TestGetThroughTheTool:
             "its fact_core is fixed until the ADR is moved back to proposed",
         ):
             assert phrase in update, phrase
+
+    def test_the_update_docstring_ends_with_the_lines_the_spec_words(self):
+        # S2 spec §3.1 "docstring に足す文": the fact core lines (228) and the
+        # caused_by lines (231) close the argument descriptions, as worded.
+        spec = (
+            Path(__file__).resolve().parents[1]
+            / "docs"
+            / "issues"
+            / "DESIGN_decision-lineage-s2.md"
+        ).read_text(encoding="utf-8")
+        start = spec.index("fact_core (+ expected_fact_core_version: the version you read")
+        worded = " ".join(spec[start : spec.index("```", start)].split())
+        assert worded.endswith(
+            "caused_by: feedback ids (ADR-NNN.FB-n) of this ADR that led to this fact_core "
+            "revision or evaluation."
+        )
+        update = " ".join((pm_update_decision.__doc__ or "").split())
+        assert update.endswith(worded)
 
 
 # ─── Sizes as written (S2 spec §2.8) ────────────────────────────────────
@@ -2962,3 +2987,331 @@ class TestSizesAsWritten:
         assert cap - crlf_step < len(data) <= cap
         raw = read_lineage_raw(tmp_pm_path, ADR_ID)
         assert raw.error is None and raw.data["padding"] == [_PAD_LINE] * crlf_fits
+
+
+# ─── caused_by (S2 spec §2.5, §2.7, §3.1; PMSERV-231) ───────────────────
+
+
+def _feedback_entry(number: int, adr_id: str = ADR_ID) -> dict:
+    return {
+        "id": f"{adr_id}.FB-{number}",
+        "at": NOW,
+        "via": "pm_add_feedback",
+        "feedback_kind": "premise_mismatch",
+        "text": "the premise is wrong",
+        "fact_core_version": 1,
+        "respondent_scope": "unknown",
+    }
+
+
+def _with_feedback(*numbers: int) -> _Lineage:
+    """A lineage at version 1 holding feedback with these numbers (as written by hand)."""
+    adr = _Lineage()
+    adr.write(_facts())
+    adr.doc["feedback"] = {
+        "last_number": max(numbers, default=0),
+        "items": [_feedback_entry(n) for n in numbers],
+    }
+    return adr
+
+
+def _evaluation(caused_by: object, **kwargs: object) -> LineageChange:
+    return LineageChange(
+        evaluation="the tests pass", evaluation_kind="test", caused_by=caused_by, **kwargs
+    )
+
+
+def _fb(*numbers: int, adr_id: str = ADR_ID) -> list[str]:
+    return [f"{adr_id}.FB-{n}" for n in numbers]
+
+
+class TestCausedByArguments:
+    @pytest.mark.parametrize(
+        ("change", "code"),
+        [
+            (_evaluation("ADR-900.FB-1"), "invalid_caused_by"),
+            (_evaluation({"ADR-900.FB-1": 1}), "invalid_caused_by"),
+            (_evaluation(["ADR-900.EX-1"]), "invalid_caused_by"),
+            (_evaluation(["ADR-900.FB-0"]), "invalid_caused_by"),
+            (_evaluation([f"ADR-900.FB-{SECRET}"]), "invalid_caused_by"),
+            (_evaluation([1]), "invalid_caused_by"),
+            (_evaluation(_fb(*range(1, 12))), "too_many_caused_by"),
+            (LineageChange(note="n", caused_by=_fb(1)), "caused_by_without_target"),
+            (
+                LineageChange(lifecycle="adopted", reason="r", caused_by=_fb(1)),
+                "caused_by_without_target",
+            ),
+            (LineageChange(evaluation="  ", caused_by=_fb(1)), "caused_by_without_target"),
+            (
+                LineageChange(add_links={"amends": ["ADR-901"]}, caused_by=_fb(1)),
+                "caused_by_without_target",
+            ),
+        ],
+    )
+    def test_refused_by_the_arguments(self, change: LineageChange, code: str):
+        error = lineage.validate_change(change)
+        assert error is not None and error["code"] == code, error
+        assert SECRET not in json.dumps(error)
+
+    @pytest.mark.parametrize(
+        "change",
+        [
+            _evaluation(_fb(*range(1, 11))),
+            _evaluation(_fb(*range(1, 11), 1)),  # a repeat does not count
+            _evaluation([]),
+            LineageChange(note="n", caused_by=[]),  # an empty list asks for nothing
+            LineageChange(fact_core=_facts(), expected_fact_core_version=0, caused_by=_fb(1)),
+        ],
+    )
+    def test_accepted_by_the_arguments(self, change: LineageChange):
+        assert lineage.validate_change(change) is None
+
+    def test_caused_by_goes_with_fact_core(self):
+        # fact_core may be combined only with reason and caused_by (S2 spec §3.1).
+        change = LineageChange(
+            fact_core=_facts(), expected_fact_core_version=0, reason="r", caused_by=_fb(1)
+        )
+        assert lineage.validate_change(change) is None
+
+
+class TestCausedByOnTheEvents:
+    def test_an_evaluation_names_its_feedback(self):
+        adr = _with_feedback(1, 2)
+        outcome = adr.call(_evaluation(_fb(2, 1, 2)))
+        assert outcome.error is None and outcome.changed
+        event = adr.doc["events"][-1]
+        assert event == {
+            "at": NOW,
+            "kind": "evaluation",
+            "evaluation_kind": "test",
+            "text": "the tests pass",
+            "caused_by": ["ADR-900.FB-2", "ADR-900.FB-1"],  # repeats dropped, order kept
+            "via": "pm_update_decision",
+        }
+        shown = adr.view().events[-1]
+        assert shown["caused_by"] == ["ADR-900.FB-2", "ADR-900.FB-1"]
+        assert "unknown_fields" not in shown
+
+    def test_an_evaluation_without_caused_by_keeps_its_s1_shape(self):
+        adr = _with_feedback(1)
+        adr.call(_evaluation(None))
+        assert "caused_by" not in adr.doc["events"][-1]
+        adr.call(_evaluation([]))
+        assert "caused_by" not in adr.doc["events"][-1]
+
+    def test_a_revision_names_its_feedback(self):
+        adr = _with_feedback(1)
+        outcome = adr.facts(
+            _facts(weak={"kind": "weak", "text": "w2"}), caused_by=_fb(1), reason="the user said"
+        )
+        assert outcome.error is None and outcome.changed
+        event = adr.doc["events"][-1]
+        assert list(event) == [
+            "at",
+            "kind",
+            "version",
+            "changed_ids",
+            "caused_by",
+            "reason",
+            "via",
+        ]
+        assert event["caused_by"] == ["ADR-900.FB-1"] and event["version"] == 2
+        assert adr.view().events[-1]["caused_by"] == ["ADR-900.FB-1"]
+
+    def test_a_first_version_may_name_feedback(self):
+        adr = _Lineage()
+        adr.doc["feedback"] = {"items": [{**_feedback_entry(1), "fact_core_version": 0}]}
+        outcome = adr.facts(_facts(), caused_by=_fb(1))
+        assert outcome.error is None
+        assert adr.doc["events"][-1]["caused_by"] == ["ADR-900.FB-1"]
+
+    def test_a_revision_without_caused_by_keeps_its_shape(self):
+        adr = _with_feedback(1)
+        adr.write(_facts(weak={"kind": "weak", "text": "w2"}))
+        assert "caused_by" not in adr.doc["events"][-1]
+
+    def test_the_view_caps_and_filters_caused_by(self):
+        adr = _with_feedback(1)
+        adr.doc["events"] += [
+            {
+                "at": NOW,
+                "kind": "evaluation",
+                "evaluation_kind": "test",
+                "text": "t",
+                "caused_by": _fb(*range(1, 14)),
+            },
+            {
+                "at": NOW,
+                "kind": "fact_core",
+                "version": 1,
+                "caused_by": ["ADR-900.FB-1", SECRET, 5, "ADR-900.EX-1"],
+            },
+            {"at": NOW, "kind": "evaluation", "text": "t", "caused_by": "ADR-900.FB-1"},
+            {"at": NOW, "kind": "note", "text": "t", "caused_by": _fb(1)},
+        ]
+        capped, filtered, not_a_list, note = adr.view().events[-4:]
+        assert capped["caused_by"] == _fb(*range(1, 11))
+        assert filtered["caused_by"] == ["ADR-900.FB-1"]
+        assert "caused_by" not in not_a_list
+        # A note has no caused_by (S2 spec §2.5): still an unknown field.
+        assert note["unknown_fields"] == ["caused_by"]
+        view = adr.view()
+        assert "decision_lineage_items_skipped" in view.note_codes
+        assert SECRET not in json.dumps(view.as_dict())
+
+
+class TestCausedByRefusals:
+    @pytest.mark.parametrize("path", ["evaluation", "fact_core"])
+    def test_feedback_of_another_adr(self, path: str):
+        adr = _with_feedback(1)
+        adr.doc["feedback"]["items"].append(_feedback_entry(2, OTHER_ID))  # by hand
+        ids = ["ADR-900.FB-1", f"{OTHER_ID}.FB-2"]
+        error = self._refused(adr, path, ids, "invalid_caused_by")
+        assert f"{OTHER_ID}.FB-2" in error["message"]
+
+    @pytest.mark.parametrize("path", ["evaluation", "fact_core"])
+    def test_feedback_that_is_not_on_record(self, path: str):
+        adr = _with_feedback(1)
+        error = self._refused(adr, path, _fb(1, 3), "caused_by_not_found")
+        assert "ADR-900.FB-3" in error["message"] and "ADR-900.FB-1" not in error["message"]
+        assert "pm_add_feedback" in error["remediation"]
+        bare = _Lineage()
+        bare.write(_facts())
+        self._refused(bare, path, _fb(1), "caused_by_not_found")
+
+    def test_a_started_lineage_has_no_feedback(self):
+        adr = _Lineage(started=True)
+        outcome = adr.call(_evaluation(_fb(1)))
+        assert outcome.error["code"] == "caused_by_not_found" and adr.doc is None
+
+    @pytest.mark.parametrize(
+        "feedback",
+        [
+            [SECRET],
+            {"items": SECRET},
+            {"last_number": 1},
+            {"items": [_feedback_entry(1), SECRET]},
+            {"items": [{**_feedback_entry(1), "id": f"ADR-900.FB-{SECRET}"}]},
+            {"items": [{**_feedback_entry(1), "fact_core_version": "1"}]},
+        ],
+    )
+    @pytest.mark.parametrize("path", ["evaluation", "fact_core"])
+    def test_a_broken_feedback_section(self, path: str, feedback: object):
+        adr = _with_feedback(1)
+        adr.doc["feedback"] = feedback
+        error = self._refused(adr, path, _fb(1), "decision_lineage_unreadable")
+        assert "feedback" in error["message"]
+        assert SECRET not in json.dumps(error)
+
+    def test_a_broken_last_number_does_not_stop_the_lookup(self):
+        # Only the feedback writer numbers entries (S2 spec §2.4).
+        adr = _with_feedback(1)
+        adr.doc["feedback"]["last_number"] = "x"
+        assert adr.call(_evaluation(_fb(1))).error is None
+
+    def test_without_caused_by_a_broken_feedback_section_stops_nothing(self):
+        adr = _with_feedback(1)
+        adr.doc["feedback"] = [SECRET]
+        assert adr.call(_evaluation(None)).error is None
+        adr.write(_facts(weak={"kind": "weak", "text": "w2"}))
+        adr.move("adopted")
+
+    def test_the_order_on_the_fact_core_path(self):
+        # §2.7 refusals -> fact_core_after_adoption -> version -> required
+        # items -> caused_by -> the ratchet (S2 spec §3.1).
+        adr = _with_feedback(1)
+        adr.doc["fact_core"]["version"] = "1"
+        adr.doc["feedback"] = [SECRET]
+        error = adr.refused(_facts(), "decision_lineage_unreadable", caused_by=_fb(9), expected=1)
+        assert "fact_core.version" in error["message"]
+        adr = _with_feedback(1)
+        adr.doc["feedback"] = [SECRET]
+        error = adr.refused(_facts(), "decision_lineage_unreadable", caused_by=_fb(9))
+        assert "feedback" in error["message"]
+        fixed = _adopted_with_facts()
+        fixed.refused(_facts(), "fact_core_after_adoption", caused_by=_fb(9), expected=2)
+        adr = _with_feedback(1)
+        adr.refused(_facts(), "fact_core_version_mismatch", caused_by=_fb(9), expected=0)
+        adr.refused(_facts()[1:], "fact_core_item_required", caused_by=_fb(9))
+        lowering = _facts(revert={**BASE[2], "reversibility": "code_revertable"})
+        adr.refused(lowering, "caused_by_not_found", caused_by=_fb(9))
+
+    def test_the_ratchet_holds_with_caused_by(self):
+        # Recording feedback never opens the way down to code_revertable (Q12).
+        adr = _with_feedback(1, 2)
+        lowering = _facts(revert={**BASE[2], "reversibility": "code_revertable"})
+        error = adr.refused(
+            lowering, "fact_core_reversibility_lowering_refused", caused_by=_fb(1, 2)
+        )
+        assert (error["from"], error["to"]) == ("unknown", "code_revertable")
+        raised = _facts(revert={**BASE[2], "reversibility": "external_irreversible"})
+        assert adr.facts(raised, caused_by=_fb(1)).error is None
+
+    @staticmethod
+    def _refused(adr: _Lineage, path: str, caused_by: list[str], code: str) -> dict:
+        before = copy.deepcopy(adr.doc)
+        if path == "evaluation":
+            outcome = adr.call(_evaluation(caused_by))
+        else:
+            outcome = adr.facts(_facts(weak={"kind": "weak", "text": "w2"}), caused_by=caused_by)
+        assert outcome.error is not None and outcome.error["code"] == code, outcome.error
+        assert outcome.doc is None and adr.doc == before
+        return outcome.error
+
+
+class TestCausedByThroughStorage:
+    def test_feedback_recorded_then_named(self, tmp_pm_path: Path):
+        adr = _seed(tmp_pm_path)
+        first = LineageChange(fact_core=_facts(), expected_fact_core_version=0)
+        assert change_decision_lineage(tmp_pm_path, ADR_ID, first).status == "updated"
+        recorded = storage.record_lineage_feedback(
+            tmp_pm_path, ADR_ID, feedback_kind="premise_mismatch", text="Not 10 but 30"
+        )
+        feedback_id = recorded.fields["feedback_id"]
+        assert feedback_id == "ADR-900.FB-1"
+        revised = change_decision_lineage(
+            tmp_pm_path,
+            ADR_ID,
+            LineageChange(
+                fact_core=_facts(weak={"kind": "weak", "text": "w2"}),
+                expected_fact_core_version=1,
+                caused_by=[feedback_id],
+                reason="the user corrected it",
+            ),
+        )
+        assert revised.status == "updated", revised.error
+        evaluated = change_decision_lineage(
+            tmp_pm_path, ADR_ID, _evaluation([feedback_id], reason=None)
+        )
+        assert evaluated.status == "updated", evaluated.error
+        view = lineage_view(adr, read_lineage_raw(tmp_pm_path, ADR_ID), include_s2=True)
+        kinds = [(event["kind"], event.get("caused_by")) for event in view.events]
+        assert kinds[-2:] == [("fact_core", [feedback_id]), ("evaluation", [feedback_id])]
+
+    @pytest.mark.parametrize(
+        ("change", "code"),
+        [
+            (_evaluation(_fb(2)), "caused_by_not_found"),
+            (_evaluation(_fb(1, adr_id=OTHER_ID)), "invalid_caused_by"),
+            (
+                LineageChange(
+                    fact_core=_facts(revert={**BASE[2], "reversibility": "code_revertable"}),
+                    expected_fact_core_version=1,
+                    caused_by=_fb(1),
+                ),
+                "fact_core_reversibility_lowering_refused",
+            ),
+            (LineageChange(note="n", caused_by=_fb(1)), "caused_by_without_target"),
+        ],
+    )
+    def test_errors_leave_the_files_alone(self, tmp_pm_path: Path, change, code: str):
+        _seed(tmp_pm_path)
+        first = LineageChange(fact_core=_facts(), expected_fact_core_version=0)
+        assert change_decision_lineage(tmp_pm_path, ADR_ID, first).status == "updated"
+        storage.record_lineage_feedback(tmp_pm_path, ADR_ID, feedback_kind="comment", text="t")
+        before = _lineage_path(tmp_pm_path).read_bytes()
+        decisions = (tmp_pm_path / "decisions.yaml").read_bytes()
+        result = change_decision_lineage(tmp_pm_path, ADR_ID, change)
+        assert result.error is not None and result.error["code"] == code, result.error
+        assert _lineage_path(tmp_pm_path).read_bytes() == before
+        assert (tmp_pm_path / "decisions.yaml").read_bytes() == decisions

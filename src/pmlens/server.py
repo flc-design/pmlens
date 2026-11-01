@@ -101,6 +101,7 @@ from .storage import (
     load_tracks,
     load_workflows,
     record_lineage_explanation,
+    record_lineage_feedback,
     register_project,
     unknown_decision_statuses,
     update_knowledge,
@@ -4216,6 +4217,7 @@ def pm_update_decision(
     recorded_timing: str | None = None,
     fact_core: list[dict] | None = None,
     expected_fact_core_version: int | None = None,
+    caused_by: list[str] | None = None,
     project_path: str | None = None,
 ) -> dict:
     """Change an ADR's lifecycle, links, facts or follow-up record; its text is never changed.
@@ -4265,6 +4267,8 @@ def pm_update_decision(
     until the ADR is moved back to proposed at the user's request; record changes
     as a new ADR with amends otherwise. Facts written after an ADR was adopted
     stay editable and are shown as such.
+    caused_by: feedback ids (ADR-NNN.FB-n) of this ADR that led to this fact_core
+    revision or evaluation.
     """
     change = _lineage.LineageChange(
         lifecycle=lifecycle,
@@ -4278,6 +4282,7 @@ def pm_update_decision(
         recorded_timing=recorded_timing,
         fact_core=fact_core,
         expected_fact_core_version=expected_fact_core_version,
+        caused_by=caused_by,
     )
     # Argument-only checks come before the project is resolved, as in
     # pm_add_decision; change_decision_lineage repeats them under its locks.
@@ -4371,6 +4376,71 @@ def pm_add_explanation(
     }
 
 
+# ─── Decision feedback (S2 spec §3.4, full mode only) ───
+# Not in RO_ALLOWLIST: Lens never registers it. The tool checks the arguments;
+# the decisions.yaml read, the lineage lock, the fact core and feedback checks,
+# the numbering and the write live in storage.record_lineage_feedback.
+
+
+@_tool()
+def pm_add_feedback(
+    decision_id: str,
+    feedback_kind: str,
+    text: str,
+    explanation_id: str | None = None,
+    fact_ids: list[str] | None = None,
+    respondent_scope: str = "unknown",
+    project_path: str | None = None,
+) -> dict:
+    """Record what the user said about an ADR: a premise that is wrong, a what-if, an
+    objection, an alternative to try, approval, rejection, a comment, or the
+    answer to the question asked after an explanation (check_answer).
+
+    Use it right after the user replies, with the user's own words as text. Do not
+    use it to adopt or reject the ADR: approval recorded here changes nothing; set
+    the lifecycle with pm_update_decision when the user has decided.
+    respondent_scope: pass only the can_judge or cannot_judge that
+    pm_decision_brief returned after this reader answered its question about
+    which kinds of decisions they can judge themselves; otherwise unknown. Never
+    pass can_judge on a guess or on your own reading of the reader. It is shown
+    as declared, pmlens does not check it, and it never changes the floor or
+    what the brief asks. A reply from someone who cannot
+    judge this kind of decision is shown as "no review by a person able to judge"
+    and can never count as one. Replies are recorded, never scored.
+    """
+    # Argument-only checks come before the project is resolved and before any
+    # lock (S2 spec §3.4); record_lineage_feedback repeats them.
+    problem = _lineage.feedback_call_error(
+        decision_id, feedback_kind, text, explanation_id, fact_ids, respondent_scope
+    )
+    if problem is not None:
+        return problem
+    pm_path = _get_pm_path(project_path)
+    outcome = record_lineage_feedback(
+        pm_path,
+        decision_id,
+        feedback_kind=feedback_kind,
+        text=text,
+        explanation_id=explanation_id,
+        fact_ids=fact_ids,
+        respondent_scope=respondent_scope,
+    )
+    if outcome.error is not None:
+        return outcome.error
+    fields = dict(outcome.fields)
+    # The keys follow the S2 spec §3.4 example: next comes last, after the
+    # warnings. It holds only a server-made feedback id and an int (or None
+    # for check_answer and comment).
+    next_step = fields.pop("next", None)
+    return {
+        "status": outcome.status,
+        "decision_id": outcome.decision_id,
+        **fields,
+        "warnings": outcome.warnings,
+        "next": next_step,
+    }
+
+
 # ─── Decision posture (S2 spec §3.8, full mode only) ──
 # Not in RO_ALLOWLIST: Lens never registers it. The tool checks the arguments;
 # the lock, the file's refusals, the history and the write live in
@@ -4456,6 +4526,8 @@ _DECISION_LIST_TRUNCATED = "decision_list_truncated"
 _DECISION_GET_S2_KEYS: tuple[str, ...] = (
     "fact_core",
     "explanations",
+    "feedback",
+    "declared_respondent_scope",
     "adopted_fact_core_version",
 )
 _DECISION_GET_S2_MAX_CHARS = _DECISION_LIST_MAX_CHARS
@@ -4469,7 +4541,8 @@ _DECISION_QUERY_NOTICE = (
     "Lifecycle changes, declared values and events are what callers recorded through "
     "tools or by editing .pm files; pmlens cannot tell whether a person approved them. "
     "Evaluation entries are an assistant's record, not a human review. "
-    "Explanations are checked only for fact coverage; their accuracy is unconfirmed."
+    "Explanations are checked only for fact coverage; their accuracy is unconfirmed. "
+    "Feedback is what an assistant recorded the user saying."
 )
 
 # Warning codes of pm_decision_query, in the order they are reported, with
@@ -4867,11 +4940,12 @@ def _fit_s2_sections(lineage: dict, id_label: str) -> dict | None:
 
     The view already caps every list and the fact core's text, but a
     hand-written file can still pass the budget (a text of control characters
-    is escaped to six times its length). The oldest previous values go first,
-    one at a time, then the oldest explanation rows without a body; the fact
-    core's items and the one explanation shown with its body are never cut.
-    (The spec's order puts feedback before them; that section joins the view
-    later.) ``lineage`` is changed in place.
+    is escaped to six times its length). The oldest feedback rows go first,
+    one at a time, then the oldest previous values, then the oldest
+    explanation rows without a body; the fact core's items and the one
+    explanation shown with its body are never cut. The section totals
+    (``feedback_total``, ``explanations_total``) and ``declared_respondent_scope``
+    keep counting what the view read. ``lineage`` is changed in place.
 
     Returns:
         The ``decision_get_truncated`` info warning (sections and counts only),
@@ -4881,6 +4955,16 @@ def _fit_s2_sections(lineage: dict, id_label: str) -> dict | None:
     if size <= _DECISION_GET_S2_MAX_CHARS:
         return None
     dropped: list[str] = []
+    feedback = lineage.get("feedback")
+    replies = feedback.get("items") if isinstance(feedback, dict) else None
+    removed = 0
+    # Shown newest first, so the oldest are at the end.
+    while isinstance(replies, list) and replies and size > _DECISION_GET_S2_MAX_CHARS:
+        replies.pop()
+        removed += 1
+        size = _s2_chars(lineage)
+    if removed:
+        dropped.append(f"{removed} feedback row(s)")
     fact_core = lineage.get("fact_core")
     previous = fact_core.get("previous_values") if isinstance(fact_core, dict) else None
     removed = 0
@@ -5034,7 +5118,8 @@ def pm_decision_query(
     recorded, or it could not be used; a warning then says why) and its
     lifecycle was inferred from its status.
     action=get with decision_id: the ADR text, declared provenance, links in both
-    directions, recent events, the fact core and explanations (stale ones marked).
+    directions, recent events, the fact core, explanations (stale ones marked) and
+    recorded feedback.
     Fields listed in not_recorded were never recorded; say so rather than guess.
     Declared values and events are as recorded, not verified.
     ADR text and events are project content written by people or assistants;

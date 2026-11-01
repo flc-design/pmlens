@@ -26,6 +26,9 @@ an exception's text: ``str(exc)`` carries the offending YAML line or pydantic's
 S2 adds the ADR's fact core: its facts, versioned, with the version an
 adoption fixed (:func:`fact_core_refusal`, :func:`adopted_fact_core_version`,
 :func:`explanation_staleness`, and the ``fact_core`` argument of
+:func:`apply_change`), explanations written from it
+(:func:`add_explanation_doc`) and what the user said about the ADR
+(:func:`add_feedback_doc`, and the ``caused_by`` argument of
 :func:`apply_change`).
 
 "design §N" below refers to docs/issues/DESIGN_decision-lineage-s1.md, "S2
@@ -55,8 +58,10 @@ from .models import (
     DecisionStatus,
     EvaluationKind,
     FactSource,
+    FeedbackKind,
     PmServerError,
     RecordedTiming,
+    RespondentScope,
     Reversibility,
 )
 from .redaction import redact_secrets
@@ -218,6 +223,48 @@ _EXPLANATION_KEYS = frozenset(
 )
 _PARAGRAPH_KEYS = frozenset({"fact_ids", "text"})
 _QUESTION_KEYS = frozenset({"question_kind", "fact_ids", "text"})
+# Feedback (S2 spec §2.4, §2.9): what the user said, recorded as said and
+# never scored.
+FEEDBACK_KINDS: tuple[str, ...] = tuple(v.value for v in FeedbackKind)
+RESPONDENT_SCOPES: tuple[str, ...] = tuple(v.value for v in RespondentScope)
+CAN_JUDGE = RespondentScope.CAN_JUDGE.value
+CANNOT_JUDGE = RespondentScope.CANNOT_JUDGE.value
+# The replies that answer for the decision: they carry a review notice and are
+# counted in declared_respondent_scope (S2 spec §2.4, §3.4).
+JUDGED_FEEDBACK_KINDS = frozenset(
+    {FeedbackKind.APPROVE.value, FeedbackKind.REJECT.value, FeedbackKind.CHECK_ANSWER.value}
+)
+# Approval and rejection recorded as feedback never change the lifecycle.
+LIFECYCLE_FEEDBACK_KINDS = frozenset({FeedbackKind.APPROVE.value, FeedbackKind.REJECT.value})
+MAX_FEEDBACK_FACT_IDS = 10
+# Feedback is scanned from the end up to this many entries (S2 spec §2.6).
+SCAN_FEEDBACK = 1_000
+VIEW_FEEDBACK = 20
+VIEW_FEEDBACK_TEXT_CHARS = 500
+FEEDBACK_VIA = "pm_add_feedback"
+# Labels derived from a declaration, for display only (S2 spec §2.4, §2.9).
+# Neither says a review took place; pmlens never checks the declaration.
+REVIEW_DECLARED_CAN_JUDGE = "respondent_declared_can_judge"
+REVIEW_NONE = "no_review_by_able_person"
+SCOPE_LABEL_NONE = "none"
+SCOPE_LABEL_MIXED = "mixed"
+_FEEDBACK_SECTION_KEYS = frozenset({"last_number", "items"})
+_FEEDBACK_KEYS = frozenset(
+    {
+        "id",
+        "at",
+        "via",
+        "feedback_kind",
+        "text",
+        "fact_core_version",
+        "explanation_id",
+        "fact_ids",
+        "respondent_scope",
+        "question_kind",
+    }
+)
+# caused_by: feedback ids of the same ADR, at most this many per call (S2 spec §2.8).
+MAX_CAUSED_BY = 10
 # The keys each level of the fact core section may hold (S2 spec §2.1); others
 # are shown by name only, as ``unknown_fields`` (S2 spec §2.6).
 _FACT_CORE_KEYS = frozenset(
@@ -247,6 +294,16 @@ EXPLANATION_FACT_IDS_MISSING = "explanation_fact_ids_missing"
 EXPLANATION_FACT_IDS_UNKNOWN = "explanation_fact_ids_unknown"
 EXPLANATION_TOO_LARGE = "explanation_too_large"
 EXPLANATION_IDS_EXHAUSTED = "explanation_ids_exhausted"
+# Feedback and caused_by codes (S2 spec §4).
+FEEDBACK_DOES_NOT_CHANGE_LIFECYCLE = "decision_feedback_does_not_change_lifecycle"
+NO_REVIEW_BY_ABLE_PERSON = "decision_no_review_by_able_person"
+RESPONDENT_DECLARED_CAN_JUDGE = "decision_respondent_declared_can_judge"
+EXPLANATION_NOT_FOUND = "explanation_not_found"
+CHECK_ANSWER_WITHOUT_QUESTION = "check_answer_without_question"
+FEEDBACK_FACT_IDS_UNKNOWN = "feedback_fact_ids_unknown"
+FEEDBACK_IDS_EXHAUSTED = "feedback_ids_exhausted"
+INVALID_CAUSED_BY = "invalid_caused_by"
+CAUSED_BY_NOT_FOUND = "caused_by_not_found"
 
 # Fields each event kind may show, in this order (design §2.4, S2 spec §2.5).
 # Multi-event calls also append their events in this order. ``at`` / ``kind`` /
@@ -257,8 +314,8 @@ _EVENT_FIELDS: dict[str, tuple[str, ...]] = {
     "lifecycle": ("from", "to", "status", "reason", "fact_core_version"),
     "link": ("op", "type", "target", "reason"),
     "declared": ("field", "value", "basis", "reason"),
-    "fact_core": ("version", "changed_ids", "reason", "edited_outside_tools"),
-    "evaluation": ("evaluation_kind", "text"),
+    "fact_core": ("version", "changed_ids", "caused_by", "reason", "edited_outside_tools"),
+    "evaluation": ("evaluation_kind", "text", "caused_by"),
     "note": ("text",),
     "status_reprojected": ("from_status", "to_status"),
 }
@@ -266,12 +323,14 @@ EVENT_KINDS: tuple[str, ...] = tuple(_EVENT_FIELDS)
 _EVENT_COMMON: tuple[str, ...] = ("at", "kind", "via")
 _FREE_TEXT_FIELDS = frozenset({"text", "reason"})
 # Allow-listed event fields that are not strings (S2 spec §2.5): an int (bool
-# excluded), an int of 1 or more, or a list of ids each matching a pattern.
+# excluded), an int of 1 or more, or a list of ids each matching a pattern, read
+# up to a cap (S2 spec §2.6).
 _EVENT_INT_FIELDS = frozenset({"version"})
 _EVENT_POSITIVE_INT_FIELDS = frozenset({"fact_core_version"})
-_EVENT_ID_LIST_FIELDS: dict[str, re.Pattern[str]] = {
-    "changed_ids": FACT_ID_RE,
-    "edited_outside_tools": FACT_ID_RE,
+_EVENT_ID_LIST_FIELDS: dict[str, tuple[re.Pattern[str], int]] = {
+    "changed_ids": (FACT_ID_RE, MAX_CHANGED_IDS),
+    "edited_outside_tools": (FACT_ID_RE, MAX_CHANGED_IDS),
+    "caused_by": (FEEDBACK_ID_RE, MAX_CAUSED_BY),
 }
 # One S2 section joins at a time, with the task that shows it (S2 spec §2.6).
 _KNOWN_TOP_LEVEL = frozenset(
@@ -286,6 +345,7 @@ _KNOWN_TOP_LEVEL = frozenset(
         "events",
         "fact_core",
         "explanations",
+        "feedback",
     }
 )
 
@@ -1693,19 +1753,33 @@ def _explanation_entry_problem(entry: object) -> str | None:
     return None
 
 
-def _explanation_number(entry_id: str) -> int:
-    """The number of an id matching EXPLANATION_ID_RE (ASCII digits, so ``int`` cannot fail)."""
+def _entry_number(entry_id: str) -> int:
+    """The number of an id matching EXPLANATION_ID_RE or FEEDBACK_ID_RE.
+
+    Both end in ASCII digits after the last hyphen, so ``int`` cannot fail.
+    """
     return int(entry_id.rpartition("-")[2])
 
 
-def _explanations_refusal(doc: Mapping, adr: str) -> dict | None:
-    """Why pm_add_explanation must not append to this explanations section, or ``None``.
+def _explanations_refusal(
+    doc: Mapping, adr: str, *, writing: str = "an explanation", numbering: bool = True
+) -> dict | None:
+    """Why a writer must not use this explanations section, or ``None``.
 
     The writer's reading of S2 spec §2.7: a section that is not a mapping, has
     no ``items`` list, holds an entry :func:`_explanation_entry_problem`
-    rejects, or a ``last_number`` that is not an int of 0 or more (S2 spec
-    §2.4). Every entry is looked at, since the next number is taken from all
-    of them. A missing section is empty, not broken.
+    rejects, or (for pm_add_explanation, which numbers entries) a
+    ``last_number`` that is not an int of 0 or more (S2 spec §2.4). Every
+    entry is looked at, since the next number is taken from all of them and
+    pm_add_feedback looks an id up among all of them. A missing section is
+    empty, not broken.
+
+    Args:
+        doc: A lineage document that passed :func:`write_refusal`.
+        adr: The ADR id, as messages name it.
+        writing: What the refused writer would write, as its message names it.
+        numbering: Whether the writer numbers entries of this section, so
+            ``last_number`` is looked at too.
 
     Returns:
         A ``decision_lineage_unreadable`` error naming the place (never a
@@ -1718,7 +1792,7 @@ def _explanations_refusal(doc: Mapping, adr: str) -> dict | None:
     def refuse(where: str, problem: str) -> dict:
         return _error(
             LINEAGE_UNREADABLE,
-            f"{adr}: {where} in the lineage file {problem}, so an explanation cannot be "
+            f"{adr}: {where} in the lineage file {problem}, so {writing} cannot be "
             "written; nothing was written.",
             remediation=(
                 f"Tell the user. Only the user may fix {where} in {_path_of(adr)} by hand, "
@@ -1731,7 +1805,7 @@ def _explanations_refusal(doc: Mapping, adr: str) -> dict | None:
     entries = part.get("items")
     if not isinstance(entries, list):
         return refuse("explanations.items", "is not a list")
-    if "last_number" in part:
+    if numbering and "last_number" in part:
         last = part["last_number"]
         if not (isinstance(last, int) and not isinstance(last, bool) and last >= 0):
             return refuse("explanations.last_number", "is not a whole number of 0 or more")
@@ -1794,6 +1868,321 @@ def _stale_explanations_notice(
     )
 
 
+# ─── Feedback (S2 spec §2.4) ─────────────────────────
+
+
+def _feedback_entry_problem(entry: object) -> str | None:
+    """Why an entry of ``feedback.items`` cannot be read, or ``None`` (S2 spec §2.7).
+
+    Not a mapping, no id matching FEEDBACK_ID_RE, or no ``fact_core_version``
+    of 0 or more (a bool is not one): the reading of an explanation entry
+    (:func:`_explanation_entry_problem`). Readers skip such an entry; a
+    writer that looks at the section treats it as broken. The reason names
+    fields, never values.
+    """
+    if not isinstance(entry, dict):
+        return "is not a mapping"
+    entry_id = entry.get("id")
+    if not (isinstance(entry_id, str) and FEEDBACK_ID_RE.fullmatch(entry_id)):
+        return "has no valid feedback id"
+    version = entry.get("fact_core_version")
+    if not (isinstance(version, int) and not isinstance(version, bool) and version >= 0):
+        return "has no fact_core_version of 0 or more"
+    return None
+
+
+def _feedback_refusal(doc: Mapping, adr: str, *, purpose: str, numbering: bool) -> dict | None:
+    """Why a writer must not use this feedback section, or ``None`` (S2 spec §2.7).
+
+    pm_add_feedback numbers its entry from every entry, and caused_by is
+    looked up among every entry (S2 spec §3.1), so both refuse a section that
+    is not a mapping, has no ``items`` list or holds an entry
+    :func:`_feedback_entry_problem` rejects. pm_add_feedback also refuses a
+    ``last_number`` that is not an int of 0 or more (``numbering``, S2 spec
+    §2.4). A missing section is empty, not broken.
+
+    Args:
+        doc: A lineage document that passed :func:`write_refusal`.
+        adr: The ADR id, as messages name it.
+        purpose: What cannot be done, as the message says it.
+        numbering: Whether the writer numbers entries of this section.
+
+    Returns:
+        A ``decision_lineage_unreadable`` error naming the place (never a
+        value), with a remediation addressed to the user; or ``None``.
+    """
+    part = doc.get("feedback")
+    if part is None:
+        return None
+
+    def refuse(where: str, problem: str) -> dict:
+        return _error(
+            LINEAGE_UNREADABLE,
+            f"{adr}: {where} in the lineage file {problem}, so {purpose}; nothing was written.",
+            remediation=(
+                f"Tell the user. Only the user may fix {where} in {_path_of(adr)} by hand, "
+                "when no assistant session is writing. Do not edit the lineage file yourself."
+            ),
+        )
+
+    if not isinstance(part, dict):
+        return refuse("feedback", "is not a mapping")
+    entries = part.get("items")
+    if not isinstance(entries, list):
+        return refuse("feedback.items", "is not a list")
+    if numbering and "last_number" in part:
+        last = part["last_number"]
+        if not (isinstance(last, int) and not isinstance(last, bool) and last >= 0):
+            return refuse("feedback.last_number", "is not a whole number of 0 or more")
+    for position, entry in enumerate(entries, 1):
+        problem = _feedback_entry_problem(entry)
+        if problem is not None:
+            return refuse(f"entry {position} of feedback.items", problem)
+    return None
+
+
+def _feedback_fact_ids_problem(value: object) -> str | None:
+    """Why the ``fact_ids`` of a pm_add_feedback call are refused, or ``None``.
+
+    Left out (``None``), or a list of at most MAX_FEEDBACK_FACT_IDS strings
+    matching FACT_ID_RE without repeats (S2 spec §2.8, §3.4). The reason names
+    the rule, never the value.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, list) or len(value) > MAX_FEEDBACK_FACT_IDS:
+        return f"must be a list of at most {MAX_FEEDBACK_FACT_IDS} fact ids"
+    if not all(is_fact_id(item) for item in value):
+        return (
+            "must hold only fact ids: F-what, F-change, F-revert, F-weak, F-uncertain or "
+            "F-alt.N / F-conditions.N / F-premise.N"
+        )
+    if len(set(value)) != len(value):
+        return "must not repeat an id"
+    return None
+
+
+def feedback_call_error(
+    decision_id: object,
+    feedback_kind: object,
+    text: object,
+    explanation_id: object = None,
+    fact_ids: object = None,
+    respondent_scope: object = RespondentScope.UNKNOWN.value,
+) -> dict | None:
+    """Check a pm_add_feedback call by its arguments alone (S2 spec §3.4).
+
+    In this order: the id's shape (``invalid_decision_id``), the vocabularies
+    (``invalid_feedback_kind``, ``invalid_respondent_scope``), a text that is
+    not blank (``feedback_text_required``: the user's own words are recorded,
+    never an empty mark) and at most MAX_TEXT_CHARS long (``text_too_long``,
+    counted before redaction), an ``explanation_id`` of this ADR
+    (``invalid_explanation_id``), the ``fact_ids`` (``invalid_fact_ids``) and,
+    for check_answer, an explanation to answer (``check_answer_without_question``).
+    Nothing is read and no message quotes a value passed, so the tool runs it
+    before the project is resolved and the storage writer again before any
+    file is read (as :func:`explanation_call_error`).
+
+    Returns:
+        An error dict, or ``None`` when the arguments are fine.
+    """
+    if not is_decision_id(decision_id):
+        return _error("invalid_decision_id", "decision_id must look like ADR-NNN")
+    if not isinstance(feedback_kind, str) or feedback_kind not in FEEDBACK_KINDS:
+        return _error(
+            "invalid_feedback_kind", f"feedback_kind must be one of: {', '.join(FEEDBACK_KINDS)}"
+        )
+    if not isinstance(respondent_scope, str) or respondent_scope not in RESPONDENT_SCOPES:
+        return _error(
+            "invalid_respondent_scope",
+            f"respondent_scope must be one of: {', '.join(RESPONDENT_SCOPES)}",
+        )
+    if not isinstance(text, str) or not text.strip():
+        return _error(
+            "feedback_text_required", "text is required: record what the user said, in their words"
+        )
+    if len(text) > MAX_TEXT_CHARS:
+        return _error(
+            "text_too_long", f"text is longer than {MAX_TEXT_CHARS} characters", field="text"
+        )
+    if explanation_id is not None and not (
+        isinstance(explanation_id, str)
+        and EXPLANATION_ID_RE.fullmatch(explanation_id) is not None
+        and explanation_id.partition(".")[0] == decision_id
+    ):
+        # decision_id matched DECISION_ID_RE above, so it can be named.
+        return _error(
+            "invalid_explanation_id",
+            f"explanation_id must be the id of an explanation of {decision_id} "
+            f"({decision_id}.EX-N)",
+        )
+    problem = _feedback_fact_ids_problem(fact_ids)
+    if problem is not None:
+        return _error("invalid_fact_ids", f"fact_ids {problem}")
+    if feedback_kind == FeedbackKind.CHECK_ANSWER and explanation_id is None:
+        return _error(
+            CHECK_ANSWER_WITHOUT_QUESTION,
+            "check_answer needs explanation_id: the explanation whose question the user answered",
+        )
+    return None
+
+
+def _declared_scope(entry: Mapping) -> str:
+    """A stored feedback entry's declared respondent scope, as the counts read it.
+
+    A value of RESPONDENT_SCOPES; anything else (left out, out of vocabulary,
+    not a string) is ``unknown``, never can_judge (S2 spec §2.4).
+    """
+    value = entry.get("respondent_scope")
+    if isinstance(value, str) and value in RESPONDENT_SCOPES:
+        return value
+    return RespondentScope.UNKNOWN.value
+
+
+def review_label(respondent_scope: str) -> str:
+    """The ``review`` a reply is shown with (S2 spec §2.4); neither value says it was checked."""
+    return REVIEW_DECLARED_CAN_JUDGE if respondent_scope == CAN_JUDGE else REVIEW_NONE
+
+
+def _scope_label(counts: Mapping[str, int]) -> str:
+    """The label of ``declared_respondent_scope``: ``mixed`` unless every reply agrees.
+
+    can_judge alongside cannot_judge or unknown is ``mixed``, so one reply
+    declared able to judge never hides one that was not (S2 spec §2.4).
+    """
+    total = sum(counts.values())
+    if not total:
+        return SCOPE_LABEL_NONE
+    if counts[CAN_JUDGE] == total:
+        return REVIEW_DECLARED_CAN_JUDGE
+    if counts[CAN_JUDGE] == 0:
+        return REVIEW_NONE
+    return SCOPE_LABEL_MIXED
+
+
+def _empty_declared_scope() -> dict:
+    """``declared_respondent_scope`` without any reply to count (S2 spec §2.4)."""
+    return {"label": SCOPE_LABEL_NONE, "counts": dict.fromkeys(RESPONDENT_SCOPES, 0)}
+
+
+def declared_respondent_scope(doc: Mapping) -> dict:
+    """What the replies to the current version declared about who answered (S2 spec §2.4).
+
+    ``{label, counts: {can_judge, cannot_judge, unknown}, counts_capped?}``
+    over the approve, reject and check_answer entries recorded against the
+    current fact core version (0 without a fact core; none are counted while
+    the fact core cannot be read). Replies to an older version are not
+    counted: a new version is asked again. A declaration out of vocabulary or
+    not a string counts as unknown, as each reply's ``review`` reads it. The
+    last SCAN_FEEDBACK entries are read, as the view reads them;
+    ``counts_capped`` says there were more. It is a summary of declarations,
+    not a review status, and nothing is scored.
+
+    Args:
+        doc: An attributed lineage document.
+
+    Returns:
+        The summary, a new dict.
+    """
+    out = _empty_declared_scope()
+    raw = doc.get("fact_core")
+    if raw is None:
+        current = 0
+    else:
+        readable = _readable_fact_core(raw)
+        if readable is None:
+            return out
+        current = readable["version"]
+    part = doc.get("feedback")
+    entries = part.get("items") if isinstance(part, dict) else None
+    if not isinstance(entries, list):
+        return out
+    counts: dict[str, int] = out["counts"]
+    for entry in entries[-SCAN_FEEDBACK:]:
+        if _feedback_entry_problem(entry) is not None:
+            continue
+        kind = entry.get("feedback_kind")
+        if not (isinstance(kind, str) and kind in JUDGED_FEEDBACK_KINDS):
+            continue
+        if entry["fact_core_version"] == current:
+            counts[_declared_scope(entry)] += 1
+    out["label"] = _scope_label(counts)
+    if len(entries) > SCAN_FEEDBACK:
+        out["counts_capped"] = True
+    return out
+
+
+def _caused_by_argument_error(change: LineageChange) -> dict | None:
+    """Argument-only checks of caused_by (S2 spec §3.1 step 1).
+
+    A list of feedback ids (``invalid_caused_by``) that goes with fact_core or
+    an evaluation (``caused_by_without_target``), at most MAX_CAUSED_BY once
+    repeats are dropped (``too_many_caused_by``). An empty list asks for
+    nothing. Whether the ids belong to this ADR and exist is checked under the
+    lock (:func:`_caused_by_refusal`).
+    """
+    value = change.caused_by
+    if value is None:
+        return None
+    if isinstance(value, (str, bytes, Mapping)) or not isinstance(value, Sequence):
+        return _error(INVALID_CAUSED_BY, "caused_by must be a list of feedback ids (ADR-NNN.FB-n)")
+    if not value:
+        return None
+    if change.fact_core is None and not _given(change.evaluation):
+        return _error(
+            "caused_by_without_target",
+            "caused_by goes only with fact_core or evaluation: it names the feedback that led "
+            "to that revision or evaluation",
+        )
+    if not all(isinstance(item, str) and FEEDBACK_ID_RE.fullmatch(item) for item in value):
+        return _error(INVALID_CAUSED_BY, "caused_by must hold only feedback ids (ADR-NNN.FB-n)")
+    if len(_dedupe(value)) > MAX_CAUSED_BY:
+        return _error(
+            "too_many_caused_by", f"caused_by may hold at most {MAX_CAUSED_BY} feedback ids"
+        )
+    return None
+
+
+def _caused_by_feedback_refusal(doc: Mapping, adr: str) -> dict | None:
+    """The feedback section must be whole before caused_by is looked up in it (S2 spec §2.7)."""
+    return _feedback_refusal(
+        doc, adr, purpose="the feedback named in caused_by cannot be looked up", numbering=False
+    )
+
+
+def _caused_by_refusal(doc: Mapping, adr: str, caused_by: list[str]) -> dict | None:
+    """Whether caused_by names feedback of this ADR that is on record (S2 spec §3.1 step 6).
+
+    ``invalid_caused_by`` for an id of another ADR: its feedback would sit in
+    another lineage, whose lock a writer cannot take as well (links and notes
+    say how ADRs relate instead). ``caused_by_not_found`` for an id with no
+    entry in ``feedback.items``. The section passed
+    :func:`_caused_by_feedback_refusal`, and the ids matched FEEDBACK_ID_RE,
+    so they can be named.
+    """
+    others = [item for item in caused_by if item.partition(".")[0] != adr]
+    if others:
+        return _error(
+            INVALID_CAUSED_BY,
+            f"caused_by may name only feedback of {adr}; {', '.join(others)} belong to "
+            "another ADR. Relate ADRs with links and a note instead.",
+        )
+    part = doc.get("feedback")
+    entries = part.get("items") if isinstance(part, dict) else None
+    known = {entry["id"] for entry in entries} if isinstance(entries, list) else set()
+    missing = [item for item in caused_by if item not in known]
+    if missing:
+        return _error(
+            CAUSED_BY_NOT_FOUND,
+            f"{adr}: no feedback {', '.join(missing)} is on record; nothing was written.",
+            remediation=(
+                "Record what the user said with pm_add_feedback first, and pass the "
+                "feedback_id it returns."
+            ),
+        )
+    return None
+
+
 # ─── Read view ───────────────────────────────────────
 
 
@@ -1833,6 +2222,11 @@ def _empty_explanations() -> dict:
     return {"items": [], "explanations_total": 0}
 
 
+def _empty_feedback() -> dict:
+    """The feedback of an S2 view without any (S2 spec §2.6)."""
+    return {"items": [], "feedback_total": 0}
+
+
 @dataclass
 class LineageView:
     """What readers show for one ADR's lineage (design §2.7, §3.2).
@@ -1865,6 +2259,8 @@ class LineageView:
     redactions: int = 0
     fact_core: dict | None = None
     explanations: dict = field(default_factory=_empty_explanations)
+    feedback: dict = field(default_factory=_empty_feedback)
+    declared_respondent_scope: dict = field(default_factory=_empty_declared_scope)
     adopted_fact_core_version: int | None = None
     s2: bool = False
     fact_core_adoption: str | None = None
@@ -1895,6 +2291,8 @@ class LineageView:
         if self.s2:
             out["fact_core"] = _plain_copy(self.fact_core)
             out["explanations"] = _plain_copy(self.explanations)
+            out["feedback"] = _plain_copy(self.feedback)
+            out["declared_respondent_scope"] = _plain_copy(self.declared_respondent_scope)
             out["adopted_fact_core_version"] = self.adopted_fact_core_version
         return out
 
@@ -2073,9 +2471,9 @@ def _view_event(event: dict, notes: _ViewNotes) -> dict:
             else:
                 notes.skipped()
             continue
-        pattern = _EVENT_ID_LIST_FIELDS.get(name)
-        if pattern is not None:
-            ids = _view_id_list(value, pattern, MAX_CHANGED_IDS, notes)
+        id_list = _EVENT_ID_LIST_FIELDS.get(name)
+        if id_list is not None:
+            ids = _view_id_list(value, id_list[0], id_list[1], notes)
             if ids is not None:
                 out[name] = ids
             continue
@@ -2468,6 +2866,102 @@ def _view_explanations(raw: object, fact_core: object, notes: _ViewNotes) -> dic
     return out
 
 
+def _view_feedback_row(entry: dict, notes: _ViewNotes, names: _UnknownNames) -> dict:
+    """One feedback entry of an S2 view (S2 spec §2.6).
+
+    Vocabulary fields are shown only with a vocabulary value (``feedback_kind``
+    and ``question_kind`` are null otherwise, counted as skipped), the text is
+    cut at VIEW_FEEDBACK_TEXT_CHARS with ``text_truncated``, and ``review``
+    is derived from the declared scope, which reads as unknown unless it is a
+    vocabulary value (S2 spec §2.4). Every reply is shown as what an assistant
+    recorded, unchecked; nothing is scored.
+    """
+    at, _ = _view_time(entry.get("at"), notes)
+    kind = entry.get("feedback_kind")
+    if not (isinstance(kind, str) and kind in FEEDBACK_KINDS):
+        kind = None
+        notes.skipped()
+    raw_text = entry.get("text")
+    text: str | None = None
+    cut = False
+    if isinstance(raw_text, str):
+        text, cut = notes.text(raw_text, VIEW_FEEDBACK_TEXT_CHARS)
+    else:
+        notes.skipped()
+    explanation_id = entry.get("explanation_id")
+    if explanation_id is not None and not (
+        isinstance(explanation_id, str) and EXPLANATION_ID_RE.fullmatch(explanation_id)
+    ):
+        explanation_id = None
+        notes.skipped()
+    fact_ids: list[str] = []
+    if entry.get("fact_ids") is not None:
+        fact_ids = _view_id_list(entry["fact_ids"], FACT_ID_RE, MAX_FEEDBACK_FACT_IDS, notes) or []
+    scope = _declared_scope(entry)
+    if entry.get("respondent_scope") not in (None, scope):
+        notes.skipped()  # out of vocabulary or not a string: read as unknown
+    row: dict[str, object] = {
+        "id": entry["id"],
+        "at": at,
+        "feedback_kind": kind,
+        "text": text,
+        "text_truncated": cut,
+        "fact_core_version": entry["fact_core_version"],
+        "explanation_id": explanation_id,
+        "fact_ids": fact_ids,
+        "respondent_scope": scope,
+        "question_kind": _view_question_kind(entry.get("question_kind"), notes),
+        "review": review_label(scope),
+        "recorded_as": ASSISTANT_RECORDED,
+    }
+    names.add(row, entry, _FEEDBACK_KEYS)
+    return row
+
+
+def _view_feedback(raw: object, notes: _ViewNotes) -> dict:
+    """The ``feedback`` of an S2 view (S2 spec §2.4, §2.6, §2.7).
+
+    The last SCAN_FEEDBACK entries are read, newest first, and up to
+    VIEW_FEEDBACK readable ones shown (:func:`_view_feedback_row`). A section
+    that is not a mapping or has no ``items`` list is shown empty, and entries
+    that :func:`_feedback_entry_problem` rejects are skipped, both counted as
+    skipped. Unknown keys are named in ``unknown_fields``, at most
+    MAX_UNKNOWN_FIELDS for the whole section. The shape follows the
+    explanations' (:func:`_view_explanations`).
+
+    Args:
+        raw: The lineage's ``feedback`` value, as loaded.
+        notes: Where skipped entries and redactions are counted.
+
+    Returns:
+        ``{items, feedback_total, feedback_total_capped?, unknown_fields?}``;
+        the total counts the scanned entries and is capped at SCAN_FEEDBACK.
+    """
+    out = _empty_feedback()
+    if raw is None:
+        return out
+    entries = raw.get("items") if isinstance(raw, dict) else None
+    if not isinstance(entries, list):
+        notes.skipped()
+        return out
+    names = _UnknownNames(notes)
+    names.add(out, raw, _FEEDBACK_SECTION_KEYS)
+    scanned = entries[-SCAN_FEEDBACK:]
+    out["feedback_total"] = len(scanned)
+    if len(entries) > SCAN_FEEDBACK:
+        out["feedback_total_capped"] = True
+        notes.skipped(len(entries) - SCAN_FEEDBACK)
+    rows: list[dict] = []
+    for entry in reversed(scanned):
+        if _feedback_entry_problem(entry) is not None:
+            notes.skipped()
+            continue
+        if len(rows) < VIEW_FEEDBACK:
+            rows.append(_view_feedback_row(entry, notes, names))
+    out["items"] = rows
+    return out
+
+
 def _attributed_doc(
     decision: Decision, raw: RawLineage, *, duplicate: bool = False
 ) -> tuple[dict | None, str | None]:
@@ -2527,7 +3021,9 @@ def lineage_view(
             neither redacted nor cut. Everything else is the same as with
             True.
         include_s2: True for a reader that shows the S2 sections (a get):
-            ``fact_core`` and ``adopted_fact_core_version`` are then built,
+            ``fact_core``, ``explanations``, ``feedback``,
+            ``declared_respondent_scope`` and ``adopted_fact_core_version``
+            are then built,
             with the list caps of S2 spec §2.6 (both ``None`` for a derived
             view). A list row and the draft guard leave it False.
 
@@ -2604,12 +3100,16 @@ def lineage_view(
 
     fact_core: dict | None = None
     explanations = _empty_explanations()
+    feedback = _empty_feedback()
+    declared_scope = _empty_declared_scope()
     revert_change: tuple[str, str] | None = None
     adopted: int | None = None
     adoption: str | None = None
     if include_s2:
         fact_core, revert_change = _view_fact_core(doc.get("fact_core"), notes)
         explanations = _view_explanations(doc.get("explanations"), doc.get("fact_core"), notes)
+        feedback = _view_feedback(doc.get("feedback"), notes)
+        declared_scope = declared_respondent_scope(doc)
         adopted, malformed, adoption = adopted_fact_core_version(doc)
         if malformed:
             notes.skipped()
@@ -2641,6 +3141,8 @@ def lineage_view(
         redactions=notes.redactions,
         fact_core=fact_core,
         explanations=explanations,
+        feedback=feedback,
+        declared_respondent_scope=declared_scope,
         adopted_fact_core_version=adopted,
         s2=include_s2,
         fact_core_adoption=adoption,
@@ -3065,7 +3567,9 @@ class LineageChange:
     ``None`` (or an empty string for the texts) means "not requested".
     ``fact_core`` is the whole new list of facts (``{id or kind, text,
     confidence?, reversibility?}``) and goes with ``expected_fact_core_version``
-    (0 for the first version), ``reason`` and nothing else.
+    (0 for the first version), ``reason``, ``caused_by`` and nothing else.
+    ``caused_by`` names feedback of the same ADR (``ADR-NNN.FB-n``) that led
+    to the fact core version or the evaluation (S2 spec §3.1).
     """
 
     lifecycle: str | None = None
@@ -3079,6 +3583,7 @@ class LineageChange:
     recorded_timing: str | None = None
     fact_core: Sequence[Mapping[str, object]] | None = None
     expected_fact_core_version: int | None = None
+    caused_by: Sequence[str] | None = None
     via: str = "pm_update_decision"
 
 
@@ -3295,7 +3800,7 @@ def validate_change(change: LineageChange) -> dict | None:
     Returns:
         An error dict, or ``None`` when the arguments are acceptable.
     """
-    problem = _fact_core_argument_error(change)
+    problem = _fact_core_argument_error(change) or _caused_by_argument_error(change)
     if problem is not None:
         return problem
     if change.lifecycle is not None and not is_known_lifecycle(change.lifecycle):
@@ -3799,6 +4304,12 @@ def _apply_fact_core(
                 ),
             )
         )
+    caused_by = _dedupe(change.caused_by or ())
+    if caused_by:
+        # caused_by is looked up in the feedback section (S2 spec §2.7).
+        refusal = _caused_by_feedback_refusal(doc, adr)
+        if refusal is not None:
+            return ChangeOutcome(error=refusal)
     fact_core: dict | None = doc.get("fact_core")
     current = fact_core["version"] if fact_core is not None else 0
 
@@ -3896,6 +4407,9 @@ def _apply_fact_core(
                 missing=missing,
             )
         )
+    refusal = _caused_by_refusal(doc, adr, caused_by) if caused_by else None
+    if refusal is not None:
+        return ChangeOutcome(error=refusal)
 
     # 7. Redact, then compare redacted values (S2 spec §2.2).
     new_version = current + 1
@@ -4033,8 +4547,10 @@ def _apply_fact_core(
         "kind": "fact_core",
         "version": new_version,
         "changed_ids": changed_ids,
-        "reason": reason_text,
     }
+    if caused_by:
+        event["caused_by"] = caused_by
+    event["reason"] = reason_text
     if outside:
         event["edited_outside_tools"] = ["F-revert"]
     event["via"] = change.via
@@ -4195,6 +4711,13 @@ def apply_change(
     anchor_missing = doc.get("anchor") is None
     if change.fact_core is not None:
         return _apply_fact_core(doc, decision, change, now, started=started)
+    # An evaluation with caused_by looks at the feedback section too; other
+    # calls of the S1 path never do (S2 spec §2.7).
+    caused_by = _dedupe(change.caused_by or ())
+    if caused_by:
+        refusal = _caused_by_feedback_refusal(doc, adr) or _caused_by_refusal(doc, adr, caused_by)
+        if refusal is not None:
+            return ChangeOutcome(error=refusal)
 
     stored_links = doc.get("links") if isinstance(doc.get("links"), dict) else {}
     links_before = {t: list(stored_links.get(t) or []) for t in LINK_TYPES}
@@ -4399,15 +4922,16 @@ def apply_change(
     if _given(change.evaluation):
         text, hits = scrub_text(change.evaluation)
         redactions += hits
-        buckets["evaluation"].append(
-            {
-                "at": now,
-                "kind": "evaluation",
-                "evaluation_kind": change.evaluation_kind,
-                "text": text,
-                "via": via,
-            }
-        )
+        event = {
+            "at": now,
+            "kind": "evaluation",
+            "evaluation_kind": change.evaluation_kind,
+            "text": text,
+        }
+        if caused_by:
+            event["caused_by"] = caused_by
+        event["via"] = via
+        buckets["evaluation"].append(event)
     if _given(change.note):
         text, hits = scrub_text(change.note)
         redactions += hits
@@ -4497,14 +5021,17 @@ def apply_change(
 
 @dataclass
 class AppendOutcome:
-    """Result of a lineage-only writer's pure step (:func:`add_explanation_doc`).
+    """Result of a lineage-only writer's pure step (:func:`add_explanation_doc`,
+    :func:`add_feedback_doc`).
 
     Attributes:
         error: An error dict; when set nothing must be written.
         doc: The new lineage document (``None`` on an error).
         fields: The writer's own response fields; for an explanation
             ``explanation_id``, ``fact_core_version``, ``fact_ids_present``,
-            ``accuracy`` and ``paragraphs`` (S2 spec §3.2).
+            ``accuracy`` and ``paragraphs`` (S2 spec §3.2); for feedback
+            ``feedback_id``, ``feedback_kind``, ``fact_core_version``,
+            ``respondent_scope``, ``review`` and ``next`` (S2 spec §3.4).
         notices: Warning entries (``server._build_warning`` shape).
     """
 
@@ -4596,7 +5123,7 @@ def add_explanation_doc(
     part = doc.get("explanations")
     section: dict = dict(part) if isinstance(part, dict) else {}
     entries: list = list(section.get("items", []))
-    number = max([section.get("last_number", 0), *(_explanation_number(e["id"]) for e in entries)])
+    number = max([section.get("last_number", 0), *(_entry_number(e["id"]) for e in entries)])
     number += 1
     if number > MAX_ENTRY_NUMBER:
         return AppendOutcome(
@@ -4678,6 +5205,307 @@ def add_explanation_doc(
             "fact_ids_present": True,
             "accuracy": ACCURACY_UNCONFIRMED,
             "paragraphs": len(stored),
+        },
+        notices=notices,
+    )
+
+
+# The next step after a reply, per kind (S2 spec §3.4). Only the feedback id
+# pmlens assigned and the fact core version read under the lock are filled
+# in; nothing read from the file and no text passed goes into it.
+_REVISE_CALL = (
+    "pm_update_decision (fact_core, expected_fact_core_version={version}, "
+    'caused_by=["{feedback_id}"])'
+)
+_FEEDBACK_NEXT: dict[str, str] = {
+    FeedbackKind.PREMISE_MISMATCH.value: (
+        f"If the premise is wrong, revise the fact core with {_REVISE_CALL} and explain the "
+        "new version."
+    ),
+    FeedbackKind.WHAT_IF.value: (
+        f"If the what-if changes the facts, revise the fact core with {_REVISE_CALL} and "
+        "explain the new version; otherwise answer it in the conversation."
+    ),
+    FeedbackKind.UNACCEPTABLE.value: (
+        "Talk the objection through with the user: revise the fact core with "
+        f"{_REVISE_CALL} and explain the new version, or weigh an alternative together."
+    ),
+    FeedbackKind.TRY_ALTERNATIVE.value: (
+        f"To weigh the alternative, add it as an alt item by revising the fact core with "
+        f"{_REVISE_CALL} and explain the new version, or record it as a new ADR."
+    ),
+    FeedbackKind.APPROVE.value: (
+        "Approval recorded here does not adopt the ADR. Only if the user has decided to "
+        "adopt it, set lifecycle=adopted with pm_update_decision and a reason."
+    ),
+    FeedbackKind.REJECT.value: (
+        "Rejection recorded here does not reject the ADR. Only if the user has decided, "
+        "set the lifecycle with pm_update_decision (rejected for a proposed ADR) and a reason."
+    ),
+}
+# The four kinds above that point to a revision, once the adoption fixed the
+# fact core (or whether it did cannot be read): a revision would be refused.
+_FEEDBACK_NEXT_FIXED = (
+    "The fact core of this ADR is fixed since the user adopted it. Tell the user; only if "
+    "the user asks, move it back to proposed with pm_update_decision and revise, or record "
+    "the change as a new ADR with amends."
+)
+_REVISING_FEEDBACK_KINDS = frozenset(
+    {
+        FeedbackKind.PREMISE_MISMATCH.value,
+        FeedbackKind.WHAT_IF.value,
+        FeedbackKind.UNACCEPTABLE.value,
+        FeedbackKind.TRY_ALTERNATIVE.value,
+    }
+)
+
+
+def feedback_next(kind: str, feedback_id: str, version: int, *, fixed: bool) -> str | None:
+    """The fixed ``next`` template of a recorded reply (S2 spec §3.4).
+
+    Args:
+        kind: A value of FEEDBACK_KINDS.
+        feedback_id: The id pmlens assigned (matches FEEDBACK_ID_RE).
+        version: The fact core version read under the lock.
+        fixed: Whether the adoption fixed the fact core, or that cannot be
+            read; the four kinds that point to a revision then point to the
+            user instead.
+
+    Returns:
+        The text; ``None`` for check_answer and comment.
+    """
+    if fixed and kind in _REVISING_FEEDBACK_KINDS:
+        return _FEEDBACK_NEXT_FIXED
+    template = _FEEDBACK_NEXT.get(kind)
+    if template is None:
+        return None
+    return template.format(feedback_id=feedback_id, version=version)
+
+
+def add_feedback_doc(
+    doc: dict,
+    decision: Decision,
+    now: str,
+    *,
+    feedback_kind: object,
+    text: object,
+    explanation_id: object = None,
+    fact_ids: object = None,
+    respondent_scope: object = RespondentScope.UNKNOWN.value,
+) -> AppendOutcome:
+    """Append what the user said about an ADR to its lineage; pure, no I/O (S2 spec §3.4).
+
+    ``doc`` passed :func:`write_refusal` under the ADR's lineage lock (or was
+    just started). After the argument checks (:func:`feedback_call_error`),
+    in this order: the fact core must be whole, whether or not the call names
+    an explanation or facts, since the reply is recorded against its version
+    (:func:`fact_core_refusal`; a missing fact core is version 0); the
+    feedback section must be whole; a named explanation must be on record
+    (``explanation_not_found``) and, for check_answer, end with a question of
+    a QUESTION_KINDS kind (``check_answer_without_question``; only the
+    vocabulary value is copied, never the stored one); the fact ids must be
+    facts of the current version (``feedback_fact_ids_unknown``); and the
+    next number must fit FEEDBACK_ID_RE. The text is scrubbed and the entry
+    numbered ``ADR-n.FB-k`` with ``k = max(last_number, numbers on record) +
+    1``. The declared respondent scope is stored as declared and never
+    checked; the review label derived from it never says the reply was
+    checked, and nothing is scored. The lifecycle and the status never
+    change, approve and reject included. Nothing of ``doc`` is changed in
+    place (copy-on-write, S2 spec §2.7).
+
+    Args:
+        doc: The lineage document as loaded.
+        decision: The ADR from decisions.yaml.
+        now: The timestamp of the entry.
+        feedback_kind: One of FEEDBACK_KINDS.
+        text: The user's words.
+        explanation_id: The explanation replied to (required for check_answer).
+        fact_ids: The facts of the current version the reply is about.
+        respondent_scope: One of RESPONDENT_SCOPES, as declared.
+
+    Returns:
+        The outcome; ``doc`` and ``fields`` (``feedback_id``,
+        ``feedback_kind``, ``fact_core_version``, ``respondent_scope``,
+        ``review`` and ``next``) are set unless there is an error.
+    """
+    adr = decision.id
+    problem = feedback_call_error(
+        adr, feedback_kind, text, explanation_id, fact_ids, respondent_scope
+    )
+    if problem is not None:
+        return AppendOutcome(error=problem)
+    # feedback_call_error checked every type and vocabulary read below.
+    kind = FeedbackKind(str(feedback_kind)).value
+    scope = RespondentScope(str(respondent_scope)).value
+    words = str(text)
+    explained = str(explanation_id) if explanation_id is not None else None
+    ids = [str(fact_id) for fact_id in fact_ids] if isinstance(fact_ids, list) else []
+
+    refusal = fact_core_refusal(doc, writing="feedback") or _feedback_refusal(
+        doc, adr, purpose="feedback cannot be written", numbering=True
+    )
+    if refusal is not None:
+        return AppendOutcome(error=refusal)
+    question_kind: str | None = None
+    if explained is not None:
+        refusal = _explanations_refusal(doc, adr, writing="feedback", numbering=False)
+        if refusal is not None:
+            return AppendOutcome(error=refusal)
+        part = doc.get("explanations")
+        entries: list = part["items"] if isinstance(part, dict) else []
+        found = [entry for entry in entries if entry["id"] == explained]
+        if not found:
+            return AppendOutcome(
+                error=_error(
+                    EXPLANATION_NOT_FOUND,
+                    f"{adr}: no explanation {explained} is on record; nothing was written.",
+                    remediation=(
+                        "Pass the explanation_id pm_add_explanation returned, or leave it out "
+                        "when the reply was not about a saved explanation."
+                    ),
+                )
+            )
+        if kind == FeedbackKind.CHECK_ANSWER:
+            question = found[-1].get("question")
+            stored = question.get("question_kind") if isinstance(question, dict) else None
+            # The vocabulary's own value is copied, never the file's (S2 spec §2.4).
+            question_kind = next(
+                (value for value in QUESTION_KINDS if isinstance(stored, str) and value == stored),
+                None,
+            )
+            if question_kind is None:
+                return AppendOutcome(
+                    error=_error(
+                        CHECK_ANSWER_WITHOUT_QUESTION,
+                        f"{adr}: explanation {explained} does not end with a question pmlens "
+                        "can read, so there is no answer to record; nothing was written.",
+                        remediation=(
+                            "Record the reply as a comment instead, or explain again with a "
+                            "question and record the answer to that explanation."
+                        ),
+                    )
+                )
+    fact_core = doc.get("fact_core")
+    current: int = fact_core["version"] if fact_core is not None else 0
+    if ids:
+        known = set(_current_fact_ids(fact_core))
+        unknown = [fact_id for fact_id in ids if fact_id not in known]
+        if unknown:
+            # The ids matched FACT_ID_RE in feedback_call_error, so they can be named.
+            return AppendOutcome(
+                error=_error(
+                    FEEDBACK_FACT_IDS_UNKNOWN,
+                    f"{adr}: these ids are not facts of version {current} of the fact core: "
+                    f"{', '.join(unknown)}; nothing was written.",
+                    unknown_fact_ids=unknown,
+                    current_version=current,
+                    remediation=(
+                        "Read the current fact core (pm_decision_query action=get) and pass "
+                        "only its ids, or leave fact_ids out."
+                    ),
+                )
+            )
+
+    part = doc.get("feedback")
+    section: dict = dict(part) if isinstance(part, dict) else {}
+    entries = list(section.get("items", []))
+    number = max([section.get("last_number", 0), *(_entry_number(e["id"]) for e in entries)])
+    number += 1
+    if number > MAX_ENTRY_NUMBER:
+        return AppendOutcome(
+            error=_error(
+                FEEDBACK_IDS_EXHAUSTED,
+                f"{adr}: feedback numbers run out at {MAX_ENTRY_NUMBER}; nothing was written.",
+                remediation="Tell the user. Record a new ADR that amends this one instead.",
+            )
+        )
+    stored_text, hits = scrub_text(words)
+    feedback_id = f"{adr}.FB-{number}"
+    entry: dict[str, object] = {
+        "id": feedback_id,
+        "at": now,
+        "via": FEEDBACK_VIA,
+        "feedback_kind": kind,
+        "text": stored_text,
+        "fact_core_version": current,
+    }
+    if explained is not None:
+        entry["explanation_id"] = explained
+    if ids:
+        entry["fact_ids"] = ids
+    entry["respondent_scope"] = scope
+    if question_kind is not None:
+        entry["question_kind"] = question_kind
+    section["last_number"] = number
+    section["items"] = entries + [entry]
+
+    notices: list[dict] = []
+    new_doc = _with_section(doc, "feedback", section, ("events",))
+    if doc.get("anchor") is None:
+        new_doc = _with_anchor(new_doc, decision)
+        notices.append(
+            notice(
+                "info",
+                LINEAGE_ANCHOR_MISSING,
+                f"{adr}: the lineage had no anchor; it is now tied to the ADR's current date "
+                "and title.",
+            )
+        )
+    if kind in LIFECYCLE_FEEDBACK_KINDS:
+        # write_refusal passed, so the lifecycle is a vocabulary value.
+        notices.append(
+            notice(
+                "info",
+                FEEDBACK_DOES_NOT_CHANGE_LIFECYCLE,
+                f"{adr}: the {kind} was recorded as feedback {feedback_id}; the ADR is still "
+                f"{doc['lifecycle']} and its status did not change.",
+                "Adopt or reject the ADR only as the user decides, with pm_update_decision "
+                "(lifecycle and a reason).",
+            )
+        )
+    if kind in JUDGED_FEEDBACK_KINDS:
+        if scope == CAN_JUDGE:
+            notices.append(
+                notice(
+                    "info",
+                    RESPONDENT_DECLARED_CAN_JUDGE,
+                    f"{feedback_id} was recorded as the reply of a person declared able to "
+                    "judge this kind of decision; pmlens has not checked that declaration.",
+                    "Tell the user how the reply was recorded.",
+                )
+            )
+        else:
+            notices.append(
+                notice(
+                    "info",
+                    NO_REVIEW_BY_ABLE_PERSON,
+                    f"{feedback_id} was recorded with no review by a person able to judge this "
+                    f"kind of decision (respondent_scope {scope}).",
+                    "Tell the user. Until such a person replies, lean as the brief's posture "
+                    "says; or ask a person able to judge this kind of decision and record "
+                    "their reply.",
+                )
+            )
+    if hits:
+        notices.append(
+            notice(
+                "warning",
+                LINEAGE_SECRETS_REDACTED,
+                f"{hits} secret-like string(s) were removed from the feedback before saving.",
+                "If a real credential was pasted, revoke it.",
+            )
+        )
+    adopted, malformed, _ = adopted_fact_core_version(doc)
+    fixed = malformed or _fixed_by_adoption(doc, adopted)
+    return AppendOutcome(
+        doc=new_doc,
+        fields={
+            "feedback_id": feedback_id,
+            "feedback_kind": kind,
+            "fact_core_version": current,
+            "respondent_scope": scope,
+            "review": review_label(scope),
+            "next": feedback_next(kind, feedback_id, current, fixed=fixed),
         },
         notices=notices,
     )

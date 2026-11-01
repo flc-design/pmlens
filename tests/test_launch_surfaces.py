@@ -368,9 +368,9 @@ def test_content_aliases_are_absent_from_lens_wire_surface(desktop_write: bool) 
 def test_lens_wire_surface_reads_decisions_but_cannot_write_them(desktop_write: bool) -> None:
     """Decision Lineage S1 (D9): the ADR reader is on the Lens wire, its writers are not.
 
-    S2 adds the decision posture's change tool and the explanation writer to
-    the writers (S2 spec §6.1 D9); pm_status, which shows the posture, stays on
-    the wire.
+    S2 adds the decision posture's change tool, the explanation writer and the
+    feedback writer to the writers (S2 spec §6.1 D9); pm_status, which shows
+    the posture, stays on the wire.
     """
     tools = set(_mcp_session(lens=True, desktop_write=desktop_write).tools)
     assert {"pm_decision_query", "pm_status"} <= tools
@@ -379,6 +379,7 @@ def test_lens_wire_surface_reads_decisions_but_cannot_write_them(desktop_write: 
         "pm_update_decision",
         "pm_update_decision_posture",
         "pm_add_explanation",
+        "pm_add_feedback",
     }
     assert not writers & tools
 
@@ -510,6 +511,7 @@ def test_decision_update_round_trips_over_stdio(tmp_project: Path) -> None:
         "recorded_timing",
         "fact_core",
         "expected_fact_core_version",
+        "caused_by",
         "project_path",
     }
     assert schema.get("required") == ["decision_id"]
@@ -520,6 +522,10 @@ def test_decision_update_round_trips_over_stdio(tmp_project: Path) -> None:
         schema["properties"]["fact_core"]["anyOf"]
     )
     assert {"type": "integer"} in schema["properties"]["expected_fact_core_version"]["anyOf"]
+    # S2 spec §3.1: caused_by is a list of feedback ids.
+    assert {"type": "array", "items": {"type": "string"}} in (
+        schema["properties"]["caused_by"]["anyOf"]
+    )
 
     _first, _second, updated, adopted, got = (
         json.loads(response["content"][0]["text"]) for response in session.responses
@@ -621,6 +627,114 @@ def test_explanation_round_trips_over_stdio(tmp_project: Path) -> None:
     [row] = got["lineage"]["explanations"]["items"]
     assert (row["id"], row["stale"], row["accuracy"]) == ("ADR-001.EX-1", False, "unconfirmed")
     assert row["question"]["question_kind"] == "judgment"
+
+
+@pytest.mark.smoke
+def test_feedback_round_trips_over_stdio(tmp_project: Path) -> None:
+    """pm_add_feedback → pm_update_decision (caused_by) → get over the wire (S2 spec §6.3).
+
+    Proves pm_add_feedback's argument schema (``list[str] | None`` fact ids
+    and a defaulted respondent_scope) and caused_by's, and that the responses
+    serialize as JSON through a real host path in full mode.
+    """
+    project = str(tmp_project)
+    fact_core = [
+        {"kind": "what", "text": "Send the booking mail without the queue"},
+        {"kind": "change", "text": "Before: through the queue. After: inside the request"},
+        {"kind": "revert", "text": "Revert the setting", "reversibility": "unknown"},
+        {"kind": "weak", "text": "A slow mail server slows every booking"},
+        {"kind": "uncertain", "text": "Peak volume was not measured", "confidence": "medium"},
+    ]
+    revised = [
+        {"id": item, "text": f"{fact['text']} (2)"}
+        | {key: fact[key] for key in ("reversibility", "confidence") if key in fact}
+        for item, fact in zip(
+            ["F-what", "F-change", "F-revert", "F-weak", "F-uncertain"], fact_core, strict=True
+        )
+    ]
+    session = _mcp_session(
+        lens=False,
+        calls=[
+            {
+                "name": "pm_add_decision",
+                "arguments": {
+                    "title": "Send mail inline",
+                    "context": "c",
+                    "decision": "d",
+                    "project_path": project,
+                },
+            },
+            {
+                "name": "pm_update_decision",
+                "arguments": {
+                    "decision_id": "ADR-001",
+                    "fact_core": fact_core,
+                    "expected_fact_core_version": 0,
+                    "project_path": project,
+                },
+            },
+            {
+                "name": "pm_add_feedback",
+                "arguments": {
+                    "decision_id": "ADR-001",
+                    "feedback_kind": "unacceptable",
+                    "text": "A slow booking is not acceptable",
+                    "fact_ids": ["F-weak"],
+                    "project_path": project,
+                },
+            },
+            {
+                "name": "pm_update_decision",
+                "arguments": {
+                    "decision_id": "ADR-001",
+                    "fact_core": revised,
+                    "expected_fact_core_version": 1,
+                    "caused_by": ["ADR-001.FB-1"],
+                    "project_path": project,
+                },
+            },
+            {
+                "name": "pm_decision_query",
+                "arguments": {"action": "get", "decision_id": "ADR-001", "project_path": project},
+            },
+        ],
+    )
+    schema = session.tool_definitions["pm_add_feedback"]["inputSchema"]
+    assert set(schema["properties"]) == {
+        "decision_id",
+        "feedback_kind",
+        "text",
+        "explanation_id",
+        "fact_ids",
+        "respondent_scope",
+        "project_path",
+    }
+    assert schema.get("required") == ["decision_id", "feedback_kind", "text"]
+    assert {"type": "array", "items": {"type": "string"}} in (
+        schema["properties"]["fact_ids"]["anyOf"]
+    )
+    assert schema["properties"]["respondent_scope"]["default"] == "unknown"
+
+    _added, first, replied, second, got = (
+        json.loads(response["content"][0]["text"]) for response in session.responses
+    )
+    assert first["status"] == "updated"
+    assert replied["status"] == "recorded"
+    assert (replied["feedback_id"], replied["fact_core_version"]) == ("ADR-001.FB-1", 1)
+    assert (replied["respondent_scope"], replied["review"]) == (
+        "unknown",
+        "no_review_by_able_person",
+    )
+    assert second["status"] == "updated" and second["fact_core"]["version"] == 2
+    fact_core_events = [e for e in got["lineage"]["events"] if e["kind"] == "fact_core"]
+    assert fact_core_events[-1]["caused_by"] == ["ADR-001.FB-1"]
+    [row] = got["lineage"]["feedback"]["items"]
+    assert (row["id"], row["feedback_kind"], row["fact_ids"]) == (
+        "ADR-001.FB-1",
+        "unacceptable",
+        ["F-weak"],
+    )
+    assert got["lineage"]["declared_respondent_scope"]["label"] == "none"
 
 
 @pytest.mark.smoke

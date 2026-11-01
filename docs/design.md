@@ -1629,7 +1629,7 @@ pmlens/                            # ← pm-agent から改名
 │       ├── __init__.py
 │       ├── __main__.py            # CLI (click)
 │       ├── server.py              # FastMCP Server (46ツール + 互換名2個)
-│       ├── models.py              # Pydantic v2 (18モデル, 24 Enum)
+│       ├── models.py              # Pydantic v2 (18モデル, 26 Enum)
 │       ├── storage.py             # YAML CRUD
 │       ├── installer.py           # claude mcp add ラッパー + migrate
 │       ├── discovery.py           # プロジェクト情報自動推定
@@ -1741,7 +1741,7 @@ Memory Layer 基盤、セッション継続、横断検索・自動化、運用�
 ### 現在の規模
 
 - **46 MCP ツール + 互換名2個** (server.py)
-- **18 Pydantic モデル + 24 Enum** (models.py)
+- **18 Pydantic モデル + 26 Enum** (models.py)
 - **1,380+ テスト** (pytest)
 - **5 ワークフローテンプレート** (discovery / development / super-research / brainstorming / content-pipeline)
 - **2 スキル定義** (PM Lens / super-research)

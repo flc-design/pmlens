@@ -1135,7 +1135,13 @@ def _tool_get(project: Path) -> dict:
 
 
 def _s2_chars(lineage_part: dict) -> int:
-    keys = ("fact_core", "explanations", "adopted_fact_core_version")
+    keys = (
+        "fact_core",
+        "explanations",
+        "feedback",
+        "declared_respondent_scope",
+        "adopted_fact_core_version",
+    )
     return len(json.dumps({key: lineage_part[key] for key in keys}, ensure_ascii=False))
 
 
@@ -1318,4 +1324,4 @@ class TestGet:
 
     def test_the_docstring_names_the_explanations(self):
         doc = " ".join((pm_decision_query.__doc__ or "").split())
-        assert "the fact core and explanations (stale ones marked)" in doc
+        assert "the fact core, explanations (stale ones marked) and recorded feedback" in doc

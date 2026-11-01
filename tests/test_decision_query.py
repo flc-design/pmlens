@@ -467,9 +467,15 @@ class TestGet:
             "events_total": 1,
             "unknown_keys": [],
             "notes": [],
-            # The S2 sections (S2 spec §3.6): no fact core or explanation recorded yet.
+            # The S2 sections (S2 spec §3.6): no fact core, explanation or
+            # feedback recorded yet.
             "fact_core": None,
             "explanations": {"items": [], "explanations_total": 0},
+            "feedback": {"items": [], "feedback_total": 0},
+            "declared_respondent_scope": {
+                "label": "none",
+                "counts": {"can_judge": 0, "cannot_judge": 0, "unknown": 0},
+            },
             "adopted_fact_core_version": None,
         }
         assert "cannot tell whether a person approved them" in got["notice"]
