@@ -502,6 +502,17 @@ class TestWidenedSurfaces:
         assert "pm_update_decision_posture" in _ALL_TOOLS
         assert "pm_update_decision_posture" not in _RO_SEED
         assert "change_decision_posture" in _GRAPH.reachable({"pm_update_decision_posture"})
+        # Explanations (S2 spec §5.1, §6.3): _append_to_lineage takes the
+        # lineage lock itself, so it is a ledger writer. record_lineage_explanation
+        # only hands it a pure step, so it is not one itself (ledger_writers is
+        # not transitive); it must reach _append_to_lineage and stay out of
+        # the RO closure. The tool is full mode only.
+        assert "_append_to_lineage" in _GRAPH.ledger_writers
+        assert "_append_to_lineage" in _GRAPH.reachable({"record_lineage_explanation"})
+        assert "_append_to_lineage" in _GRAPH.reachable({"pm_add_explanation"})
+        assert not {"_append_to_lineage", "record_lineage_explanation"} & _RO_CLOSURE
+        assert "pm_add_explanation" in _ALL_TOOLS
+        assert "pm_add_explanation" not in _RO_SEED
 
     def test_ro_surface_never_writes_a_ledger(self):
         leaked = _RO_CLOSURE & _GRAPH.ledger_writers

@@ -36,7 +36,7 @@ Track tasks, visualize progress, record decisions — through natural language i
 ## Features
 
 - **🔌 Multi-host first** — registers in **Claude Code, Codex CLI, Cursor and Grok Build** with one command (`pmlens install --target=auto`). Project rules sync to `CLAUDE.md` and `AGENTS.md` automatically (ADR-008). Switch hosts mid-project without losing context — same `.pm/` data, same workflows
-- **47 MCP tools + 2 compatibility aliases** — task CRUD, child issues, status, blockers, velocity, dashboard, prompt packs, ADR, session memory, workflows, knowledge records, multi-host rules injection, cross-host outbox bridge, content pipeline (recorded knowledge → redacted drafts), and more
+- **48 MCP tools + 2 compatibility aliases** — task CRUD, child issues, status, blockers, velocity, dashboard, prompt packs, ADR, session memory, workflows, knowledge records, multi-host rules injection, cross-host outbox bridge, content pipeline (recorded knowledge → redacted drafts), and more
 - **Workflow engine** — template-based development workflows with loops, user gates, and chaining (Discovery → Development)
 - **Knowledge records** — structured findings between casual memory and formal ADR (research, tradeoff, spec, etc.)
 - **Super Research skill** — 3 parallel agents (Domain Expert, Critical Analyst, Lateral Thinker) + Depth Check (6 dimensions) + Fact Check + Cross-Check
@@ -272,7 +272,7 @@ dataclasses, atomic-write helpers).
 
 ---
 
-## MCP Tools (47 tools + 2 compatibility aliases)
+## MCP Tools (48 tools + 2 compatibility aliases)
 
 ### Project Management
 
@@ -295,6 +295,7 @@ dataclasses, atomic-write helpers).
 | `pm_add_decision` | Add ADR with context, decision, and consequences. Saved as `proposed` by default; pass `status="accepted"` only when the user has accepted the content itself (a convention: pmlens cannot verify who accepted it, so recording as accepted returns a `decision_created_accepted` warning to relay). Declared provenance (`origin`, `recorded_timing`, `decision_kind`, default `unknown`) and the recording time go to `.pm/decision_lineage/ADR-NNN.yaml`, stored as declared, not verified |
 | `pm_decision_query` | Read ADRs and their lineage without changing anything (read-only, also available in Lens mode). `action="list"` lists the ADRs with their status, lifecycle and declared origin, `limit` (default 50) at a time from `offset`, with `has_more` / `next_offset` (`lifecycle="proposed"` lists the ones still waiting for the user's review; long titles are cut there, `get` shows them whole); `action="get"` returns the ADR text, declared provenance, links in both directions and recent events. An ADR without a usable lineage is shown as `derived` from its status, and `not_recorded` names what was never recorded. Declared values and events are shown as recorded, not verified; unknown keys come back by name only, and secret-like strings are redacted in the response |
 | `pm_update_decision` | Change an ADR's lifecycle (`proposed` / `adopted` / `deprecated` / `superseded` / `rejected` / `reverted`) along a fixed transition table, its links (`supersedes` / `superseded_by` / `amends`), or append an evaluation (shown as an assistant's record, not a human review) or a note. The ADR text is never changed; `decisions.yaml`'s `status` is rewritten as the lifecycle's projection (`adopted` → `accepted`, `rejected` → `deprecated`). A `reason` is required for every lifecycle change. Set `adopted` only when the user accepted the ADR's own content and `rejected` only after the user decided: pmlens cannot verify that, so every lifecycle change returns a `decision_lifecycle_changed` warning to relay. A declared `origin` (only `ai_auto`) or `recorded_timing` that is still `unknown` can be filled in later, with a reason. Full mode only (not in Lens) |
+| `pm_add_explanation` | Save an explanation of an ADR that the assistant wrote for the user from the ADR's current fact core, as `paragraphs` (`[{"fact_ids": [1-2 ids, the first being what the paragraph is mainly about], "text": "..."}]`) with the `fact_core_version` it was written from and an optional closing `question`. Every fact of the current version must lead a paragraph that is not only a mermaid diagram; a missing or unknown id is refused and listed (`missing_fact_ids` / `unknown_fact_ids`), and a version that is no longer current is refused with `current_version`. pmlens checks only that every fact id is present and that the version is current: the accuracy is never checked and always shown as `unconfirmed`. After the fact core is revised, older explanations are shown as stale with the changed ids. Takes only the ADR's lineage lock and never changes its lifecycle, status or `decisions.yaml` (full mode only, not registered in Lens) |
 | `pm_update_decision_posture` | Change the project's decision posture (`bold` for new or exploratory work, `cautious` for maintenance and fixes, `unset` = not chosen yet, which acts as `cautious`), kept in `.pm/decision_policy.yaml` with a history of every change. Use it only when the user asks, with their `reason` (required, redacted before saving); every change returns a `decision_posture_changed` warning to relay. `pm_init(decision_posture=…)` sets it only for a new project, and `pm_status` shows it with its last change. Full mode only (not in Lens) |
 
 #### ADR lifecycle: what pmlens guarantees and what is a convention
@@ -748,7 +749,7 @@ Claude Code Session
   └── MCP Server (stdio)
         └── pmlens serve
               │
-              ├── server.py    → 47 MCP tools + 2 compatibility aliases (FastMCP)
+              ├── server.py    → 48 MCP tools + 2 compatibility aliases (FastMCP)
               ├── models.py    → Pydantic v2 data models (18 models, 24 enums)
               ├── storage.py   → YAML read/write
               ├── workflow.py  → Workflow engine (state machine)

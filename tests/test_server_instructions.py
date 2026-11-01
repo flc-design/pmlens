@@ -98,6 +98,9 @@ def test_full_mode_says_how_a_proposed_adr_becomes_adopted():
 # until it does, and the instructions test above then asks for the full text.
 _NAMED_BEFORE_REGISTERED = {
     "pm_outbox_merge_artifact": "outbox phase 2.2",
+    # pm_add_explanation's docstring, worded by the S2 spec (§3.2), says to
+    # use it after the brief.
+    "pm_decision_brief": "Decision Lineage S2, the decision brief",
 }
 
 

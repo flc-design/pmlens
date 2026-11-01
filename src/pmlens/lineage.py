@@ -188,6 +188,36 @@ MAX_CHANGED_IDS = len(FACT_SINGLE_KINDS) + VIEW_RETIRED_IDS
 PREVIOUS_TEXT_CHARS = 200
 # Explanations are scanned from the end up to this many entries (S2 spec §2.6).
 SCAN_EXPLANATIONS = 1_000
+# The questions an explanation may end with (S2 spec §2.9). The brief's first
+# question, which kinds the reader can judge, is not one of them: it is never
+# saved, so passing it is refused. decision_brief.py imports this tuple.
+QUESTION_KINDS: tuple[str, ...] = (
+    "judgment",
+    "premise_check",
+    "understanding_check",
+    "tech_review",
+)
+# The writer's limits of one explanation (S2 spec §2.3, §2.8); the view applies
+# them again to what a hand-written file holds (S2 spec §2.6).
+MAX_PARAGRAPHS = 40
+MAX_PARAGRAPH_CHARS = 2_000
+MAX_EXPLANATION_CHARS = 12_000
+MAX_QUESTION_CHARS = 500
+MAX_PARAGRAPH_FACT_IDS = 2
+# Explanation numbers stay within EXPLANATION_ID_RE (S2 spec §2.4).
+MAX_ENTRY_NUMBER = 999_999
+VIEW_EXPLANATIONS = 20
+# An explanation's accuracy is never checked; every reader shows this (S2 spec §2.3).
+ACCURACY_UNCONFIRMED = "unconfirmed"
+EXPLANATION_VIA = "pm_add_explanation"
+# A decision_explanations_stale notice lists at most this many ids.
+_LISTED_STALE_IDS = 10
+_EXPLANATIONS_KEYS = frozenset({"last_number", "items"})
+_EXPLANATION_KEYS = frozenset(
+    {"id", "at", "via", "fact_core_version", "fact_ids_present", "paragraphs", "question"}
+)
+_PARAGRAPH_KEYS = frozenset({"fact_ids", "text"})
+_QUESTION_KEYS = frozenset({"question_kind", "fact_ids", "text"})
 # The keys each level of the fact core section may hold (S2 spec §2.1); others
 # are shown by name only, as ``unknown_fields`` (S2 spec §2.6).
 _FACT_CORE_KEYS = frozenset(
@@ -210,6 +240,13 @@ REVERSIBILITY_CHANGED_OUTSIDE_TOOLS = "decision_reversibility_changed_outside_to
 REVERSIBILITY_DECLARED_AFTER_REVIEW = "decision_reversibility_declared_after_review"
 ADOPTION_EXPLANATION_CHECK_SKIPPED = "decision_adoption_explanation_check_skipped"
 ADOPTED_WITHOUT_CURRENT_EXPLANATION = "decision_adopted_without_current_explanation"
+# Explanation codes (S2 spec §4).
+DECISION_FACT_CORE_MISSING = "decision_fact_core_missing"
+EXPLANATIONS_STALE = "decision_explanations_stale"
+EXPLANATION_FACT_IDS_MISSING = "explanation_fact_ids_missing"
+EXPLANATION_FACT_IDS_UNKNOWN = "explanation_fact_ids_unknown"
+EXPLANATION_TOO_LARGE = "explanation_too_large"
+EXPLANATION_IDS_EXHAUSTED = "explanation_ids_exhausted"
 
 # Fields each event kind may show, in this order (design §2.4, S2 spec §2.5).
 # Multi-event calls also append their events in this order. ``at`` / ``kind`` /
@@ -248,6 +285,7 @@ _KNOWN_TOP_LEVEL = frozenset(
         "links",
         "events",
         "fact_core",
+        "explanations",
     }
 )
 
@@ -1202,7 +1240,7 @@ def _fixed_by_adoption(doc: Mapping, adopted: int | None) -> bool:
     )
 
 
-def fact_core_refusal(doc: Mapping) -> dict | None:
+def fact_core_refusal(doc: Mapping, *, writing: str = "the fact core") -> dict | None:
     """Why the fact core writer must not write this lineage's fact core, or ``None``.
 
     One predicate for three places (S2 spec §2.2, §2.7, §3.1): the fact core
@@ -1219,6 +1257,9 @@ def fact_core_refusal(doc: Mapping) -> dict | None:
 
     Args:
         doc: A lineage document that passed :func:`write_refusal`.
+        writing: What the refused writer would write, as its message names it
+            (pm_add_explanation reads the fact core through the same predicate,
+            S2 spec §2.7).
 
     Returns:
         A ``decision_lineage_unreadable`` error dict naming the section and the
@@ -1234,7 +1275,7 @@ def fact_core_refusal(doc: Mapping) -> dict | None:
     def refuse(where: str, problem: str, remediation: str | None = None) -> dict:
         return _error(
             LINEAGE_UNREADABLE,
-            f"{adr}: {where} in the lineage file {problem}, so the fact core cannot be "
+            f"{adr}: {where} in the lineage file {problem}, so {writing} cannot be "
             "written; nothing was written.",
             remediation=remediation
             or (
@@ -1394,6 +1435,365 @@ def explanation_staleness(fact_core: object, written_from: int) -> Staleness:
     )
 
 
+# ─── Explanations (S2 spec §2.3) ─────────────────────
+
+
+def _fact_ids_problem(value: object) -> str | None:
+    """Why the ``fact_ids`` of a paragraph or a question are refused, or ``None``.
+
+    One or two strings matching FACT_ID_RE, without repeats (S2 spec §2.3 checks
+    2 and 6). The reason names the rule, never the value.
+    """
+    if not isinstance(value, list) or not 1 <= len(value) <= MAX_PARAGRAPH_FACT_IDS:
+        return f"must be a list of 1 to {MAX_PARAGRAPH_FACT_IDS} fact ids"
+    if not all(is_fact_id(item) for item in value):
+        return (
+            "must hold only fact ids: F-what, F-change, F-revert, F-weak, F-uncertain or "
+            "F-alt.N / F-conditions.N / F-premise.N"
+        )
+    if len(set(value)) != len(value):
+        return "must not repeat an id"
+    return None
+
+
+def _mermaid_only(text: str) -> bool:
+    """Whether a paragraph is only one mermaid code block (S2 spec §2.3 check 5).
+
+    The text, without surrounding whitespace, opens with a ```` ```mermaid ````
+    line and ends with the closing fence, with no other fence between. Such a
+    paragraph does not count as leading with its first fact id.
+    """
+    body = text.strip()
+    opening, newline, rest = body.partition("\n")
+    return (
+        opening.rstrip() == "```mermaid"
+        and newline == "\n"
+        and rest.endswith("```")
+        and "```" not in rest[:-3]
+    )
+
+
+def _question_problem(question: object) -> str | None:
+    """Why the question after an explanation is refused by its shape, or ``None``.
+
+    The shape part of S2 spec §2.3 check 6: a mapping of question_kind,
+    fact_ids and text only; a question kind of QUESTION_KINDS; 1 or 2 fact
+    ids; a text that is not blank and at most MAX_QUESTION_CHARS long; and an
+    F-premise id for premise_check. Whether its ids are current needs the
+    fact core (:func:`explanation_refusal`).
+    """
+    if not isinstance(question, Mapping) or set(question) != _QUESTION_KEYS:
+        return "must be a mapping holding only question_kind, fact_ids and text"
+    kind = question["question_kind"]
+    if not isinstance(kind, str) or kind not in QUESTION_KINDS:
+        return (
+            f"question_kind must be one of: {', '.join(QUESTION_KINDS)} (the question about "
+            "which kinds the reader can judge is not part of an explanation)"
+        )
+    problem = _fact_ids_problem(question["fact_ids"])
+    if problem is not None:
+        return f"fact_ids {problem}"
+    text = question["text"]
+    if not isinstance(text, str) or not text.strip():
+        return "text must be a non-empty string"
+    if len(text) > MAX_QUESTION_CHARS:
+        return f"text is longer than {MAX_QUESTION_CHARS} characters"
+    if kind == "premise_check" and not any(
+        fact_kind(fact_id) == "premise" for fact_id in question["fact_ids"]
+    ):
+        return "of kind premise_check needs an F-premise id in fact_ids"
+    return None
+
+
+def explanation_call_error(
+    decision_id: object, fact_core_version: object, paragraphs: object, question: object
+) -> dict | None:
+    """Check a pm_add_explanation call by its arguments alone (S2 spec §3.2 step 1).
+
+    In this order: the id's shape (``invalid_decision_id``), a version of 1
+    or more (``invalid_fact_core_version``; a bool is not one), then
+    :func:`explanation_argument_error`. Nothing is read and no message quotes
+    a value passed, so the tool runs it before the project is resolved and
+    the storage writer again before any file is read.
+
+    Returns:
+        An error dict, or ``None`` when the arguments are fine.
+    """
+    if not is_decision_id(decision_id):
+        return _error("invalid_decision_id", "decision_id must look like ADR-NNN")
+    if not _is_positive_int(fact_core_version):
+        return _error(
+            "invalid_fact_core_version", "fact_core_version must be a whole number of 1 or more"
+        )
+    return explanation_argument_error(paragraphs, question)
+
+
+def explanation_argument_error(paragraphs: object, question: object) -> dict | None:
+    """Check an explanation by its shape alone, before any file is read (S2 spec §3.2 step 1).
+
+    Checks 1-3 of S2 spec §2.3, each over every paragraph in turn, then the
+    shape part of check 6 on the question. Messages name positions (0-based,
+    as ``paragraph_index``) and limits, never the text passed.
+
+    Args:
+        paragraphs: The paragraphs as passed, ``[{fact_ids, text}]``.
+        question: The question as passed, or ``None``.
+
+    Returns:
+        An error dict, or ``None`` when the shape is fine.
+    """
+    if not isinstance(paragraphs, list) or not paragraphs:
+        return _error(
+            "invalid_paragraphs", "paragraphs must be a list of one or more {fact_ids, text} items"
+        )
+    # 1. The list and each paragraph's shape.
+    if len(paragraphs) > MAX_PARAGRAPHS:
+        return _error(
+            EXPLANATION_TOO_LARGE, f"an explanation holds at most {MAX_PARAGRAPHS} paragraphs"
+        )
+    for index, paragraph in enumerate(paragraphs):
+        if (
+            not isinstance(paragraph, Mapping)
+            or set(paragraph) != _PARAGRAPH_KEYS
+            or not isinstance(paragraph["text"], str)
+        ):
+            return _error(
+                "invalid_paragraphs",
+                f"paragraph {index}: must be a mapping holding only fact_ids and a text string",
+                paragraph_index=index,
+            )
+    # 2. Each paragraph's fact ids.
+    for index, paragraph in enumerate(paragraphs):
+        problem = _fact_ids_problem(paragraph["fact_ids"])
+        if problem is not None:
+            return _error(
+                "invalid_fact_ids", f"paragraph {index}: fact_ids {problem}", paragraph_index=index
+            )
+    # 3. Each paragraph's text, then their total.
+    total = 0
+    for index, paragraph in enumerate(paragraphs):
+        text: str = paragraph["text"]
+        if not text.strip():
+            return _error(
+                "empty_paragraph", f"paragraph {index}: text is blank", paragraph_index=index
+            )
+        if len(text) > MAX_PARAGRAPH_CHARS:
+            return _error(
+                "text_too_long",
+                f"paragraph {index}: text is longer than {MAX_PARAGRAPH_CHARS} characters",
+                field="paragraphs",
+                paragraph_index=index,
+            )
+        total += len(text)
+    if total > MAX_EXPLANATION_CHARS:
+        return _error(
+            EXPLANATION_TOO_LARGE,
+            f"the paragraphs' texts together are longer than {MAX_EXPLANATION_CHARS} characters",
+        )
+    # 6. The question's shape.
+    if question is not None:
+        problem = _question_problem(question)
+        if problem is not None:
+            return _error("invalid_question", f"question {problem}")
+    return None
+
+
+def _current_fact_ids(fact_core: object) -> list[str]:
+    """The ids of the fact core's current version, in file order (none for version 0).
+
+    Every usable item counts, not only the first MAX_FACT_ITEMS a view shows:
+    an explanation covers the whole version (S2 spec §2.3 check 5).
+    """
+    readable = _readable_fact_core(fact_core)
+    if readable is None:
+        return []
+    seen: set[str] = set()
+    ids: list[str] = []
+    for item in readable["items"]:
+        if _fact_item_problem(item, seen) is None:
+            ids.append(item["id"])
+        if isinstance(item, dict) and is_fact_id(item.get("id")):
+            seen.add(item["id"])
+    return ids
+
+
+def explanation_refusal(fact_core: object, paragraphs: object, question: object) -> dict | None:
+    """Why an explanation may not be saved against ``fact_core``, or ``None``; pure (D4).
+
+    S2 spec §2.3 checks 1-7, called under the lineage lock after the version
+    matched. The shape comes first (:func:`explanation_argument_error`), then
+    the coverage: every id must be one of the current version (check 4, which
+    refuses retired ids too) and every current id must be the first id (the
+    main id) of a paragraph that is not only a mermaid block (check 5). Both
+    lists are computed and returned together (check 7); the code says
+    ``missing`` when anything is missing. Last, the question's ids must be
+    current (check 6). pmlens never reads ids out of the text, and nothing
+    here judges whether the explanation is accurate.
+
+    Args:
+        fact_core: The lineage's ``fact_core`` value, as loaded.
+        paragraphs: The paragraphs as passed.
+        question: The question as passed, or ``None``.
+
+    Returns:
+        An error dict (``missing_fact_ids`` and ``unknown_fact_ids`` on a
+        coverage failure), or ``None``.
+    """
+    shape = explanation_argument_error(paragraphs, question)
+    if shape is not None:
+        return shape
+    current = _current_fact_ids(fact_core)
+    known = set(current)
+    unknown: dict[str, None] = {}
+    leading: set[str] = set()
+    for paragraph in paragraphs:
+        for fact_id in paragraph["fact_ids"]:
+            if fact_id not in known:
+                unknown[fact_id] = None
+        if not _mermaid_only(paragraph["text"]):
+            leading.add(paragraph["fact_ids"][0])
+    missing = [fact_id for fact_id in current if fact_id not in leading]
+    if missing or unknown:
+        # The ids passed FACT_ID_RE above, so they can be named.
+        parts = []
+        if missing:
+            parts.append(
+                "Every fact needs a paragraph that leads with it; these have none: "
+                f"{', '.join(missing)}."
+            )
+        if unknown:
+            parts.append(f"These ids are not facts of the current version: {', '.join(unknown)}.")
+        return _error(
+            EXPLANATION_FACT_IDS_MISSING if missing else EXPLANATION_FACT_IDS_UNKNOWN,
+            " ".join(parts),
+            missing_fact_ids=missing,
+            unknown_fact_ids=list(unknown),
+        )
+    if question is not None and not all(fact_id in known for fact_id in question["fact_ids"]):
+        return _error("invalid_question", "question fact_ids must be facts of the current version")
+    return None
+
+
+def _explanation_entry_problem(entry: object) -> str | None:
+    """Why an entry of ``explanations.items`` cannot be read, or ``None`` (S2 spec §2.7).
+
+    Not a mapping, no id matching EXPLANATION_ID_RE, or no ``fact_core_version``
+    of 0 or more (a bool is not one). Readers skip such an entry; the
+    adoption's check and pm_add_explanation treat the section as broken. The
+    reason names fields, never values.
+    """
+    if not isinstance(entry, dict):
+        return "is not a mapping"
+    entry_id = entry.get("id")
+    if not (isinstance(entry_id, str) and EXPLANATION_ID_RE.fullmatch(entry_id)):
+        return "has no valid explanation id"
+    version = entry.get("fact_core_version")
+    if not (isinstance(version, int) and not isinstance(version, bool) and version >= 0):
+        return "has no fact_core_version of 0 or more"
+    return None
+
+
+def _explanation_number(entry_id: str) -> int:
+    """The number of an id matching EXPLANATION_ID_RE (ASCII digits, so ``int`` cannot fail)."""
+    return int(entry_id.rpartition("-")[2])
+
+
+def _explanations_refusal(doc: Mapping, adr: str) -> dict | None:
+    """Why pm_add_explanation must not append to this explanations section, or ``None``.
+
+    The writer's reading of S2 spec §2.7: a section that is not a mapping, has
+    no ``items`` list, holds an entry :func:`_explanation_entry_problem`
+    rejects, or a ``last_number`` that is not an int of 0 or more (S2 spec
+    §2.4). Every entry is looked at, since the next number is taken from all
+    of them. A missing section is empty, not broken.
+
+    Returns:
+        A ``decision_lineage_unreadable`` error naming the place (never a
+        value), with a remediation addressed to the user; or ``None``.
+    """
+    part = doc.get("explanations")
+    if part is None:
+        return None
+
+    def refuse(where: str, problem: str) -> dict:
+        return _error(
+            LINEAGE_UNREADABLE,
+            f"{adr}: {where} in the lineage file {problem}, so an explanation cannot be "
+            "written; nothing was written.",
+            remediation=(
+                f"Tell the user. Only the user may fix {where} in {_path_of(adr)} by hand, "
+                "when no assistant session is writing. Do not edit the lineage file yourself."
+            ),
+        )
+
+    if not isinstance(part, dict):
+        return refuse("explanations", "is not a mapping")
+    entries = part.get("items")
+    if not isinstance(entries, list):
+        return refuse("explanations.items", "is not a list")
+    if "last_number" in part:
+        last = part["last_number"]
+        if not (isinstance(last, int) and not isinstance(last, bool) and last >= 0):
+            return refuse("explanations.last_number", "is not a whole number of 0 or more")
+    for position, entry in enumerate(entries, 1):
+        problem = _explanation_entry_problem(entry)
+        if problem is not None:
+            return refuse(f"entry {position} of explanations.items", problem)
+    return None
+
+
+def _stale_explanations_notice(
+    doc: Mapping, adr: str, written_from: int, new_version: int
+) -> dict | None:
+    """``decision_explanations_stale`` for a fact core revision (S2 spec §3.1).
+
+    The explanations written from the version being replaced are stale once
+    the new one is saved. The fact core writer does not look at the
+    explanations section (S2 spec §2.7), so it is read leniently here: the
+    last SCAN_EXPLANATIONS entries that are mappings with that
+    ``fact_core_version``. Ids are listed only when they match
+    EXPLANATION_ID_RE (at most _LISTED_STALE_IDS); others are counted.
+
+    Returns:
+        The info notice, or ``None`` when no such explanation is on record.
+    """
+    part = doc.get("explanations")
+    entries = part.get("items") if isinstance(part, dict) else None
+    if not isinstance(entries, list):
+        return None
+    shown: list[str] = []
+    others = 0
+    for entry in entries[-SCAN_EXPLANATIONS:]:
+        if not isinstance(entry, dict):
+            continue
+        version = entry.get("fact_core_version")
+        if not isinstance(version, int) or isinstance(version, bool) or version != written_from:
+            continue
+        entry_id = entry.get("id")
+        if isinstance(entry_id, str) and EXPLANATION_ID_RE.fullmatch(entry_id):
+            shown.append(entry_id)
+        else:
+            others += 1
+    total = len(shown) + others
+    if not total:
+        return None
+    listed = _dedupe(shown)[:_LISTED_STALE_IDS]
+    named = ", ".join(listed)
+    rest = total - len(listed)
+    if rest and named:
+        named += f" and {rest} more"
+    elif rest:
+        named = f"{rest} whose id cannot be shown"
+    return notice(
+        "info",
+        EXPLANATIONS_STALE,
+        f"{adr}: {total} explanation(s) written from version {written_from} of the fact core "
+        f"are now stale ({named}); they are shown with the facts that changed.",
+        f"Explain version {new_version} to the user again and save that explanation with "
+        "pm_add_explanation.",
+    )
+
+
 # ─── Read view ───────────────────────────────────────
 
 
@@ -1428,6 +1828,11 @@ def _empty_links() -> dict[str, list[str]]:
     return {link_type: [] for link_type in LINK_TYPES}
 
 
+def _empty_explanations() -> dict:
+    """The explanations of an S2 view without any (S2 spec §2.6)."""
+    return {"items": [], "explanations_total": 0}
+
+
 @dataclass
 class LineageView:
     """What readers show for one ADR's lineage (design §2.7, §3.2).
@@ -1459,6 +1864,7 @@ class LineageView:
     status_mismatch: bool = False
     redactions: int = 0
     fact_core: dict | None = None
+    explanations: dict = field(default_factory=_empty_explanations)
     adopted_fact_core_version: int | None = None
     s2: bool = False
     fact_core_adoption: str | None = None
@@ -1488,6 +1894,7 @@ class LineageView:
         }
         if self.s2:
             out["fact_core"] = _plain_copy(self.fact_core)
+            out["explanations"] = _plain_copy(self.explanations)
             out["adopted_fact_core_version"] = self.adopted_fact_core_version
         return out
 
@@ -1888,6 +2295,179 @@ def _view_fact_core(raw: object, notes: _ViewNotes) -> tuple[dict | None, tuple[
     return view, change
 
 
+def _view_paragraphs(
+    raw: object, notes: _ViewNotes, names: _UnknownNames
+) -> tuple[list[dict], bool]:
+    """The paragraphs of the one explanation shown with its body (S2 spec §2.6).
+
+    At most MAX_PARAGRAPHS are read, each text cut to MAX_PARAGRAPH_CHARS and
+    all of them to MAX_EXPLANATION_CHARS: the writer's limits, applied again
+    so a hand-written file (one long paragraph repeated through aliases)
+    cannot inflate a response. Paragraphs that are not mappings with a text
+    string are skipped; what is cut or left out is counted as skipped.
+
+    Returns:
+        The paragraphs ``{fact_ids, text, truncated?}`` and whether the body
+        was cut short (``paragraphs_truncated``).
+    """
+    if not isinstance(raw, list):
+        notes.skipped()
+        return [], False
+    truncated = len(raw) > MAX_PARAGRAPHS
+    if truncated:
+        notes.skipped(len(raw) - MAX_PARAGRAPHS)
+    entries = raw[:MAX_PARAGRAPHS]
+    shown: list[dict] = []
+    budget = MAX_EXPLANATION_CHARS
+    for position, paragraph in enumerate(entries):
+        if not isinstance(paragraph, dict) or not isinstance(paragraph.get("text"), str):
+            notes.skipped()
+            continue
+        if budget <= 0:
+            notes.skipped(len(entries) - position)
+            truncated = True
+            break
+        text, cut = notes.text(paragraph["text"], MAX_PARAGRAPH_CHARS)
+        if len(text) > budget:
+            text = text[:budget]
+            cut = truncated = True
+            notes.skipped()
+        budget -= len(text)
+        fact_ids = _view_id_list(
+            paragraph.get("fact_ids"), FACT_ID_RE, MAX_PARAGRAPH_FACT_IDS, notes
+        )
+        out: dict[str, object] = {"fact_ids": fact_ids or [], "text": text}
+        names.add(out, paragraph, _PARAGRAPH_KEYS)
+        if cut:
+            out["truncated"] = True
+        shown.append(out)
+    return shown, truncated
+
+
+def _view_question_kind(value: object, notes: _ViewNotes) -> str | None:
+    """A stored question kind when it is one of QUESTION_KINDS, else ``None`` (counted)."""
+    if isinstance(value, str) and value in QUESTION_KINDS:
+        return value
+    if value is not None:
+        notes.skipped()
+    return None
+
+
+def _view_question(raw: object, notes: _ViewNotes, names: _UnknownNames) -> dict | None:
+    """The question of the explanation shown with its body: ``{question_kind, fact_ids, text}``."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict) or not isinstance(raw.get("text"), str):
+        notes.skipped()
+        return None
+    text, cut = notes.text(raw["text"], MAX_QUESTION_CHARS)
+    fact_ids = _view_id_list(raw.get("fact_ids"), FACT_ID_RE, MAX_PARAGRAPH_FACT_IDS, notes)
+    out: dict[str, object] = {
+        "question_kind": _view_question_kind(raw.get("question_kind"), notes),
+        "fact_ids": fact_ids or [],
+        "text": text,
+    }
+    names.add(out, raw, _QUESTION_KEYS)
+    if cut:
+        out["truncated"] = True
+    return out
+
+
+def _view_explanation_row(
+    entry: dict, staleness: Staleness, notes: _ViewNotes, names: _UnknownNames
+) -> dict:
+    """One explanation without its body (S2 spec §2.6).
+
+    The accuracy is never stored and always ``unconfirmed`` (S2 spec §2.3); of
+    the question only its kind is shown, and only a kind of QUESTION_KINDS.
+    """
+    at, _ = _view_time(entry.get("at"), notes)
+    question = entry.get("question")
+    paragraphs = entry.get("paragraphs")
+    row: dict[str, object] = {
+        "id": entry["id"],
+        "at": at,
+        "fact_core_version": entry["fact_core_version"],
+        "stale": staleness.stale,
+        "changed_ids": list(staleness.changed_ids),
+    }
+    if staleness.changed_ids_truncated:
+        row["changed_ids_truncated"] = True
+    row.update(
+        fact_ids_present=entry.get("fact_ids_present") is True,
+        accuracy=ACCURACY_UNCONFIRMED,
+        question_kind=(
+            _view_question_kind(question.get("question_kind"), notes)
+            if isinstance(question, dict)
+            else None
+        ),
+        paragraphs_total=len(paragraphs) if isinstance(paragraphs, list) else 0,
+    )
+    names.add(row, entry, _EXPLANATION_KEYS)
+    return row
+
+
+def _view_explanations(raw: object, fact_core: object, notes: _ViewNotes) -> dict:
+    """The ``explanations`` of an S2 view (S2 spec §2.3, §2.6, §2.7).
+
+    The last SCAN_EXPLANATIONS entries are read, newest first, and up to
+    VIEW_EXPLANATIONS readable ones shown, each marked stale or not with the
+    ids changed since it was written (:func:`explanation_staleness`, from the
+    fact core section alone). Only the newest explanation that is not stale
+    carries its body (``paragraphs`` and ``question``). A section that is not
+    a mapping or has no ``items`` list is shown empty, and entries that
+    :func:`_explanation_entry_problem` rejects are skipped, both counted as
+    skipped: the same reading as the adoption's check. Unknown keys are named
+    in ``unknown_fields``, at most MAX_UNKNOWN_FIELDS for the whole section.
+
+    Args:
+        raw: The lineage's ``explanations`` value, as loaded.
+        fact_core: The lineage's ``fact_core`` value, as loaded.
+        notes: Where skipped entries and redactions are counted.
+
+    Returns:
+        ``{items, explanations_total, explanations_total_capped?, unknown_fields?}``;
+        the total counts the scanned entries and is capped at SCAN_EXPLANATIONS.
+    """
+    out = _empty_explanations()
+    if raw is None:
+        return out
+    entries = raw.get("items") if isinstance(raw, dict) else None
+    if not isinstance(entries, list):
+        notes.skipped()
+        return out
+    names = _UnknownNames(notes)
+    names.add(out, raw, _EXPLANATIONS_KEYS)
+    scanned = entries[-SCAN_EXPLANATIONS:]
+    out["explanations_total"] = len(scanned)
+    if len(entries) > SCAN_EXPLANATIONS:
+        out["explanations_total_capped"] = True
+        notes.skipped(len(entries) - SCAN_EXPLANATIONS)
+    staleness: dict[int, Staleness] = {}
+    shown: list[tuple[dict, dict]] = []
+    for entry in reversed(scanned):
+        if _explanation_entry_problem(entry) is not None:
+            notes.skipped()
+            continue
+        if len(shown) >= VIEW_EXPLANATIONS:
+            continue
+        version: int = entry["fact_core_version"]
+        if version not in staleness:
+            staleness[version] = explanation_staleness(fact_core, version)
+        shown.append((_view_explanation_row(entry, staleness[version], notes, names), entry))
+    for row, entry in shown:
+        if row["stale"]:
+            continue
+        paragraphs, truncated = _view_paragraphs(entry.get("paragraphs"), notes, names)
+        row["paragraphs"] = paragraphs
+        if truncated:
+            row["paragraphs_truncated"] = True
+        row["question"] = _view_question(entry.get("question"), notes, names)
+        break
+    out["items"] = [row for row, _ in shown]
+    return out
+
+
 def _attributed_doc(
     decision: Decision, raw: RawLineage, *, duplicate: bool = False
 ) -> tuple[dict | None, str | None]:
@@ -2023,11 +2603,13 @@ def lineage_view(
         )
 
     fact_core: dict | None = None
+    explanations = _empty_explanations()
     revert_change: tuple[str, str] | None = None
     adopted: int | None = None
     adoption: str | None = None
     if include_s2:
         fact_core, revert_change = _view_fact_core(doc.get("fact_core"), notes)
+        explanations = _view_explanations(doc.get("explanations"), doc.get("fact_core"), notes)
         adopted, malformed, adoption = adopted_fact_core_version(doc)
         if malformed:
             notes.skipped()
@@ -2058,6 +2640,7 @@ def lineage_view(
         status_mismatch=mismatch,
         redactions=notes.redactions,
         fact_core=fact_core,
+        explanations=explanations,
         adopted_fact_core_version=adopted,
         s2=include_s2,
         fact_core_adoption=adoption,
@@ -2785,7 +3368,9 @@ def appends(change: LineageChange) -> bool:
     return _given(change.note) or _given(change.evaluation) or change.fact_core is not None
 
 
-def size_refusal(decision_id: str, size: int | None, appends: bool) -> dict | None:
+def size_refusal(
+    decision_id: str, size: int | None, appends: bool, *, section: str | None = None
+) -> dict | None:
     """The ``decision_lineage_too_large`` error for a rewritten lineage, or ``None``.
 
     Every change must leave the file within MAX_LINEAGE_BYTES (what readers
@@ -2803,11 +3388,27 @@ def size_refusal(decision_id: str, size: int | None, appends: bool) -> dict | No
             UTF-8, with the platform's newlines, S2 spec §2.8); ``None`` when
             the capped dump gave up because it exceeds MAX_LINEAGE_BYTES.
         appends: Whether the write appends (:func:`appends` for a change).
+        section: The S2 section a lineage-only writer appends to (``explanations``);
+            such a write always appends, and its remediation names the items
+            that may be moved out by hand (S2 spec §2.8).
 
     Returns:
         The error dict (with a remediation), or ``None`` when the size is fine.
     """
     path = f".pm/{LINEAGE_DIR}/{decision_id}.yaml"
+    if section is not None and (size is None or size > MAX_APPEND_BYTES):
+        return _error(
+            LINEAGE_TOO_LARGE,
+            f"{decision_id}: {section} are not added once the lineage would pass "
+            f"{MAX_APPEND_BYTES} bytes, so that room is kept for lifecycle and link changes; "
+            "nothing was written",
+            remediation=(
+                "Tell the user. Older explanation and feedback items can be moved out of "
+                f"{path} by hand (for example into a file outside .pm/{LINEAGE_DIR}), keeping "
+                "each section's last_number and items list and every event; then make the "
+                "call again."
+            ),
+        )
     trim = (
         f"move older note and evaluation events out of {path} by hand (for example into a "
         f"file outside .pm/{LINEAGE_DIR}), keeping its lifecycle, link, declared and "
@@ -2888,23 +3489,28 @@ def _with_anchor(doc: dict, decision: Decision) -> dict:
     return out
 
 
-def _with_fact_core(doc: dict, fact_core: dict) -> dict:
-    """``doc`` with ``fact_core`` set; a new key goes before the S2 sections and events.
+def _with_section(doc: dict, name: str, value: object, before: tuple[str, ...]) -> dict:
+    """A copy of ``doc`` with ``name`` set; a new key goes before the first of ``before``.
 
     The other keys keep their order and values (S2 spec §2.1 shows the layout).
     """
-    if "fact_core" in doc:
+    if name in doc:
         out = dict(doc)
-        out["fact_core"] = fact_core
+        out[name] = value
         return out
     out = {}
-    for key, value in doc.items():
-        if "fact_core" not in out and key in ("explanations", "feedback", "events"):
-            out["fact_core"] = fact_core
-        out[key] = value
-    if "fact_core" not in out:
-        out["fact_core"] = fact_core
+    for key, item in doc.items():
+        if name not in out and key in before:
+            out[name] = value
+        out[key] = item
+    if name not in out:
+        out[name] = value
     return out
+
+
+def _with_fact_core(doc: dict, fact_core: dict) -> dict:
+    """``doc`` with ``fact_core`` set; a new key goes before the S2 sections and events."""
+    return _with_section(doc, "fact_core", fact_core, ("explanations", "feedback", "events"))
 
 
 def _status_mismatch_notice(
@@ -2940,15 +3546,8 @@ def _explanation_entries(doc: Mapping) -> list | None:
     if not isinstance(entries, list):
         return None
     scanned = entries[-SCAN_EXPLANATIONS:]
-    for entry in scanned:
-        if not isinstance(entry, dict):
-            return None
-        entry_id = entry.get("id")
-        version = entry.get("fact_core_version")
-        if not (isinstance(entry_id, str) and EXPLANATION_ID_RE.fullmatch(entry_id)):
-            return None
-        if not (isinstance(version, int) and not isinstance(version, bool) and version >= 0):
-            return None
+    if any(_explanation_entry_problem(entry) is not None for entry in scanned):
+        return None
     return scanned
 
 
@@ -3013,8 +3612,8 @@ def _adoption_record(doc: Mapping, adr: str) -> tuple[int | None, dict | None]:
         ADOPTED_WITHOUT_CURRENT_EXPLANATION,
         f"{adr}: it was adopted with version {current} of its fact core, but {why}; the "
         "user adopted it without a current explanation.",
-        "Tell the user. The adoption itself was recorded; pm_decision_query action=get "
-        "shows the facts it was adopted on.",
+        "Tell the user. The adoption itself was recorded. To have one, explain version "
+        f"{current} to the user and save that explanation with pm_add_explanation.",
     )
 
 
@@ -3489,6 +4088,10 @@ def _apply_fact_core(
                 "user may move the ADR back to proposed and adopt it again.",
             )
         )
+    # D6: the explanations of the replaced version are stale from now on.
+    stale = _stale_explanations_notice(doc, adr, current, new_version)
+    if stale is not None:
+        notices.append(stale)
     if fact_core is None:
         if new_revert == CODE_REVERTABLE and (
             lifecycle != DecisionLifecycle.PROPOSED or _has_feedback(doc)
@@ -3887,3 +4490,194 @@ def apply_change(
     outcome.events_added = events_added
     outcome.changes = changes
     return outcome
+
+
+# ─── Lineage-only writers (S2 spec §5.1) ─────────────
+
+
+@dataclass
+class AppendOutcome:
+    """Result of a lineage-only writer's pure step (:func:`add_explanation_doc`).
+
+    Attributes:
+        error: An error dict; when set nothing must be written.
+        doc: The new lineage document (``None`` on an error).
+        fields: The writer's own response fields; for an explanation
+            ``explanation_id``, ``fact_core_version``, ``fact_ids_present``,
+            ``accuracy`` and ``paragraphs`` (S2 spec §3.2).
+        notices: Warning entries (``server._build_warning`` shape).
+    """
+
+    error: dict | None = None
+    doc: dict | None = None
+    fields: dict = field(default_factory=dict)
+    notices: list[dict] = field(default_factory=list)
+
+
+def fact_core_missing(adr: str) -> dict:
+    """``decision_fact_core_missing``: an explanation needs a fact core (S2 spec §3.2 step 3)."""
+    return _error(
+        DECISION_FACT_CORE_MISSING,
+        f"{adr} has no fact core, so there is nothing an explanation can be written from; "
+        "nothing was written.",
+        remediation=(
+            "Record the facts first with pm_update_decision (fact_core, with "
+            "expected_fact_core_version=0), then explain that version to the user."
+        ),
+    )
+
+
+def add_explanation_doc(
+    doc: dict,
+    decision: Decision,
+    now: str,
+    *,
+    fact_core_version: object,
+    paragraphs: object,
+    question: object = None,
+) -> AppendOutcome:
+    """Append one explanation to an ADR's lineage; pure, no I/O (S2 spec §3.2 steps 3-5).
+
+    ``doc`` passed :func:`write_refusal` under the ADR's lineage lock. In this
+    order: the sections the writer reads must be whole (the fact core through
+    :func:`fact_core_refusal`, the explanations through
+    :func:`_explanations_refusal`, S2 spec §2.7), the version must be the
+    current one (``fact_core_version_mismatch`` with ``current_version``),
+    the explanation must cover that version (:func:`explanation_refusal`, D4),
+    and the next number must fit EXPLANATION_ID_RE. The texts are scrubbed,
+    and the entry is numbered ``ADR-n.EX-k`` with ``k = max(last_number,
+    numbers on record) + 1``. Only ``fact_ids_present`` is stored about the
+    checks; the accuracy is never stored. Nothing of ``doc`` is changed in
+    place (copy-on-write, S2 spec §2.7): the explanations mapping and its
+    items list are new objects, so a value shared through YAML aliases keeps
+    its value everywhere else.
+
+    Args:
+        doc: The lineage document as loaded.
+        decision: The ADR from decisions.yaml.
+        now: The timestamp of the entry.
+        fact_core_version: The version the explanation was written from.
+        paragraphs: ``[{fact_ids, text}]`` as passed.
+        question: ``{question_kind, fact_ids, text}`` as passed, or ``None``.
+
+    Returns:
+        The outcome; ``doc`` and ``fields`` are set unless there is an error.
+    """
+    adr = decision.id
+    if not _is_positive_int(fact_core_version):
+        return AppendOutcome(
+            error=_error(
+                "invalid_fact_core_version", "fact_core_version must be a whole number of 1 or more"
+            )
+        )
+    fact_core = doc.get("fact_core")
+    if fact_core is None:
+        return AppendOutcome(error=fact_core_missing(adr))
+    refusal = fact_core_refusal(doc, writing="an explanation") or _explanations_refusal(doc, adr)
+    if refusal is not None:
+        return AppendOutcome(error=refusal)
+    current: int = fact_core["version"]
+    if fact_core_version != current:
+        return AppendOutcome(
+            error=_error(
+                FACT_CORE_VERSION_MISMATCH,
+                f"{adr}: the fact core is at version {current}, not {fact_core_version}; "
+                "nothing was written.",
+                current_version=current,
+                remediation=(
+                    "Read the current fact core (pm_decision_query action=get), explain that "
+                    "version to the user, and save that explanation with its version."
+                ),
+            )
+        )
+    refusal = explanation_refusal(fact_core, paragraphs, question)
+    if refusal is not None:
+        return AppendOutcome(error=refusal)
+    part = doc.get("explanations")
+    section: dict = dict(part) if isinstance(part, dict) else {}
+    entries: list = list(section.get("items", []))
+    number = max([section.get("last_number", 0), *(_explanation_number(e["id"]) for e in entries)])
+    number += 1
+    if number > MAX_ENTRY_NUMBER:
+        return AppendOutcome(
+            error=_error(
+                EXPLANATION_IDS_EXHAUSTED,
+                f"{adr}: explanation numbers run out at {MAX_ENTRY_NUMBER}; nothing was written.",
+                remediation="Tell the user. Record a new ADR that amends this one instead.",
+            )
+        )
+
+    # explanation_refusal checked every shape read below.
+    hits = 0
+    stored: list[dict] = []
+    for paragraph in paragraphs:
+        text, count = scrub_text(paragraph["text"])
+        hits += count
+        stored.append({"fact_ids": [str(i) for i in paragraph["fact_ids"]], "text": text})
+    entry_id = f"{adr}.EX-{number}"
+    entry: dict[str, object] = {
+        "id": entry_id,
+        "at": now,
+        "via": EXPLANATION_VIA,
+        "fact_core_version": current,
+        "fact_ids_present": True,
+        "paragraphs": stored,
+    }
+    if question is not None:
+        text, count = scrub_text(question["text"])
+        hits += count
+        entry["question"] = {
+            "question_kind": str(question["question_kind"]),
+            "fact_ids": [str(i) for i in question["fact_ids"]],
+            "text": text,
+        }
+    section["last_number"] = number
+    section["items"] = entries + [entry]
+
+    notices: list[dict] = []
+    new_doc = _with_section(doc, "explanations", section, ("feedback", "events"))
+    if doc.get("anchor") is None:
+        new_doc = _with_anchor(new_doc, decision)
+        notices.append(
+            notice(
+                "info",
+                LINEAGE_ANCHOR_MISSING,
+                f"{adr}: the lineage had no anchor; it is now tied to the ADR's current date "
+                "and title.",
+            )
+        )
+    usable, _ = _readable_items(fact_core["items"])
+    recorded = fact_core.get("recorded_reversibility")
+    revert = _current_revert_value(fact_core["items"], usable)
+    if _changed_outside_tools(recorded, revert):
+        notices.append(
+            notice(
+                "info",
+                REVERSIBILITY_CHANGED_OUTSIDE_TOOLS,
+                f"{adr}: F-revert's reversibility was changed outside pmlens's tools (recorded "
+                f"{reversibility_label(recorded)}, now {reversibility_label(revert)}), so this "
+                "explanation was saved but is shown as stale.",
+                "Tell the user. Revise the fact core with pm_update_decision first, which "
+                "records the change in a new version, then explain that version and save it.",
+            )
+        )
+    if hits:
+        notices.append(
+            notice(
+                "warning",
+                LINEAGE_SECRETS_REDACTED,
+                f"{hits} secret-like string(s) were removed from the explanation before saving.",
+                "If a real credential was pasted, revoke it.",
+            )
+        )
+    return AppendOutcome(
+        doc=new_doc,
+        fields={
+            "explanation_id": entry_id,
+            "fact_core_version": current,
+            "fact_ids_present": True,
+            "accuracy": ACCURACY_UNCONFIRMED,
+            "paragraphs": len(stored),
+        },
+        notices=notices,
+    )

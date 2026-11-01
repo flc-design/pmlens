@@ -2858,7 +2858,8 @@ class TestGetThroughTheTool:
 
     def test_the_docstrings_name_the_fact_core(self):
         query = " ".join((pm_decision_query.__doc__ or "").split())
-        assert "recent events and the fact core" in query
+        # S2 spec §3.6; explanations join the line in the explanation task.
+        assert "recent events, the fact core and explanations (stale ones marked)" in query
         update = " ".join((pm_update_decision.__doc__ or "").split())
         for phrase in (
             "never infer a premise",

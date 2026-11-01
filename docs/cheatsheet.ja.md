@@ -1,6 +1,6 @@
 # PM Lens チートシート
 
-> Claude Code / Codex CLI / Cursor / Grok Build 用プロジェクト管理 MCP Server — **47 ツール + 互換名2個**
+> Claude Code / Codex CLI / Cursor / Grok Build 用プロジェクト管理 MCP Server — **48 ツール + 互換名2個**
 > Version 0.17.0 | Python 3.11+ | PyPI: `pmlens`
 
 ---
@@ -92,6 +92,7 @@ Claude Code セッション:
 | `pm_add_decision` | ADR（設計判断記録）を保存（ID自動採番）。既定は proposed、`accepted` はユーザーが内容を受け入れた時だけ | `title`, `context`, `decision`, `status="proposed"`, `origin?`, `recorded_timing?`, `decision_kind?` |
 | `pm_decision_query` | ADR と lineage を何も変えずに読む（Lens 対応）。`lifecycle="proposed"` でユーザーの確認待ちの一覧。list は `limit` / `offset` でページ送り | `action="list"`, `decision_id?`（get）, `lifecycle?`, `limit=50`, `offset=0` |
 | `pm_update_decision` | ADR の lifecycle を移す（ユーザーが承認したら proposed → adopted など）、関係を変える、evaluation や note を追記する。本文は変えない（full モードだけ） | `decision_id`, `lifecycle?`, `reason?`, `add_links?`, `remove_links?`, `evaluation?`, `note?` |
+| `pm_add_explanation` | ADR の現在の fact_core から書いた説明を保存する。現在の事実はすべて段落の先頭に要る。正確さは確かめず（unconfirmed と示す）、改版すると前の説明は古いと示される（full モードだけ） | `decision_id`, `fact_core_version`, `paragraphs`, `question?` |
 | `pm_update_decision_posture` | プロジェクトの姿勢（bold / cautious / unset）を、ユーザーが求めた時だけその理由を添えて変える。履歴に残る（full モードだけ） | `decision_posture`, `reason` |
 | `pm_velocity` | ベロシティとトレンド分析 | `weeks=4` |
 | `pm_risks` | 自動検出 + 手動登録リスク一覧 | `project_path?` |

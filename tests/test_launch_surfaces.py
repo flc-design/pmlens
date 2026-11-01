@@ -368,12 +368,19 @@ def test_content_aliases_are_absent_from_lens_wire_surface(desktop_write: bool) 
 def test_lens_wire_surface_reads_decisions_but_cannot_write_them(desktop_write: bool) -> None:
     """Decision Lineage S1 (D9): the ADR reader is on the Lens wire, its writers are not.
 
-    S2 adds the decision posture's change tool to the writers (S2 spec §6.1 D9);
-    pm_status, which shows the posture, stays on the wire.
+    S2 adds the decision posture's change tool and the explanation writer to
+    the writers (S2 spec §6.1 D9); pm_status, which shows the posture, stays on
+    the wire.
     """
     tools = set(_mcp_session(lens=True, desktop_write=desktop_write).tools)
     assert {"pm_decision_query", "pm_status"} <= tools
-    assert not {"pm_add_decision", "pm_update_decision", "pm_update_decision_posture"} & tools
+    writers = {
+        "pm_add_decision",
+        "pm_update_decision",
+        "pm_update_decision_posture",
+        "pm_add_explanation",
+    }
+    assert not writers & tools
 
 
 @pytest.mark.smoke
@@ -524,6 +531,96 @@ def test_decision_update_round_trips_over_stdio(tmp_project: Path) -> None:
     assert "decision_lifecycle_changed" in {w["code"] for w in updated["warnings"]}
     assert [(row["id"], row["status"]) for row in adopted["decisions"]] == [("ADR-002", "accepted")]
     assert got["lineage"]["linked_from"] == {"supersedes": [], "amends": ["ADR-002"]}
+
+
+@pytest.mark.smoke
+def test_explanation_round_trips_over_stdio(tmp_project: Path) -> None:
+    """pm_update_decision (fact core) → pm_add_explanation → get over the wire (S2 spec §6.3).
+
+    Proves pm_add_explanation's argument schema (``list[dict]`` paragraphs and a
+    ``dict | None`` question) and that its response serializes as JSON
+    through a real host path in full mode.
+    """
+    project = str(tmp_project)
+    fact_core = [
+        {"kind": "what", "text": "Send the booking mail without the queue"},
+        {"kind": "change", "text": "Before: through the queue. After: inside the request"},
+        {"kind": "revert", "text": "Revert the setting", "reversibility": "unknown"},
+        {"kind": "weak", "text": "A slow mail server slows every booking"},
+        {"kind": "uncertain", "text": "Peak volume was not measured", "confidence": "medium"},
+    ]
+    ids = ["F-what", "F-change", "F-revert", "F-weak", "F-uncertain"]
+    session = _mcp_session(
+        lens=False,
+        calls=[
+            {
+                "name": "pm_add_decision",
+                "arguments": {
+                    "title": "Send mail inline",
+                    "context": "c",
+                    "decision": "d",
+                    "project_path": project,
+                },
+            },
+            {
+                "name": "pm_update_decision",
+                "arguments": {
+                    "decision_id": "ADR-001",
+                    "fact_core": fact_core,
+                    "expected_fact_core_version": 0,
+                    "project_path": project,
+                },
+            },
+            {
+                "name": "pm_add_explanation",
+                "arguments": {
+                    "decision_id": "ADR-001",
+                    "fact_core_version": 1,
+                    "paragraphs": [{"fact_ids": [i], "text": f"About {i}."} for i in ids],
+                    "question": {
+                        "question_kind": "judgment",
+                        "fact_ids": ["F-weak"],
+                        "text": "Is the slower booking acceptable?",
+                    },
+                    "project_path": project,
+                },
+            },
+            {
+                "name": "pm_decision_query",
+                "arguments": {"action": "get", "decision_id": "ADR-001", "project_path": project},
+            },
+        ],
+    )
+    schema = session.tool_definitions["pm_add_explanation"]["inputSchema"]
+    assert set(schema["properties"]) == {
+        "decision_id",
+        "fact_core_version",
+        "paragraphs",
+        "question",
+        "project_path",
+    }
+    assert schema.get("required") == ["decision_id", "fact_core_version", "paragraphs"]
+    assert schema["properties"]["paragraphs"]["type"] == "array"
+    assert schema["properties"]["paragraphs"]["items"]["type"] == "object"
+    assert {"type": "null"} in schema["properties"]["question"]["anyOf"]
+
+    _added, revised, explained, got = (
+        json.loads(response["content"][0]["text"]) for response in session.responses
+    )
+    assert revised["status"] == "updated"
+    assert explained == {
+        "status": "recorded",
+        "decision_id": "ADR-001",
+        "explanation_id": "ADR-001.EX-1",
+        "fact_core_version": 1,
+        "fact_ids_present": True,
+        "accuracy": "unconfirmed",
+        "paragraphs": 5,
+        "warnings": [],
+    }
+    [row] = got["lineage"]["explanations"]["items"]
+    assert (row["id"], row["stale"], row["accuracy"]) == ("ADR-001.EX-1", False, "unconfirmed")
+    assert row["question"]["question_kind"] == "judgment"
 
 
 @pytest.mark.smoke

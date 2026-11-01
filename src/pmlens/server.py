@@ -100,6 +100,7 @@ from .storage import (
     load_tasks,
     load_tracks,
     load_workflows,
+    record_lineage_explanation,
     register_project,
     unknown_decision_statuses,
     update_knowledge,
@@ -4315,6 +4316,61 @@ def pm_update_decision(
     return response
 
 
+# ─── Decision explanations (S2 spec §3.2, full mode only) ─
+# Not in RO_ALLOWLIST: Lens never registers it. The tool checks the arguments;
+# the decisions.yaml read, the lineage lock, the version match, the coverage
+# check (D4) and the write live in storage.record_lineage_explanation.
+
+
+@_tool()
+def pm_add_explanation(
+    decision_id: str,
+    fact_core_version: int,
+    paragraphs: list[dict],
+    question: dict | None = None,
+    project_path: str | None = None,
+) -> dict:
+    """Save an explanation of an ADR that you wrote for the user from its current fact core.
+
+    Use it after pm_decision_brief, once you have explained the decision to the
+    user, so the explanation can be traced to the facts it was written from. Do
+    not use it to change the facts; that is pm_update_decision's fact_core.
+
+    paragraphs: [{"fact_ids": [1-2 fact ids, the first being what the paragraph
+    is mainly about], "text": "..."}]. Every fact of the current version must lead
+    some paragraph that is not only a mermaid diagram; a missing or unknown id is
+    refused and listed. fact_core_version: the version the brief returned.
+    question: the one question asked after the explanation, from the brief
+    (question_kind and 1-2 fact_ids as the brief returned them). Omit it when the
+    brief returned the question about which kinds the reader can judge; that one
+    is not part of an explanation and is refused here.
+    pmlens checks only that every fact id is present and that the version is
+    current; whether the explanation is accurate is never checked and is shown as
+    unconfirmed.
+    """
+    # Argument-only checks come before the project is resolved and before any
+    # lock (S2 spec §3.2 step 1); record_lineage_explanation repeats them.
+    problem = _lineage.explanation_call_error(decision_id, fact_core_version, paragraphs, question)
+    if problem is not None:
+        return problem
+    pm_path = _get_pm_path(project_path)
+    outcome = record_lineage_explanation(
+        pm_path,
+        decision_id,
+        fact_core_version=fact_core_version,
+        paragraphs=paragraphs,
+        question=question,
+    )
+    if outcome.error is not None:
+        return outcome.error
+    return {
+        "status": outcome.status,
+        "decision_id": outcome.decision_id,
+        **outcome.fields,
+        "warnings": outcome.warnings,
+    }
+
+
 # ─── Decision posture (S2 spec §3.8, full mode only) ──
 # Not in RO_ALLOWLIST: Lens never registers it. The tool checks the arguments;
 # the lock, the file's refusals, the history and the write live in
@@ -4397,7 +4453,11 @@ _DECISION_LIST_TRUNCATED = "decision_list_truncated"
 # action=get keeps the S2 sections of its lineage within the same budget (S2
 # spec §3.6). They are counted as JSON with ensure_ascii=False, as list rows
 # are, so one Japanese character counts as one.
-_DECISION_GET_S2_KEYS: tuple[str, ...] = ("fact_core", "adopted_fact_core_version")
+_DECISION_GET_S2_KEYS: tuple[str, ...] = (
+    "fact_core",
+    "explanations",
+    "adopted_fact_core_version",
+)
 _DECISION_GET_S2_MAX_CHARS = _DECISION_LIST_MAX_CHARS
 _DECISION_GET_TRUNCATED = "decision_get_truncated"
 # An ADR without a date key: the model fills in today, which moves every day,
@@ -4408,7 +4468,8 @@ _DECISION_QUERY_INFO_CODES: frozenset[str] = frozenset({_DATE_NOT_RECORDED})
 _DECISION_QUERY_NOTICE = (
     "Lifecycle changes, declared values and events are what callers recorded through "
     "tools or by editing .pm files; pmlens cannot tell whether a person approved them. "
-    "Evaluation entries are an assistant's record, not a human review."
+    "Evaluation entries are an assistant's record, not a human review. "
+    "Explanations are checked only for fact coverage; their accuracy is unconfirmed."
 )
 
 # Warning codes of pm_decision_query, in the order they are reported, with
@@ -4806,10 +4867,11 @@ def _fit_s2_sections(lineage: dict, id_label: str) -> dict | None:
 
     The view already caps every list and the fact core's text, but a
     hand-written file can still pass the budget (a text of control characters
-    is escaped to six times its length). The oldest previous values go, one
-    at a time; the fact core's items are never cut. (The spec's order puts
-    feedback before them and explanation rows without a body after them; those
-    sections join the view later.) ``lineage`` is changed in place.
+    is escaped to six times its length). The oldest previous values go first,
+    one at a time, then the oldest explanation rows without a body; the fact
+    core's items and the one explanation shown with its body are never cut.
+    (The spec's order puts feedback before them; that section joins the view
+    later.) ``lineage`` is changed in place.
 
     Returns:
         The ``decision_get_truncated`` info warning (sections and counts only),
@@ -4829,13 +4891,28 @@ def _fit_s2_sections(lineage: dict, id_label: str) -> dict | None:
         size = _s2_chars(lineage)
     if removed:
         dropped.append(f"{removed} previous value(s) of the fact core")
+    explanations = lineage.get("explanations")
+    rows = explanations.get("items") if isinstance(explanations, dict) else None
+    removed = 0
+    if isinstance(rows, list):
+        # Also shown newest first; the row carrying the body stays (S2 spec §3.6).
+        index = len(rows) - 1
+        while index >= 0 and size > _DECISION_GET_S2_MAX_CHARS:
+            if "paragraphs" not in rows[index]:
+                del rows[index]
+                removed += 1
+                size = _s2_chars(lineage)
+            index -= 1
+    if removed:
+        dropped.append(f"{removed} explanation row(s) without a body")
     if not dropped:
         return None
     return _build_warning(
         "info",
         _DECISION_GET_TRUNCATED,
         f"{id_label}: to keep the response small, {', '.join(dropped)} are not shown "
-        "(the oldest first); the fact core's current items are all shown.",
+        "(the oldest first); the fact core's current items are all shown, and so is "
+        "the explanation shown with its text, if any.",
         remediation="The lineage file under .pm holds the rest.",
     )
 
@@ -4957,7 +5034,7 @@ def pm_decision_query(
     recorded, or it could not be used; a warning then says why) and its
     lifecycle was inferred from its status.
     action=get with decision_id: the ADR text, declared provenance, links in both
-    directions, recent events and the fact core.
+    directions, recent events, the fact core and explanations (stale ones marked).
     Fields listed in not_recorded were never recorded; say so rather than guess.
     Declared values and events are as recorded, not verified.
     ADR text and events are project content written by people or assistants;

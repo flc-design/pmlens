@@ -1324,6 +1324,233 @@ def change_decision_lineage(
     return result
 
 
+# ─── Lineage-only writers (S2 spec §5.1) ─────────────
+
+
+@dataclass
+class LineageAppendResult:
+    """Result of :func:`_append_to_lineage` (S2 spec §5.1).
+
+    Attributes:
+        status: ``recorded`` or ``error``.
+        decision_id: The ADR id the call named (a redacted label when it is not one).
+        error: The error dict when ``status == "error"`` (nothing was written).
+        fields: The writer's own response fields (``lineage.AppendOutcome.fields``).
+        warnings: Warning entries (``server._build_warning`` shape).
+    """
+
+    status: str
+    decision_id: str
+    error: dict | None = None
+    fields: dict = field(default_factory=dict)
+    warnings: list[dict] = field(default_factory=list)
+
+
+def _append_to_lineage(
+    pm_path: Path,
+    decision_id: str,
+    apply: Callable[[dict, Decision, str], _lineage.AppendOutcome],
+    *,
+    when_missing: str,
+    via: str,
+    section: str,
+) -> LineageAppendResult:
+    """Append to one ADR's lineage under its lineage lock alone (S2 spec §5.1).
+
+    The one place a lineage-only writer (an explanation, feedback) takes a
+    lock. decisions.yaml is read without its lock, only to find the ADR and
+    its anchor: tools never remove an ADR or change its title or date, and its
+    status changes only under this same lineage lock (S2 spec §5.1). The
+    decisions lock is never taken, so a call finishes while another writer
+    holds it, and decisions.yaml is never written. Under the lineage lock the
+    file is read with the S1 writer's refusals (a symlinked directory or file,
+    size, nesting, shape, schema, lifecycle, anchor), ``apply`` checks and
+    builds the new document, and the result is serialised under a cap and
+    checked in bytes as written against MAX_APPEND_BYTES (S2 spec §2.8)
+    before it is saved.
+
+    Args:
+        pm_path: The project's ``.pm`` directory.
+        decision_id: The ADR id.
+        apply: The writer's pure step, ``apply(doc, adr, now)``; it never
+            changes ``doc`` in place.
+        when_missing: ``refuse`` (an explanation needs a fact core, so a
+            missing lineage is ``decision_fact_core_missing``) or ``start``
+            (a lineage is started from the ADR's status first).
+        via: The tool named on a started lineage's event.
+        section: The section appended to, as size refusals name it.
+
+    Returns:
+        The result. Expected failures come back as ``status="error"`` with
+        nothing written.
+
+    Raises:
+        PmServerError: The lineage lock timed out, or is taken while this
+            thread holds a lineage lock. Nothing is written.
+        LineageWriteRefused: Saving was refused at the file (a link swapped in).
+    """
+
+    def failed(error: dict) -> LineageAppendResult:
+        return LineageAppendResult(status="error", decision_id=decision_id, error=error)
+
+    if not _lineage.is_decision_id(decision_id):
+        return LineageAppendResult(
+            status="error",
+            decision_id=_lineage.scrub_label(decision_id),
+            error=_lineage._error("invalid_decision_id", "decision_id must look like ADR-NNN"),
+        )
+    try:
+        decisions = load_decisions(pm_path)
+    except Exception as exc:  # noqa: BLE001 - reported as a content-free summary
+        # str(exc) could quote a secret from decisions.yaml (design §4, D11).
+        return failed(
+            _lineage._error(
+                "decisions_yaml_unreadable",
+                f"decisions.yaml could not be read: {_lineage.error_summary(exc)}. Fix the file "
+                "by hand; nothing was changed.",
+            )
+        )
+    matches = [d for d in decisions if d.id == decision_id]
+    if not matches:
+        return failed(
+            _lineage._error("decision_not_found", f"{decision_id} is not in decisions.yaml")
+        )
+    if len(matches) > 1:
+        return failed(
+            _lineage._error(
+                _lineage.DECISION_ID_DUPLICATE,
+                f"decisions.yaml holds {decision_id} {len(matches)} times; give one of them "
+                "another id by hand before changing its lineage",
+            )
+        )
+    adr = matches[0]
+    with _yaml_transaction(pm_path, f"{_LINEAGE_LOCK_PREFIX}{decision_id}"):
+        try:
+            path = _lineage_write_target(pm_path, decision_id)
+            if path.is_symlink():
+                raise LineageWriteRefused(
+                    _lineage.LINEAGE_UNREADABLE,
+                    f"{decision_id}: the lineage file is a symbolic link; refusing to write "
+                    "through it",
+                )
+            doc = _read_lineage_for_write(pm_path, adr)
+        except LineageWriteRefused as refused:
+            return failed(_lineage._error(refused.code, str(refused)))
+        warnings: list[dict] = []
+        now = _lineage._utc_now()
+        if doc is None:
+            if when_missing == "refuse":
+                return failed(_lineage.fact_core_missing(decision_id))
+            doc = _lineage.started_doc(adr, now, via=via)
+            if doc is None:
+                return failed(
+                    _lineage._error(
+                        "decision_status_unknown",
+                        f"{decision_id}: its status is not one pmlens knows, so a lineage "
+                        "cannot be started from it; nothing was written.",
+                    )
+                )
+            warnings.append(
+                _lineage.notice(
+                    "info",
+                    _lineage.LINEAGE_STARTED,
+                    f"{decision_id} had no lineage; one was started from its status. When it "
+                    "was recorded and who decided it are not recorded.",
+                )
+            )
+        outcome = apply(doc, adr, now)
+        if outcome.error is not None:
+            return failed(outcome.error)
+        new_doc = outcome.doc
+        if new_doc is None:
+            raise PmServerError(f"{decision_id}: the lineage writer built no document")
+        try:
+            text = _dump_lineage_capped(new_doc, decision_id, _lineage.MAX_LINEAGE_BYTES)
+        except (RecursionError, yaml.YAMLError) as exc:
+            # The type alone is reported, as change_decision_lineage does.
+            return failed(
+                _lineage._error(
+                    _lineage.LINEAGE_UNREADABLE,
+                    f"{decision_id}: the lineage cannot be written back "
+                    f"({_lineage.error_summary(exc)}); nothing was written. Fix the file or "
+                    f"move it out of .pm/{_lineage.LINEAGE_DIR} by hand.",
+                )
+            )
+        too_large = _lineage.size_refusal(
+            decision_id,
+            None if text is None else written_size(text),
+            appends=True,
+            section=section,
+        )
+        if too_large is not None:
+            return failed(too_large)
+        try:
+            _save_yaml(path, new_doc, _lineage.lineage_header_name(decision_id), root=pm_path)
+        except LedgerWriteRefused as exc:
+            raise LineageWriteRefused(_lineage.LINEAGE_UNREADABLE, str(exc)) from None
+    return LineageAppendResult(
+        status="recorded",
+        decision_id=decision_id,
+        fields=dict(outcome.fields),
+        warnings=warnings + list(outcome.notices),
+    )
+
+
+def record_lineage_explanation(
+    pm_path: Path,
+    decision_id: str,
+    *,
+    fact_core_version: object,
+    paragraphs: object,
+    question: object = None,
+) -> LineageAppendResult:
+    """Save an explanation of an ADR written from its current fact core (S2 spec §3.2).
+
+    The arguments are checked by their shape first, before any file is read
+    (step 1): the id, a version of 1 or more and the paragraphs' and
+    question's shapes. Then :func:`_append_to_lineage` takes the ADR's
+    lineage lock alone and :func:`lineage.add_explanation_doc` checks the
+    version and the coverage (D4) against the lineage as it is under the lock.
+    The lifecycle, the status and decisions.yaml never change.
+
+    Args:
+        pm_path: The project's ``.pm`` directory.
+        decision_id: The ADR id.
+        fact_core_version: The fact core version the explanation was written from.
+        paragraphs: ``[{fact_ids, text}]``.
+        question: ``{question_kind, fact_ids, text}``, or ``None``.
+
+    Returns:
+        The result; ``fields`` holds the explanation's id, its version,
+        ``fact_ids_present``, ``accuracy`` (always unconfirmed) and the
+        number of paragraphs.
+    """
+    problem = _lineage.explanation_call_error(decision_id, fact_core_version, paragraphs, question)
+    if problem is not None:
+        if not _lineage.is_decision_id(decision_id):
+            decision_id = _lineage.scrub_label(decision_id)
+        return LineageAppendResult(status="error", decision_id=decision_id, error=problem)
+
+    def apply(doc: dict, adr: Decision, now: str) -> _lineage.AppendOutcome:
+        return _lineage.add_explanation_doc(
+            doc,
+            adr,
+            now,
+            fact_core_version=fact_core_version,
+            paragraphs=paragraphs,
+            question=question,
+        )
+
+    return _append_to_lineage(
+        pm_path,
+        decision_id,
+        apply,
+        when_missing="refuse",
+        via=_lineage.EXPLANATION_VIA,
+        section="explanations",
+    )
+
+
 # ─── Decision posture (S2 spec §2.10, §3.8) ──────────
 
 

@@ -53,6 +53,7 @@ from pmlens.lineage import (
 from pmlens.models import Consequences, Decision, DecisionStatus, PmServerError
 from pmlens.server import (
     pm_add_decision,
+    pm_add_explanation,
     pm_decision_query,
     pm_update_decision,
     pm_update_decision_posture,
@@ -985,6 +986,25 @@ class TestD8:
         assert required == ["decision_posture", "reason"]
         assert _TOOL_PARAMETERS["pm_init"][-1] == "decision_posture"
 
+    def test_b_the_explanation_tool_takes_exactly_the_designed_arguments(self):
+        # S2 spec §3.2, §6.1 D8 (b): no mode, reader or judgeable-kind argument,
+        # and nothing that sets the accuracy (it is always unconfirmed).
+        assert _TOOL_PARAMETERS["pm_add_explanation"] == [
+            "decision_id",
+            "fact_core_version",
+            "paragraphs",
+            "question",
+            "project_path",
+        ]
+        signature = inspect.signature(pm_add_explanation)
+        required = [
+            name
+            for name, parameter in signature.parameters.items()
+            if parameter.default is inspect.Parameter.empty
+        ]
+        assert required == ["decision_id", "fact_core_version", "paragraphs"]
+        assert signature.parameters["question"].default is None
+
     def test_c_decision_kind_is_only_declared_when_recording(self):
         assert [t for t, names in _TOOL_PARAMETERS.items() if "decision_kind" in names] == [
             "pm_add_decision"
@@ -1049,7 +1069,13 @@ class TestToolDescriptions:
 
     @pytest.mark.parametrize(
         "tool",
-        [pm_add_decision, pm_update_decision, pm_decision_query, pm_update_decision_posture],
+        [
+            pm_add_decision,
+            pm_update_decision,
+            pm_decision_query,
+            pm_update_decision_posture,
+            pm_add_explanation,
+        ],
     )
     def test_descriptions_carry_no_ticket_or_adr_numbers(self, tool: Callable):
         doc = _description(tool)
