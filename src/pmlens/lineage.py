@@ -2270,6 +2270,9 @@ class LineageView:
     # What the brief's floor reads (:func:`floor_reversibility` of the stored
     # fact core, so it agrees with the ratchet); unknown without one.
     reversibility_floor: str = Reversibility.UNKNOWN.value
+    # Whether the adoption fixed the fact core, or that cannot be read (a
+    # malformed adopted version): a fact core revision would be refused.
+    fact_core_fixed: bool = False
 
     @property
     def note_codes(self) -> set[str]:
@@ -3109,6 +3112,7 @@ def lineage_view(
     revert_change: tuple[str, str] | None = None
     adopted: int | None = None
     adoption: str | None = None
+    fixed = False
     revert_floor = Reversibility.UNKNOWN.value
     if include_s2:
         fact_core, revert_change = _view_fact_core(doc.get("fact_core"), notes)
@@ -3117,6 +3121,7 @@ def lineage_view(
         feedback = _view_feedback(doc.get("feedback"), notes)
         declared_scope = declared_respondent_scope(doc)
         adopted, malformed, adoption = adopted_fact_core_version(doc)
+        fixed = malformed or _fixed_by_adoption(doc, adopted)
         if malformed:
             notes.skipped()
 
@@ -3154,7 +3159,20 @@ def lineage_view(
         fact_core_adoption=adoption,
         reversibility_change=revert_change,
         reversibility_floor=revert_floor,
+        fact_core_fixed=fixed,
     )
+
+
+# The remediation of decision_reversibility_changed_outside_tools on an ADR
+# whose adoption fixed the fact core (or whether it did cannot be read): the
+# revision that would take the change in is refused with
+# fact_core_after_adoption until the ADR is back in proposed (S2 spec §5.4).
+_OUTSIDE_CHANGE_FIXED_REMEDIATION = (
+    "Tell the user. The fact core of this ADR is fixed since the user adopted it, so no "
+    "revision can take the change in while it stays adopted. Only if the user asks, move it "
+    "back to proposed with pm_update_decision and revise, or record the change as a new ADR "
+    "with amends."
+)
 
 
 def fact_core_notices(view: LineageView) -> list[dict]:
@@ -3184,6 +3202,8 @@ def fact_core_notices(view: LineageView) -> list[dict]:
                 f"{_path_of(adr)} with code_revertable, external_irreversible or unknown, the "
                 "fact core cannot be written. Do not edit the lineage file yourself."
             )
+        elif view.fact_core_fixed:
+            remediation = _OUTSIDE_CHANGE_FIXED_REMEDIATION
         else:
             remediation = (
                 "Tell the user. The next fact core revision with pm_update_decision records "
@@ -5184,6 +5204,14 @@ def add_explanation_doc(
     recorded = fact_core.get("recorded_reversibility")
     revert = _current_revert_value(fact_core["items"], usable)
     if _changed_outside_tools(recorded, revert):
+        adopted, malformed, _ = adopted_fact_core_version(doc)
+        if malformed or _fixed_by_adoption(doc, adopted):
+            remediation = _OUTSIDE_CHANGE_FIXED_REMEDIATION
+        else:
+            remediation = (
+                "Tell the user. Revise the fact core with pm_update_decision first, which "
+                "records the change in a new version, then explain that version and save it."
+            )
         notices.append(
             notice(
                 "info",
@@ -5191,8 +5219,7 @@ def add_explanation_doc(
                 f"{adr}: F-revert's reversibility was changed outside pmlens's tools (recorded "
                 f"{reversibility_label(recorded)}, now {reversibility_label(revert)}), so this "
                 "explanation was saved but is shown as stale.",
-                "Tell the user. Revise the fact core with pm_update_decision first, which "
-                "records the change in a new version, then explain that version and save it.",
+                remediation,
             )
         )
     if hits:

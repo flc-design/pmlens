@@ -61,7 +61,12 @@ from pmlens.lineage import (
     read_lineage_raw,
 )
 from pmlens.models import Decision, DecisionStatus, FactSource, Reversibility
-from pmlens.server import pm_add_decision, pm_decision_query, pm_update_decision
+from pmlens.server import (
+    pm_add_decision,
+    pm_decision_brief,
+    pm_decision_query,
+    pm_update_decision,
+)
 from pmlens.storage import _save_decisions, change_decision_lineage
 
 NOW = "2026-10-30T01:00:00Z"
@@ -2805,6 +2810,43 @@ class TestGetThroughTheTool:
         got = _get(tmp_project)
         assert "decision_reversibility_changed_outside_tools" not in _codes(got["warnings"])
         assert got["lineage"]["fact_core"]["recorded_reversibility"] == "code_revertable"
+
+    def test_a_hand_lowered_reversibility_on_a_fixed_adr_does_not_point_to_a_revision(
+        self, tmp_project: Path
+    ):
+        # S2 spec §5.4: a fixed ADR takes the change in only after it is moved
+        # back to proposed, so get and brief must not send the assistant to a
+        # revision that fact_core_after_adoption refuses.
+        _record(tmp_project)
+        _revise(tmp_project, _facts(), 0)
+        _adopt(tmp_project)
+        _edit(
+            tmp_project,
+            lambda doc: doc["fact_core"]["items"][2].update(reversibility="code_revertable"),
+        )
+        got = _get(tmp_project)
+        brief = pm_decision_brief(decision_id=TOOL_ID, project_path=str(tmp_project))
+        for response in (got, brief):
+            [warning] = [
+                w
+                for w in response["warnings"]
+                if w["code"] == "decision_reversibility_changed_outside_tools"
+            ]
+            assert "next fact core revision" not in warning["remediation"]
+            assert "fixed" in warning["remediation"]
+            assert "only if the user asks" in warning["remediation"].lower()
+            assert "back to proposed" in warning["remediation"]
+        refused = _revise(tmp_project, _as_argument(got["lineage"]["fact_core"]), 1)
+        assert refused["code"] == "fact_core_after_adoption"
+        # Back in proposed, the remediation points to the revision again.
+        moved = _update(tmp_project, lifecycle="proposed", reason="the user reopened it")
+        assert moved["status"] == "updated", moved
+        [warning] = [
+            w
+            for w in _get(tmp_project)["warnings"]
+            if w["code"] == "decision_reversibility_changed_outside_tools"
+        ]
+        assert "next fact core revision" in warning["remediation"]
 
     def test_the_s2_sections_stay_within_the_character_budget(self, tmp_project: Path):
         _record(tmp_project)

@@ -828,6 +828,31 @@ class TestThroughStorage:
         assert row["stale"] is True and row["changed_ids"] == ["F-revert"]
         assert "paragraphs" not in row
 
+    def test_a_change_outside_the_tools_on_a_fixed_adr_does_not_point_to_a_revision(
+        self, tmp_pm_path: Path
+    ):
+        # S2 spec §5.4: the revision would be refused with fact_core_after_adoption.
+        _at_version_one(tmp_pm_path)
+        adopted = change_decision_lineage(
+            tmp_pm_path, ADR_ID, LineageChange(lifecycle="adopted", reason="the user adopted it")
+        )
+        assert adopted.status == "updated", adopted
+        doc = _load(tmp_pm_path)
+        doc["fact_core"]["items"][2]["reversibility"] = "code_revertable"
+        _store(tmp_pm_path, doc)
+        result = _recorded(tmp_pm_path)
+        [warning] = result.warnings
+        assert warning["code"] == "decision_reversibility_changed_outside_tools"
+        assert "Revise the fact core" not in warning["remediation"]
+        assert "fixed" in warning["remediation"]
+        assert "back to proposed" in warning["remediation"]
+        refused = change_decision_lineage(
+            tmp_pm_path,
+            ADR_ID,
+            LineageChange(fact_core=_facts(), expected_fact_core_version=1),
+        )
+        assert refused.error["code"] == "fact_core_after_adoption"
+
     def test_a_started_lineage_for_a_writer_that_starts_one(self, tmp_pm_path: Path):
         # pm_add_feedback's path (S2 spec §5.1): a lineage is started first.
         _seed(tmp_pm_path)
