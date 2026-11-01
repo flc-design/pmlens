@@ -1,5 +1,129 @@
 # Changelog
 
+## [Unreleased]
+
+Decision Lineage v1, second half (ADR-056 / ADR-058): one decision can now go
+the whole way from an explanation to the user, through their reply and a
+revision, to an adoption that records what was adopted. An ADR's facts are
+kept as a versioned fact core; the assistant explains the decision from a
+brief that pmlens returns, saves the explanation with the facts it covers,
+and records the user's replies in their own words. A revision can cite the
+reply that caused it, and explanations of an older version are then shown as
+stale. The project's decision posture, which the user chooses, sets how an
+assistant leans when the reader cannot judge a kind of decision. pmlens checks
+what it can check mechanically (the version, that every fact is covered, the
+ids) and shows the rest as declared, not verified.
+
+MCP tool count: 52 names for 50 operations in full mode (the two content tool
+aliases); Lens 18, or 20 with Desktop outbox writes. Test suite: 4,137 passing.
+
+**Upgrade notes.**
+
+- Claude Desktop shows `pm_decision_brief` only after the Desktop extension
+  (`.mcpb`) is updated to this release; the extension's and the Claude Code
+  plugin's pinned versions are updated with every release.
+- Upgrade every host that uses the same `.pm/` together. Three reasons are new
+  in this release:
+  - pmlens 0.16.0's `pm_prompt_pack` could write a pack over
+    `.pm/decision_policy.yaml` through `out_path` (0.16.0 refused only a list
+    of reserved names), and the posture and its history were lost. This
+    release reads such a file as `unset`, which acts as `cautious`, with
+    `decision_policy_unreadable`; restore the file from git. Since 0.17.0, a
+    pack inside `.pm` can only go under `.pm/exports`.
+  - An ADR adopted by a 0.17.0 host records no fact core version, so its facts
+    are not fixed: this release shows `adopted_fact_core_version: null` and
+    `decision_fact_core_written_after_adoption` for it. To fix them, move the
+    ADR back to `proposed` with this release and adopt it again.
+  - A 0.17.0 host keeps the new lineage sections (`fact_core`,
+    `explanations`, `feedback`) as they are and shows them by name only, but
+    counts them against its append limit, so it runs out of room for notes
+    sooner.
+- In a repository that commits `.pm/`, the explanations and the user's replies
+  stored in `.pm/decision_lineage/` are shared with everyone who can read the
+  repository. Only strings matching the secret patterns are redacted before
+  they are stored; e-mail addresses, paths and IP addresses are kept.
+- No MCP tool lowers a recorded reversibility to `code_revertable`. Only the
+  user's own edit of the one `reversibility` line of `F-revert` in the lineage
+  file does (README, "Decision Lineage"); do not ask an assistant to make it.
+  This ratchet and the fixing of facts after adoption bind an assistant only
+  together with a deny on Edit / Write to `.pm/`.
+- Nothing is migrated and the lineage `schema` stays 1: an ADR without a fact
+  core reads as version 0, and `.pm/decision_policy.yaml` is created only when
+  a posture is first set (until then the posture reads as `unset`).
+
+### Added
+
+- **Fact core (PMSERV-228)**: `pm_update_decision` takes `fact_core` and
+  `expected_fact_core_version` to record an ADR's facts as a new version: the
+  full list as it should now stand, with five required facts (`F-what`,
+  `F-change`, `F-revert` with a `reversibility`, `F-weak`, `F-uncertain` with
+  a `confidence`) and numbered alternatives, conditions and premises. pmlens
+  assigns the ids and never reuses a retired one, keeps the values a revision
+  replaces, writes every fact's `source` as `proposal`, and refuses a version
+  that is not the current one (`fact_core_version_mismatch`). A fact core call
+  changes nothing else. Once a version exists, the tools never lower
+  `F-revert`'s reversibility to `code_revertable`
+  (`fact_core_reversibility_lowering_refused`); a change made by hand is
+  reported on every read (`decision_reversibility_changed_outside_tools`) and
+  taken into the next version. Adopting an ADR that has facts records the
+  adopted version, and its facts are then fixed until it is moved back to
+  `proposed` (`fact_core_after_adoption`).
+- **`pm_add_explanation` (PMSERV-230)**, full mode only: saves an explanation
+  the assistant wrote from the current fact core (`ADR-NNN.EX-n`). Every fact
+  of the current version must lead a paragraph and the version must be
+  current; accuracy is never checked and is shown as `unconfirmed`. A
+  revision marks older explanations stale, with the ids that changed.
+- **`pm_add_feedback` (PMSERV-231)**, full mode only: records the user's reply
+  in their own words (`ADR-NNN.FB-n`), as one of eight kinds, among them
+  `premise_mismatch`, `approve`, `reject` and `check_answer`. The declared
+  `respondent_scope` is never checked; replies are shown as
+  `respondent_declared_can_judge` or `no_review_by_able_person` and are never
+  scored, and approval or rejection recorded here changes no lifecycle.
+  `pm_update_decision`'s new `caused_by` cites these ids on a fact core
+  revision or an evaluation.
+- **`pm_decision_brief` (PMSERV-229)**, read-only and available under Lens:
+  what an assistant needs to explain one ADR to the reader in front of it —
+  the current facts, the explanation rules, the `floor` and the one question
+  to ask afterwards. The reader's mode (`judgeable_kinds`, `reader_hint`)
+  changes only `language_rules`, `judgment_request` and `question`, and the
+  posture changes only `posture`; an `external_irreversible` decision, or one
+  whose reversibility is unknown, always needs a person able to judge before
+  its irreversible effect.
+- **Decision posture (PMSERV-255 / ADR-058)**: `bold` (攻め: new or
+  exploratory work), `cautious` (慎重: maintenance and fixes) or `unset`
+  (未設定, acting as `cautious`), kept with its history in
+  `.pm/decision_policy.yaml`. `pm_update_decision_posture` (full mode only)
+  changes it with the user's reason, and every change returns
+  `decision_posture_changed`.
+
+### Changed
+
+- `pm_init` takes an optional `decision_posture`, set only for a new project.
+- `pm_status` returns a `decision_posture` key with the value, the posture in
+  effect and the last change.
+- `pm_decision_query`'s `get` returns the fact core, the explanations (stale
+  ones marked), the replies with the declared respondent scope, and the
+  adopted fact core version.
+- Adopting an ADR that has facts but no explanation of their current version
+  returns the info warning `decision_adopted_without_current_explanation`.
+
+### Tests
+
+- The minimal path of one decision (record, fact core, brief, explanation,
+  reply, revision caused by the reply, second explanation, adoption, refused
+  revision after it) runs end to end in process and over stdio, where a Lens
+  server reads the same result without changing `.pm/`. Fake secrets in a
+  fact, an explanation and a reply reach neither the lineage file nor any
+  response.
+
+### Documentation
+
+- README: a Decision Lineage section (the path one decision takes, the
+  posture labels, the user's procedure for lowering reversibility by hand,
+  what a committed `.pm/` shares) and a guarantee table rewritten into
+  guarantees, conventions, observations and optional mitigations; the
+  reachability matrix lists `pm_decision_brief`.
+
 ## [0.17.0] - 2026-10-27
 
 Decision Lineage v1, first half (ADR-056 / ADR-057 / ADR-058 / ADR-059): ADRs

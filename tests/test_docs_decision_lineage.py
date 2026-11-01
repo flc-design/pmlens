@@ -175,10 +175,29 @@ def test_the_adr_example_records_proposed_and_adopts_after_acceptance(relpath: s
 
 # ─── Guarantee rows ────────────────────────────────────────────────
 
+# S2 files the item as guaranteed within limits, since the check reads only
+# argument names (S2 spec §6.4); the S1 spec keeps its own S1 label.
 _GUARANTEE_ROWS = (
-    ("README.md", "| Guaranteed |", "No tool has an argument", "checked by argument name"),
-    ("README.ja.md", "| 保証 |", "人間による確認を設定する引数", "引数名による検査"),
-    ("docs/design.md", "| 保証 |", "人間による確認を設定する引数", "引数名による検査"),
+    (
+        "README.md",
+        "| Guaranteed (within limits) |",
+        "No tool has an argument",
+        "checked by argument name",
+    ),
+    ("README.ja.md", "| 保証（範囲つき） |", "人間による確認を設定する引数", "引数名による検査"),
+    ("docs/design.md", "| 保証（範囲つき） |", "人間による確認を設定する引数", "引数名による検査"),
+    (
+        "docs/cheatsheet.md",
+        "| Guaranteed (within limits) |",
+        "No tool has an argument",
+        "checked by argument name",
+    ),
+    (
+        "docs/cheatsheet.ja.md",
+        "| 保証（範囲つき） |",
+        "人間による確認を設定する引数",
+        "引数名による検査",
+    ),
     (
         "docs/issues/DESIGN_decision-lineage-s1.md",
         "| 保証 |",
@@ -205,6 +224,53 @@ def test_the_no_confirmation_argument_guarantee_states_its_limit(
     # What the name check misses, on both tools.
     for missed in ("lifecycle=adopted", "status=accepted"):
         assert missed in row, f"{relpath}: the guarantee row does not name {missed}"
+
+
+# Every user-facing document presents Decision Lineage in the same kinds
+# (S2 spec §6.4): row labels as they start a table row.
+_GUARANTEE_KINDS = {
+    "README.md": (
+        "| Guaranteed |",
+        "| Guaranteed (within limits) |",
+        "| Convention |",
+        "| Observed",
+        "| Optional mitigations",
+    ),
+    "docs/cheatsheet.md": (
+        "| Guaranteed |",
+        "| Guaranteed (within limits) |",
+        "| Convention |",
+        "| Observed",
+        "| Optional mitigations",
+    ),
+    "README.ja.md": ("| 保証 |", "| 保証（範囲つき） |", "| 規約 |", "| 観測", "| 任意の緩和策"),
+    "docs/design.md": ("| 保証 |", "| 保証（範囲つき） |", "| 規約 |", "| 観測", "| 緩和策"),
+    "docs/cheatsheet.ja.md": ("| 保証 |", "| 保証（範囲つき） |", "| 規約 |", "| 観測", "| 緩和策"),
+}
+
+
+@pytest.mark.parametrize("relpath", sorted(_GUARANTEE_KINDS))
+def test_the_documents_present_the_guarantee_kinds(relpath: str) -> None:
+    lines = _read(relpath).splitlines()
+    for label in _GUARANTEE_KINDS[relpath]:
+        assert any(line.startswith(label) for line in lines), f"{relpath}: no {label!r} row"
+
+
+@pytest.mark.parametrize(
+    ("relpath", "within_limits"),
+    [("docs/cheatsheet.md", "within the limits"), ("docs/cheatsheet.ja.md", "範囲の中で")],
+)
+def test_the_cheatsheet_update_row_does_not_state_the_ratchet_flatly(
+    relpath: str, within_limits: str
+) -> None:
+    # The ratchet and the fixing of adopted facts are guaranteed only within
+    # limits (S2 spec §6.4); the tool row must not read as more than that.
+    rows = [
+        line for line in _read(relpath).splitlines() if line.startswith("| `pm_update_decision` |")
+    ]
+    assert len(rows) == 1
+    assert "code_revertable" in rows[0]
+    assert within_limits in rows[0], f"{relpath}: the ratchet is stated without its limits"
 
 
 # ─── Codes in the specification ─────────────────────────────────────

@@ -37,6 +37,7 @@
 
 - **🔌 マルチホストファースト** — `pmlens install --target=auto` 一発で **Claude Code / Codex CLI / Cursor / Grok Build に登録**。プロジェクトのルールも `CLAUDE.md` と `AGENTS.md` の両方に自動同期 (ADR-008)。プロジェクト途中でホストを切り替えてもコンテキストを失わない — 同じ `.pm/` データ、同じワークフロー
 - **50 の MCP ツール + 互換名2個** — タスク CRUD、子イシュー、ステータス、ブロッカー、ベロシティ、ダッシュボード、プロンプトパック、ADR、セッションメモリ、ワークフロー、ナレッジレコード、マルチホストルール注入、クロスホスト Outbox ブリッジ、コンテンツパイプライン（記録済み知見 → redact 済み下書き） 等
+- **Decision Lineage（判断の経緯）** — ADR ごとに lifecycle、版つきの事実（fact_core）、そこから AI が書いた説明、ユーザーの返事を残す。判断を説明し、問い返しを受け、直し、採択するまでを、理由をたどれる形で記録する（下の「Decision Lineage」節）
 - **ワークフローエンジン** — テンプレートベースの開発ワークフロー（ループ、ユーザーゲート、チェイン対応：Discovery → Development）
 - **ナレッジレコード** — カジュアルなメモリとフォーマルな ADR の中間に位置する構造化された知見記録（research、tradeoff、spec 等）
 - **Super Research スキル** — 3 並列エージェント（Domain Expert、Critical Analyst、Lateral Thinker）+ Depth Check（6 次元）+ Fact Check + Cross-Check
@@ -285,22 +286,116 @@ pmlens uninstall --target auto
 | `pm_add_decision` | ADR 追加（context、decision、consequences を構造化）。既定は `proposed` で記録し、`status="accepted"` はユーザーが内容そのものを受け入れた時だけ渡す（規約であり、誰が受け入れたかを pmlens は確かめられないので、accepted で記録すると伝えるべき警告 `decision_created_accepted` を返す）。申告（`origin`・`recorded_timing`・`decision_kind`、既定は `unknown`）と記録時刻は `.pm/decision_lineage/ADR-NNN.yaml` に申告のまま保存し、検証はしない |
 | `pm_decision_query` | ADR と lineage を、何も変えずに読む（読み取り専用。Lens モードでも使える）。`action="list"` は ADR を status・lifecycle・申告された origin 付きで、`offset` から `limit` 件（既定 50）ずつ返し、`has_more` / `next_offset` で続きを示す（`lifecycle="proposed"` でユーザーの確認待ちの一覧。長い title はここでは切り、`get` は全文を返す）。`action="get"` は ADR の本文、申告、双方向の関係、最近の events を返す。使える lineage の無い ADR は status から導いた値（`derived`）で示し、記録の無い項目は `not_recorded` に出す。申告と events は記録されたままを示し、検証はしない。未知のキーは名前だけを返し、秘密らしき文字列は応答で伏せる |
 | `pm_decision_brief` | 1 件の ADR を目の前のユーザーに説明するのに要るものを、何も変えずに返す（読み取り専用。Lens モードでも使える）: 現在の `fact_core`、説明が守る規則、`floor`（下限）、説明の後に聞く 1 問の `question`（引用する事実は雛形に埋め込まず `question.quoted_fact` に別に返す）。`judgeable_kinds`（`spec_policy`・`premise_dependent`・`technical` のうち読み手が自分で判断できるもの。読み手が答えるまでは省き、その間は尋ねる問いが返る）と `reader_hint`（`more_detail` / `simpler`。この呼び出しだけ）で変わるのは `language_rules`・`judgment_request`・`question` だけで、プロジェクトの姿勢で変わるのは `posture` だけ。事実・下限・検証の規則は読み手によらず同じで、`external_irreversible`（と可逆性が分からないもの）は、どの種類の判断でも、取り消せない作用の前に判断できる人の確認を求める。秘密らしき文字列は応答で伏せる |
-| `pm_update_decision` | ADR の lifecycle（`proposed` / `adopted` / `deprecated` / `superseded` / `rejected` / `reverted`）を決まった遷移表に沿って移し、関係（`supersedes` / `superseded_by` / `amends`）を変え、evaluation（AI の記録として示し、人間のレビューとはしない）や note を追記する。ADR の本文は変えない。`decisions.yaml` の `status` は lifecycle の射影として書き直す（`adopted` → `accepted`、`rejected` → `deprecated`）。lifecycle を変える時は `reason` が必須。`adopted` にするのはユーザーが ADR の内容そのものを受け入れた時だけ、`rejected` にするのはユーザーが判断した後だけ。pmlens はそれを確かめられないので、lifecycle を変えるたびに伝えるべき警告 `decision_lifecycle_changed` を返す。申告の `origin`（`ai_auto` だけ）と `recorded_timing` は、`unknown` のままなら reason を添えて後から入れられる。full モードだけ（Lens には出ない） |
+| `pm_update_decision` | ADR の lifecycle（`proposed` / `adopted` / `deprecated` / `superseded` / `rejected` / `reverted`）を決まった遷移表に沿って移し、関係（`supersedes` / `superseded_by` / `amends`）を変え、evaluation（AI の記録として示し、人間のレビューとはしない）や note を追記する。ADR の本文は変えない。`decisions.yaml` の `status` は lifecycle の射影として書き直す（`adopted` → `accepted`、`rejected` → `deprecated`）。lifecycle を変える時は `reason` が必須。`adopted` にするのはユーザーが ADR の内容そのものを受け入れた時だけ、`rejected` にするのはユーザーが判断した後だけ。pmlens はそれを確かめられないので、lifecycle を変えるたびに伝えるべき警告 `decision_lifecycle_changed` を返す。申告の `origin`（`ai_auto` だけ）と `recorded_timing` は、`unknown` のままなら reason を添えて後から入れられる。`fact_core`（と、読んだ版の `expected_fact_core_version`。最初は `0`）は判断の事実を新しい版として記録する。渡すのはその時点のあるべき全項目で、必須の 5 つ（`F-what`・`F-change`・`reversibility`（`code_revertable` / `external_irreversible` / `unknown`）付きの `F-revert`・`F-weak`・`confidence` 付きの `F-uncertain`）と、番号付きの `F-alt.N`・`F-conditions.N`・`F-premise.N`（`premise_dependent` の ADR には前提が 1 つ以上要る）。ID は pmlens が振り、使い回さない。改版で置き換えた値は残し、現在の版でない版からの改版は拒否する（`fact_core_version_mismatch`）。`fact_core` の呼び出しはほかの変更を伴わない（採択は別の呼び出しで行う）。`caused_by` には、fact_core の改版や evaluation のきっかけになったこの ADR のフィードバック ID（`ADR-NNN.FB-n`）を渡す。一度書いた `reversibility` を、このツールが `code_revertable` へ下げることは無い（`fact_core_reversibility_lowering_refused`。`caused_by` を付けても同じ）。事実を記録して採択された ADR は、`proposed` に戻すまで事実が固定される（`fact_core_after_adoption`）。下の「Decision Lineage」節を参照。full モードだけ（Lens には出ない） |
 | `pm_add_explanation` | アシスタントが ADR の現在の fact_core からユーザー向けに書いた説明を保存する。`paragraphs`（`[{"fact_ids": [1〜2 個の ID。先頭がその段落が主に述べる事実], "text": "..."}]`）と、書いた元の `fact_core_version`、任意の締めの `question` を渡す。現在の版のすべての事実が、mermaid の図だけではない段落の先頭にある必要があり、足りない ID・知らない ID は拒否して一覧で返す（`missing_fact_ids` / `unknown_fact_ids`）。版が現在のものでなければ `current_version` を添えて拒否する。pmlens が確かめるのは事実の ID がそろっていることと版が現在であることだけで、正確さは確かめず、常に `unconfirmed` と示す。fact_core を改版すると、それより前の説明は変わった ID と一緒に古い（stale）と示される。その ADR の lineage のロックだけを取り、lifecycle・status・`decisions.yaml` は変えない（full モードだけ。Lens には登録しない） |
 | `pm_add_feedback` | ADR についてユーザーが言ったことを、ユーザーの言葉のまま（`text`。必須）記録する。種別 `feedback_kind` は 8 つ: `premise_mismatch`・`what_if`・`unacceptable`・`try_alternative`・`approve`・`reject`・`comment`・`check_answer`（説明の後に聞いた問いへの答え。その `explanation_id` が要る）。任意で現在の fact_core の版の `fact_ids` を渡す。返事には `ADR-NNN.FB-n` の ID が振られ、`pm_update_decision` の `caused_by` から指せる。`respondent_scope`（`can_judge` / `cannot_judge` / `unknown`。既定）は pmlens が確かめない申告で、返事は `respondent_declared_can_judge` か `no_review_by_able_person` と示され、確認済みとは示さない。点数は付けない。ここで記録した承認・却下で lifecycle と status は変わらない。その ADR の lineage のロックだけを取り、lineage の無い ADR では lineage を始める（full モードだけ。Lens には登録しない） |
 | `pm_update_decision_posture` | プロジェクトの姿勢を変える（`bold` は新規開発・挑戦的な制作向け、`cautious` は保守・改修・修正向け、`unset` は未設定で `cautious` として振る舞う）。`.pm/decision_policy.yaml` に変更の履歴と一緒に保存する。ユーザーが求めた時だけ、その `reason`（必須。保存の前に redact する）を添えて使う。変更のたびに伝えるべき警告 `decision_posture_changed` を返す。`pm_init(decision_posture=…)` が設定するのは新しいプロジェクトの時だけで、`pm_status` が現在の値と最後の変更を示す。full モードだけ（Lens には出ない） |
 
-#### ADR の lifecycle: pmlens が保証することと、規約であること
+#### Decision Lineage: 1 件の ADR を説明し、問い返しを受け、直す
+
+ADR は AI が記録することが多く、その判断とともに暮らす人はエンジニアとは限らない。
+Decision Lineage は、ADR ごとに `.pm/decision_lineage/ADR-NNN.yaml` へ、判断を説明し、
+問い返し、直し、採択するのに要るものを残す。説明を書くのは AI で、pmlens は記録を持ち、
+機械的に確かめられることだけを確かめる。「分かりやすく」は事実を省くことではない。
+
+**1 件の判断がたどる経路**
+
+1. `pm_add_decision` が ADR を `proposed` で記録する（申告の `decision_kind` も一緒に）。
+2. `pm_update_decision(fact_core=[...], expected_fact_core_version=0)` が事実を版 1 として
+   記録する: 何を決めたか（`F-what`）、何が変わるか（`F-change`）、どう戻すか（`F-revert`。
+   `reversibility` 付き）、弱点（`F-weak`）、確かでないこと（`F-uncertain`。`confidence`
+   付き）と、番号付きの代案・条件・前提（`F-alt.N`・`F-conditions.N`・`F-premise.N`）。
+   事実は提案かユーザーの発言にあるものだけを書く。
+3. `pm_decision_brief` が、現在の事実、この読み手への説明の規則、説明の後に聞く 1 問を返す。
+   AI は判断を説明し、その説明を `pm_add_explanation` で保存する（`ADR-NNN.EX-n`）。
+   現在の事実を 1 つでも欠く説明と、古い版から書いた説明は拒否される。説明が正確かは
+   確かめず、常に `unconfirmed` と示す。
+4. `pm_add_feedback` がユーザーの返事を、ユーザーの言葉のまま記録する（`ADR-NNN.FB-n`）:
+   前提が違う、こうしたら、受け入れられない、別案を試す、承認、却下、コメント、問いへの答え。
+   ここで記録した承認で ADR が採択されることはない。
+5. 返事で事実が変わる時は、`pm_update_decision(fact_core=[...], expected_fact_core_version=1,
+   caused_by=["ADR-NNN.FB-1"])` が版 2 を記録する。版 1 から書いた説明は、変わった ID と
+   一緒に古い（stale）と示され、置き換えた値は残る。
+6. ユーザーが版 2 の説明を読んで受け入れたら、`pm_update_decision(lifecycle="adopted")` で
+   採択し、採択した fact_core の版が記録される。以後その事実は固定され、改版は拒否される
+   （`fact_core_after_adoption`）。直すのは、ユーザーの求めで `proposed` に戻した時か、
+   新しい ADR で amends する時である。
+
+`pm_decision_query` の `get` は、事実とそれぞれの版、説明（古いものに印）、返事と申告された
+回答者の範囲、採択した版（`adopted_fact_core_version`）を示す。
+
+**プロジェクトの姿勢（decision posture）**。読み手がその種類の判断をできない時、AI は
+プロジェクトの姿勢に従って寄せる。決めるのはユーザーで、AI がプロジェクトの status から
+推し量ることはしない。`pm_init(decision_posture=…)` が新しいプロジェクトで設定し、
+`pm_update_decision_posture` がユーザーの理由を添えて後から変え、`pm_status` が最後の変更と
+一緒に示す。値と変更の履歴は `.pm/decision_policy.yaml` に残る。
+
+| ラベル | 値 | 向いている場面 | 読み手が判断できない時の寄せ方 |
+|---|---|---|---|
+| 攻め | `bold` | 新規開発・挑戦的な制作 | コードで戻せる間は意欲的な案でよい |
+| 慎重 | `cautious` | 保守・改修・修正 | 控えめで戻しやすい案 |
+| 未設定 | `unset` | まだ決めていない | `cautious` として振る舞う |
+
+姿勢は下限（floor）を緩めない。作用を取り消せない判断（`external_irreversible`）と、
+可逆性が `unknown` か記録されていない判断は、どの姿勢・どの種類の判断でも、その作用の前に
+判断できる人の確認を求める。
+
+**可逆性を `code_revertable` へ下げるのは、ユーザー本人の編集だけ**。fact_core に版が
+できた後は、`F-revert` の `reversibility` を `code_revertable` へ下げる MCP ツールも CLI も
+無い（`fact_core_reversibility_lowering_refused`。`caused_by` を付けても同じ）。引き上げと、
+`unknown` と `external_irreversible` の間の訂正は `pm_update_decision` で行える。判断できる人が
+「コードで戻せる」と言った時は、次のようにする。
+
+1. その人の言葉を、AI に `pm_add_feedback` で記録してもらう。
+2. AI のセッションがそのプロジェクトに書いていない時に、`.pm/decision_lineage/ADR-NNN.yaml`
+   を開く（開いていたら開き直す）。この編集はロックを取らないので、前に開いた写しで保存すると、
+   その後に足された説明や返事が消える。
+3. `fact_core:` → `items:` の中の `id: F-revert` の項目で、`reversibility:` の 1 行だけを
+   `code_revertable` に直す。`recorded_reversibility`・`version`・`previous_values`・`events`
+   には触れない。
+4. 保存する。次の改版までは、`get` と `pm_decision_brief` が毎回
+   `decision_reversibility_changed_outside_tools` を示し、現在の版の説明も古いと示され、
+   下限は書いた値に従う。次の fact_core の改版が、その変更を版に取り込む（前の値は
+   `previous_values` に移る）。`recorded_reversibility` を誤って消しても、その改版が書き直す
+   ので直さなくてよい。
+
+この編集を AI に頼まない（AI は lineage ファイルを自分で編集しないよう案内されている）。
+採択後に事実が固定されている ADR では次の改版も拒否されるので、`proposed` に戻すまで
+この表示が続く。
+
+可逆性のラチェットと採択後の固定が AI に対して効くのは、`.pm/` への Edit / Write の deny
+（PMSERV-240。下の表の最後の緩和策）と組み合わせた時だけである。deny が無ければ、AI も
+ユーザーと同じく lineage ファイルを直接書き換えられ、pmlens はその結果を観測するだけになる。
+
+**`.pm/` をコミットすると共有されるもの**。説明と返事は `.pm/decision_lineage/` に本文の
+まま保存される。`.pm/` をコミットしているリポジトリでは、リポジトリを読める人すべてが、
+AI の説明とユーザーの発言を読める。保存の前に伏せるのは秘密のパターン（キー・トークン・
+秘密鍵など）に合う文字列だけで、件数だけを知らせる。メールアドレス・ファイルのパス・
+IP アドレスは残る。
+
+#### 判断について pmlens が保証すること・しないこと
 
 pmlens は呼び出し元が人か AI かを区別できず、`.pm/` は直接書き換えられる。そのため、
-ユーザーの言葉に基づいて ADR を採択することは、pmlens が支えるが強制はできない規約である（ADR-056）:
+ユーザーの言葉に基づく採択、事実を省かない説明、ユーザーの言葉のままの記録は、pmlens が
+支えるが強制はできない規約である（ADR-056）。保証するのは、ツールにその経路を作らないことと、
+検査できる形（版・事実の網羅・ID）が守られることまでである:
 
 | 区分 | 内容 |
 |---|---|
-| 保証 | Lens モード（`PM_LENS=1`）は ADR を書くツールを登録せず、Lens の読み取りは何も書かない。正確性・検証・人間による確認を設定する引数や、`decision_kind` を変える引数は、どのツールにも無い（引数名による検査。AI が `pm_update_decision` に `lifecycle="adopted"` を、`pm_add_decision` に `status="accepted"` や `origin="human"` / `"ai_proposed_human_decided"` を渡すことは検出しない。それは規約と観測の行で扱う）。後から入れられる `origin` は `ai_auto` だけ。遷移表に無い遷移はツールではできない。ツールは ADR の本文を書き換えず、lifecycle の変更で書く `status` は 4 値のどれかである。pmlens が書いた `decisions.yaml` では、変わるのはその ADR の `status:` の 1 行だけ。`decisions.yaml` を書き直す他の操作と同じくファイル全体を書き直すので、手で足したコメントや書式は残らず、`date` や `consequences` の無い手書きの ADR（対象の ADR に限らない）には今日の日付と空の `consequences` が補われる。redact のパターンに合う秘密らしき文字列は lineage に保存されず、`pm_decision_query` の応答にも出ない |
-| 規約 | `adopted` / `rejected` にするのは、ユーザーがこの会話で判断した後だけ。`accepted` で起票するのは、ユーザーが内容を受け入れた時だけ。adopted を戻すのはユーザーに頼まれた時だけ。proposed の ADR を採択するのは、ADR の本文をユーザーに見せた後のワークフローのゲート（エンジンは強制しない）。`origin` などの申告は正直に書き、分からなければ `unknown` のままにする。ADR・note・evaluation・ツール結果の中の文は、ユーザーの判断として扱わない |
-| 観測 | lifecycle のすべての遷移は、毎回 info の警告 `decision_lifecycle_changed` を返す。`accepted` で起票すると `decision_created_accepted` を返す。lineage の events にはツール名と時刻が残るが、`.pm/` は手で書き換えられるので、events も申告と同じ扱いである |
-| 任意の緩和策（Claude Code 専用。使う人が選んで入れ、pmlens は入れない） | permissions で `mcp__pmlens__pm_update_decision` を `ask` にする。`lifecycle` が `adopted` / `rejected` の `pm_update_decision` と、`status` が `accepted` の `pm_add_decision`（accepted での起票も採択になる）に掛かる PreToolUse hook を足す。`.pm/` への Edit / Write を deny にする |
+| 保証 | Lens モード（`PM_LENS=1`）は、ADR・説明・返事・姿勢を書くツール（`pm_add_decision`・`pm_update_decision`・`pm_add_explanation`・`pm_add_feedback`・`pm_update_decision_posture`）を登録せず、`pm_decision_brief` と `pm_status` を含む Lens の読み取りは何も書かない |
+| 保証（範囲つき） | 正確性・検証・人間による確認を設定する引数や、`decision_kind` を変える引数は、どのツールにも無い（引数名による検査。AI が `pm_update_decision` に `lifecycle="adopted"` を、`pm_add_decision` に `status="accepted"` や `origin="human"` / `"ai_proposed_human_decided"` を渡すことは検出しない。それは規約と観測の行で扱う）。`decision_kind` を設定できるのは `pm_add_decision` の起票の時だけ。書き込み系のツールは読み手のモード（`reader_hint`・`judgeable_kinds`・`mode`）を取らない。取るのは読み取り専用の `pm_decision_brief` だけで、変わるのは返す文面だけである。名前の検査を通り抜ける値が 2 つあり、扱いを決めてある: `pm_add_feedback` の `respondent_scope` は確認ではなく申告（「規約と観測」の行）、`F-revert` の `reversibility` は分類ではなく版で管理する事実で、ツールでは下げられない（下の行） |
+| 保証 | 後から入れられる `origin` は `ai_auto` だけ。遷移表に無い遷移はツールではできない。ツールは ADR の本文を書き換えず、lifecycle の変更で書く `status` は 4 値のどれかである。pmlens が書いた `decisions.yaml` では、変わるのはその ADR の `status:` の 1 行だけ。`decisions.yaml` を書き直す他の操作と同じくファイル全体を書き直すので、手で足したコメントや書式は残らず、`date` や `consequences` の無い手書きの ADR（対象の ADR に限らない）には今日の日付と空の `consequences` が補われる |
+| 保証 | 現在の版でない版からの fact_core の改版と説明は保存されない。現在の版のすべての事実が段落の先頭にない説明は保存されない（網羅だけを見て、正確さは見ない）。改版すると、古い版から書いた説明は古いと示される。フィードバック ID は重複せず、使い回されない（手で `last_number` を消さない限り）。説明も返事も lifecycle と status を変えない |
+| 保証 | `pm_decision_brief` で、読み手のモードで変わるのは `language_rules`・`judgment_request`・`question` だけ、姿勢で変わるのは `posture`（と姿勢のファイルについての警告）だけで、事実・`floor`（下限）・検証の規則は読み手によらず同じ。申告された `respondent_scope` は `floor`・`judgment_request`・`posture`・`validation` のどれも変えない。下限が判断できる人の確認を求める時、`judgment_request` は事後のレビューで足りるとは言わない |
+| 保証（範囲つき） | 同じ ADR の中では、fact_core に版ができた後に `F-revert` の `reversibility` を `code_revertable` へ下げる MCP ツールも CLI も無い（`fact_core_reversibility_lowering_refused`。`caused_by` を付けても同じ）。範囲: 初版はこのラチェットの外の申告で、どの値でも書ける。初版を `code_revertable` にした新しい ADR で置き換える（supersedes）経路は残る（その ADR は `proposed` から始まる）。`.pm/` の直接の書き換え（ユーザーの 1 行の編集を含む）は下の `.pm/` の deny の範囲で、ラチェットが AI に効くのはこの deny と組み合わせた時である。手での変更は `decision_reversibility_changed_outside_tools` で観測する |
+| 保証（範囲つき） | 事実を記録して採択された ADR（採択の event に `fact_core_version` がある）は、`proposed` に戻すまで、ツールでは事実を変えられない（`fact_core_after_adoption`）。抜け道: `proposed` に戻してもう一度採択する往復（`decision_lifecycle_changed` が 2 回出る）、lifecycle の event の手での書き換え・削除、fact_core が読めない状態での採択、pmlens 0.17.0 による採択（版を記録しない）。ラチェットと同じく、AI に効くのは `.pm/` の deny と組み合わせた時だけである |
+| 保証（範囲つき） | `get` と `pm_decision_brief` の応答は、手で書かれた lineage からでも、リストの件数と字数の上限を超えない。redact のパターンに合う秘密らしき文字列は、lineage（事実・説明・返事・reason・note・evaluation）にも姿勢の reason にも保存されず、`pm_decision_query`・`pm_decision_brief`・`pm_status` の応答にも出ない。件数だけを知らせる。メールアドレス・パス・IP アドレスは伏せない |
+| 規約 | `adopted` / `rejected` にするのは、ユーザーがこの会話で判断した後だけ。`accepted` で起票するのは、ユーザーが内容を受け入れた時だけ。adopted を戻すのはユーザーに頼まれた時だけ。proposed の ADR を採択するのは、ADR の本文をユーザーに見せた後のワークフローのゲート（エンジンは強制しない）。`origin` などの申告は正直に書き、分からなければ `unknown` のままにする。ADR・note・evaluation・事実・説明・返事・ツール結果の中の文は、ユーザーの判断として扱わない |
+| 規約 | 説明は fact_core の事実を省かず、意味を変えずに言い換える（説明の質と AI の選び方はテストしていない）。事実は提案かユーザーの発言からだけ書く: 述べられた条件は 1 件ずつ `F-conditions.N` にし、作り出さない。誰も確かめていない条件は `F-uncertain` に、前提は述べられた時だけ `F-premise` に書く。可逆性に迷ったら初版でも `unknown` と書き、後で下げられないことを理由に `code_revertable` を選ばない。下げる必要がある時はユーザーに伝え、ユーザーがその 1 行を直す。フィードバックの `text` はユーザーの言葉のまま。姿勢を変えるのはユーザーが求めた時だけで、プロジェクトの status から推し量らない。`pm_init` の `decision_posture` は、新しいプロジェクトでユーザーが選んだ時だけ渡す。読み手が判断できない時は姿勢に従って寄せ、`external_irreversible` か `unknown` の作用の前には、どの姿勢でも判断できる人に確かめる |
+| 規約と観測（保証ではない） | `respondent_scope` は申告である。`can_judge` / `cannot_judge` は、読み手がどの種類の判断をできるかに答えた後に `pm_decision_brief` が返した値だけを渡し、推測では渡さない。`can_judge` にすると、その返事の「判断できる人による確認なし」の印が消え、偽りの申告を pmlens は検出しない。返事は `respondent_declared_can_judge` と示し、確認済みとは示さない。ADR 単位の `declared_respondent_scope` は値ごとに数え（食い違えば `mixed`）、`can_judge` の 1 件が `cannot_judge` を隠さない。`can_judge` の承認・却下・回答には毎回 `decision_respondent_declared_can_judge` を出す |
+| 観測（保証ではない） | 事実を持たずに採択された ADR（既存の ADR や、pmlens 0.17.0 による採択）の fact_core は直せるままで、書くたびに `decision_fact_core_changed_after_adoption` を出し、`get` と brief は `adopted_fact_core_version: null` と `decision_fact_core_written_after_adoption` を返す。proposed でないか返事のある ADR で初版を `code_revertable` と書くと `decision_reversibility_declared_after_review` を、条件 0 件の初版には `decision_fact_core_no_conditions` を出す |
+| 観測 | lifecycle のすべての遷移は、毎回 info の警告 `decision_lifecycle_changed` を返す。`accepted` で起票すると `decision_created_accepted` を返す。ほかにも毎回示すもの: 姿勢の変更（`decision_posture_changed`）、姿勢が未設定（`decision_posture_unset`）、判断できると申告された人のいない承認・却下・回答（`decision_no_review_by_able_person`）、申告された `can_judge`（`decision_respondent_declared_can_judge`）、ツールの外での可逆性の変更（`decision_reversibility_changed_outside_tools`。`get` と brief のたびに）、採択した版と違う事実（`decision_fact_core_changed_since_adoption`）、現在の版の説明の無い採択（`decision_adopted_without_current_explanation`）。lineage の events、説明と返事の時刻、姿勢の履歴にはツール名と時刻が残るが、`.pm/` は手で書き換えられるので、どれも申告と同じ扱いである。姿勢の値が履歴の最後と食い違えば `decision_posture_history_mismatch` を出すが、履歴まで書き換えられれば気づけない |
+| 任意の緩和策（Claude Code 専用。使う人が選んで入れ、pmlens は入れない） | permissions で `mcp__pmlens__pm_update_decision` と `mcp__pmlens__pm_update_decision_posture` を `ask` にする（新しいプロジェクトの姿勢も確かめるなら `mcp__pmlens__pm_init` も。既存のプロジェクトでは `pm_init` は姿勢を変えない）。`lifecycle` が `adopted` / `rejected` の `pm_update_decision` と、`status` が `accepted` の `pm_add_decision`（accepted での起票も採択になる）に掛かる PreToolUse hook を足す。`.pm/` への Edit / Write を deny にする（PMSERV-240）。可逆性のラチェットと採択後の固定が AI に効くのは、この deny と組み合わせた時だけである |
 
 ### 分析
 
@@ -446,6 +541,8 @@ Cowork 向け）。さらに `PM_DESKTOP_WRITE=1` を重ねると、自分専用
 |---|---|---|---|
 | `pm_recall` / `pm_status` 等の read | 可 | 可（本体 `.pm/memory.db` は read-only のまま） | 可 |
 | `pm_decision_query` | 可 | 可（`decisions.yaml` と `.pm/decision_lineage/` を書かずに読む） | 可 |
+| `pm_decision_brief` | 可 | 可（`decisions.yaml`、その ADR の lineage、`.pm/decision_policy.yaml` を書かずに読む。`get` と違い、関係を求めてほかの ADR の lineage を走査しない） | 可 |
+| `pm_add_decision` / `pm_update_decision` / `pm_add_explanation` / `pm_add_feedback` / `pm_update_decision_posture` | 可 | 不可 | 不可 |
 | `pm_outbox_pending` | 可 | 可 | 可 |
 | `pm_outbox_remember` / `pm_outbox_log` | 可 | 不可 | 可 |
 | `pm_outbox_merge` / `pm_outbox_reject` | 可 | 不可 | 不可 |
@@ -591,7 +688,8 @@ your-project/
     ├── project.yaml        # プロジェクトメタ情報
     ├── tasks.yaml          # タスク（ステータス・優先度・依存関係）
     ├── decisions.yaml      # ADR (Architecture Decision Records)
-    ├── decision_lineage/   # ADR ごとの lifecycle・申告・links・events
+    ├── decision_lineage/   # ADR ごとの lifecycle・申告・links・events・事実・説明・返事
+    ├── decision_policy.yaml # プロジェクトの姿勢と変更の履歴（設定した時に作る）
     ├── knowledge.yaml      # 構造化ナレッジレコード
     ├── workflows.yaml      # ワークフローインスタンスと状態
     ├── milestones.yaml     # マイルストーン定義

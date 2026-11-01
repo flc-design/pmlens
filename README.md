@@ -37,6 +37,7 @@ Track tasks, visualize progress, record decisions — through natural language i
 
 - **🔌 Multi-host first** — registers in **Claude Code, Codex CLI, Cursor and Grok Build** with one command (`pmlens install --target=auto`). Project rules sync to `CLAUDE.md` and `AGENTS.md` automatically (ADR-008). Switch hosts mid-project without losing context — same `.pm/` data, same workflows
 - **50 MCP tools + 2 compatibility aliases** — task CRUD, child issues, status, blockers, velocity, dashboard, prompt packs, ADR, session memory, workflows, knowledge records, multi-host rules injection, cross-host outbox bridge, content pipeline (recorded knowledge → redacted drafts), and more
+- **Decision lineage** — each ADR keeps a lifecycle, a versioned fact core, the explanations an assistant wrote from it and the user's replies, so a decision can be explained, questioned, revised and adopted with a record of why (see [Decision Lineage](#decision-lineage-explaining-questioning-and-revising-one-adr))
 - **Workflow engine** — template-based development workflows with loops, user gates, and chaining (Discovery → Development)
 - **Knowledge records** — structured findings between casual memory and formal ADR (research, tradeoff, spec, etc.)
 - **Super Research skill** — 3 parallel agents (Domain Expert, Critical Analyst, Lateral Thinker) + Depth Check (6 dimensions) + Fact Check + Cross-Check
@@ -295,23 +296,134 @@ dataclasses, atomic-write helpers).
 | `pm_add_decision` | Add ADR with context, decision, and consequences. Saved as `proposed` by default; pass `status="accepted"` only when the user has accepted the content itself (a convention: pmlens cannot verify who accepted it, so recording as accepted returns a `decision_created_accepted` warning to relay). Declared provenance (`origin`, `recorded_timing`, `decision_kind`, default `unknown`) and the recording time go to `.pm/decision_lineage/ADR-NNN.yaml`, stored as declared, not verified |
 | `pm_decision_query` | Read ADRs and their lineage without changing anything (read-only, also available in Lens mode). `action="list"` lists the ADRs with their status, lifecycle and declared origin, `limit` (default 50) at a time from `offset`, with `has_more` / `next_offset` (`lifecycle="proposed"` lists the ones still waiting for the user's review; long titles are cut there, `get` shows them whole); `action="get"` returns the ADR text, declared provenance, links in both directions and recent events. An ADR without a usable lineage is shown as `derived` from its status, and `not_recorded` names what was never recorded. Declared values and events are shown as recorded, not verified; unknown keys come back by name only, and secret-like strings are redacted in the response |
 | `pm_decision_brief` | Get what the assistant needs to explain one ADR to the user in front of it, changing nothing (read-only, also available in Lens mode): the current `fact_core`, the rules an explanation must follow, the `floor` and the one `question` to ask afterwards (a quoted fact comes apart from the template, in `question.quoted_fact`). `judgeable_kinds` (which of `spec_policy`, `premise_dependent`, `technical` the reader can judge; omitted until the reader has said, when the brief returns the question to ask) and `reader_hint` (`more_detail` / `simpler`, for this call only) change only `language_rules`, `judgment_request` and `question`; the project's decision posture changes only `posture`. The facts, the floor and the validation are the same for every reader: an `external_irreversible` decision, or one whose reversibility is unknown, needs a person able to judge before its irreversible effect, for every decision kind. Secret-like strings are redacted in the response |
-| `pm_update_decision` | Change an ADR's lifecycle (`proposed` / `adopted` / `deprecated` / `superseded` / `rejected` / `reverted`) along a fixed transition table, its links (`supersedes` / `superseded_by` / `amends`), or append an evaluation (shown as an assistant's record, not a human review) or a note. The ADR text is never changed; `decisions.yaml`'s `status` is rewritten as the lifecycle's projection (`adopted` → `accepted`, `rejected` → `deprecated`). A `reason` is required for every lifecycle change. Set `adopted` only when the user accepted the ADR's own content and `rejected` only after the user decided: pmlens cannot verify that, so every lifecycle change returns a `decision_lifecycle_changed` warning to relay. A declared `origin` (only `ai_auto`) or `recorded_timing` that is still `unknown` can be filled in later, with a reason. Full mode only (not in Lens) |
+| `pm_update_decision` | Change an ADR's lifecycle (`proposed` / `adopted` / `deprecated` / `superseded` / `rejected` / `reverted`) along a fixed transition table, its links (`supersedes` / `superseded_by` / `amends`), or append an evaluation (shown as an assistant's record, not a human review) or a note. The ADR text is never changed; `decisions.yaml`'s `status` is rewritten as the lifecycle's projection (`adopted` → `accepted`, `rejected` → `deprecated`). A `reason` is required for every lifecycle change. Set `adopted` only when the user accepted the ADR's own content and `rejected` only after the user decided: pmlens cannot verify that, so every lifecycle change returns a `decision_lifecycle_changed` warning to relay. A declared `origin` (only `ai_auto`) or `recorded_timing` that is still `unknown` can be filled in later, with a reason. `fact_core` (with `expected_fact_core_version`, the version read, `0` for the first) records the decision's facts as a new version: the full list as it should now stand, five required facts (`F-what`, `F-change`, `F-revert` with its `reversibility`: `code_revertable` / `external_irreversible` / `unknown`, `F-weak`, `F-uncertain` with its `confidence`) and numbered `F-alt.N`, `F-conditions.N` and `F-premise.N` (a `premise_dependent` ADR needs at least one premise). pmlens assigns the ids and never reuses one, keeps the values a revision replaces, refuses a version that is not the current one (`fact_core_version_mismatch`), and changes nothing else in a `fact_core` call (adopt in another call). `caused_by` cites the feedback ids (`ADR-NNN.FB-n`) of this ADR that led to a fact core revision or an evaluation. Once written, `reversibility` is never lowered to `code_revertable` by this tool (`fact_core_reversibility_lowering_refused`, with or without `caused_by`), and an ADR adopted with its facts recorded keeps them fixed until it is moved back to `proposed` (`fact_core_after_adoption`); see [Decision Lineage](#decision-lineage-explaining-questioning-and-revising-one-adr). Full mode only (not in Lens) |
 | `pm_add_explanation` | Save an explanation of an ADR that the assistant wrote for the user from the ADR's current fact core, as `paragraphs` (`[{"fact_ids": [1-2 ids, the first being what the paragraph is mainly about], "text": "..."}]`) with the `fact_core_version` it was written from and an optional closing `question`. Every fact of the current version must lead a paragraph that is not only a mermaid diagram; a missing or unknown id is refused and listed (`missing_fact_ids` / `unknown_fact_ids`), and a version that is no longer current is refused with `current_version`. pmlens checks only that every fact id is present and that the version is current: the accuracy is never checked and always shown as `unconfirmed`. After the fact core is revised, older explanations are shown as stale with the changed ids. Takes only the ADR's lineage lock and never changes its lifecycle, status or `decisions.yaml` (full mode only, not registered in Lens) |
 | `pm_add_feedback` | Record what the user said about an ADR, in the user's own words (`text`, required), as one of eight `feedback_kind`s: `premise_mismatch`, `what_if`, `unacceptable`, `try_alternative`, `approve`, `reject`, `comment` or `check_answer` (the answer to the question asked after an explanation; needs its `explanation_id`). Optional `fact_ids` of the current fact core version. Each reply gets an id `ADR-NNN.FB-n` that `pm_update_decision`'s `caused_by` can cite. `respondent_scope` (`can_judge` / `cannot_judge` / `unknown`, default) is a declaration pmlens never checks: a reply is shown as `respondent_declared_can_judge` or `no_review_by_able_person`, never as confirmed, and replies are never scored. Approval and rejection recorded here never change the lifecycle or the status. Takes only the ADR's lineage lock and starts a lineage for an ADR that has none (full mode only, not registered in Lens) |
 | `pm_update_decision_posture` | Change the project's decision posture (`bold` for new or exploratory work, `cautious` for maintenance and fixes, `unset` = not chosen yet, which acts as `cautious`), kept in `.pm/decision_policy.yaml` with a history of every change. Use it only when the user asks, with their `reason` (required, redacted before saving); every change returns a `decision_posture_changed` warning to relay. `pm_init(decision_posture=…)` sets it only for a new project, and `pm_status` shows it with its last change. Full mode only (not in Lens) |
 
-#### ADR lifecycle: what pmlens guarantees and what is a convention
+#### Decision Lineage: explaining, questioning and revising one ADR
+
+An assistant often records an ADR, and the person who lives with it may not be
+an engineer. Decision Lineage keeps, beside each ADR in
+`.pm/decision_lineage/ADR-NNN.yaml`, what it takes to explain the decision,
+question it, correct it and adopt it. The assistant writes every explanation;
+pmlens keeps the record and checks only what can be checked mechanically.
+"Easier to understand" never means leaving facts out.
+
+**The path one decision takes.**
+
+1. `pm_add_decision` records the ADR as `proposed`, with its declared `decision_kind`.
+2. `pm_update_decision(fact_core=[...], expected_fact_core_version=0)` records
+   its facts as version 1: what is decided (`F-what`), what changes
+   (`F-change`), how to undo it (`F-revert`, with its `reversibility`), its weak
+   point (`F-weak`), what is uncertain (`F-uncertain`, with a `confidence`), and
+   numbered alternatives, conditions and premises (`F-alt.N`,
+   `F-conditions.N`, `F-premise.N`). Facts come only from the proposal or what
+   the user said.
+3. `pm_decision_brief` returns the current facts, the rules for explaining them
+   to this reader and the one question to ask afterwards. The assistant
+   explains the decision and saves the explanation with `pm_add_explanation`
+   (`ADR-NNN.EX-n`). An explanation that leaves out a current fact, or was
+   written from an older version, is refused; whether it is accurate is never
+   checked and is shown as `unconfirmed`.
+4. `pm_add_feedback` records the user's reply in their own words
+   (`ADR-NNN.FB-n`): a premise that is wrong, a what-if, an objection, an
+   alternative to try, approval, rejection, a comment, or the answer to the
+   question. Approval recorded there does not adopt the ADR.
+5. When a reply changes a fact, `pm_update_decision(fact_core=[...],
+   expected_fact_core_version=1, caused_by=["ADR-NNN.FB-1"])` records version
+   2. Explanations written from version 1 are then shown as stale, with the
+   ids that changed, and the replaced values are kept.
+6. Once the user has read an explanation of version 2 and accepted it,
+   `pm_update_decision(lifecycle="adopted")` adopts the ADR and records the
+   fact core version that was adopted. From then on its facts are fixed: a
+   revision is refused (`fact_core_after_adoption`) until the ADR is moved back
+   to `proposed` at the user's request, or a new ADR amends it.
+
+`pm_decision_query`'s `get` shows the facts with the versions they came from,
+the explanations (stale ones marked), the replies with the declared
+respondent scope, and the adopted version (`adopted_fact_core_version`).
+
+**Decision posture.** When the reader cannot judge a kind of decision, the
+assistant leans the way the project's posture says. The user chooses it; an
+assistant never infers it from the project's status. `pm_init(decision_posture=…)`
+sets it for a new project, `pm_update_decision_posture` changes it later with
+the user's reason, and `pm_status` shows it with its last change. It is kept,
+with every change, in `.pm/decision_policy.yaml`.
+
+| Label | Value | Suits | When the reader cannot judge |
+|---|---|---|---|
+| 攻め (bold) | `bold` | New development, ambitious or creative work | Ambitious options are fine while a change can be reverted in code |
+| 慎重 (cautious) | `cautious` | Maintenance, modifications and fixes | Conservative, easy-to-revert options |
+| 未設定 (not set) | `unset` | Nothing chosen yet | Acts as `cautious` |
+
+The posture never lowers the floor: a decision whose effect cannot be undone
+(`external_irreversible`), or whose reversibility is `unknown` or not recorded,
+needs a person able to judge before that effect, in every posture and for every
+decision kind.
+
+**Lowering reversibility to `code_revertable` is the user's own edit.** Once a
+fact core has a version, no MCP tool or CLI command lowers `F-revert`'s
+`reversibility` to `code_revertable` (`fact_core_reversibility_lowering_refused`,
+with or without `caused_by`). Raising it, or correcting `unknown` ↔
+`external_irreversible`, goes through `pm_update_decision`. When a person able
+to judge says the change can be reverted in code:
+
+1. Have the assistant record their words with `pm_add_feedback`.
+2. Wait until no assistant session is writing to the project, then open (or
+   reopen) `.pm/decision_lineage/ADR-NNN.yaml`. The edit takes no lock, so a
+   copy opened earlier would drop an explanation or a reply added since.
+3. Under `fact_core:` → `items:`, find the item with `id: F-revert` and change
+   only its `reversibility:` line to `code_revertable`. Do not touch
+   `recorded_reversibility`, `version`, `previous_values` or `events`.
+4. Save. Until the next revision, `get` and `pm_decision_brief` report
+   `decision_reversibility_changed_outside_tools` every time, explanations of
+   the current version are shown as stale, and the floor follows the value you
+   wrote. The next fact core revision takes the change into its version (the
+   earlier value goes to `previous_values`). If you removed
+   `recorded_reversibility` by mistake, leave it: that revision writes it again.
+
+Do not ask an assistant to make this edit: an assistant is told never to edit
+lineage files. While an adopted ADR's facts are fixed, the next revision is
+refused too, so the report stays until the ADR is moved back to `proposed`.
+
+The reversibility ratchet and the fixing of facts after adoption bind an
+assistant only together with a deny on Edit / Write to `.pm/` (PMSERV-240, the
+last mitigation below): without it, an assistant can edit the lineage file
+directly, as you can, and pmlens only observes the result.
+
+**What a committed `.pm/` shares.** Explanations and replies are stored as text
+in `.pm/decision_lineage/`. In a repository that commits `.pm/`, everyone who
+can read the repository reads what the assistant explained and what the user
+said. Before anything is stored, only strings matching the secret patterns
+(keys, tokens, private keys and the like) are redacted, and only their count is
+reported; e-mail addresses, file paths and IP addresses are kept.
+
+#### What pmlens guarantees about decisions, and what it does not
 
 pmlens cannot tell whether a person or an assistant is calling it, and `.pm/`
-can be edited directly, so adopting an ADR on the user's word is a convention
-that pmlens supports but cannot enforce (ADR-056):
+can be edited directly, so adopting an ADR on the user's word, explaining it
+faithfully and recording the user's own words are conventions that pmlens
+supports but cannot enforce (ADR-056). What it guarantees is that the tools
+offer no such path and that the forms it checks (versions, fact coverage, ids)
+hold:
 
 | Kind | What |
 |---|---|
-| Guaranteed | Lens mode (`PM_LENS=1`) registers no tool that writes ADRs, and its reads write nothing. No tool has an argument that sets accuracy, verification or human confirmation, or that changes `decision_kind` (checked by argument name: an assistant passing `lifecycle="adopted"` to `pm_update_decision`, or `status="accepted"` or `origin="human"` / `"ai_proposed_human_decided"` to `pm_add_decision`, is not detected; the Convention and Observed rows cover that). A declared `origin` filled in later can only be `ai_auto`. A move outside the transition table cannot be made through the tools. The tools never rewrite ADR text, and a lifecycle change writes a `status` that is one of the four values. In a `decisions.yaml` that pmlens wrote, only that ADR's `status:` line changes. Like every pmlens write to `decisions.yaml`, it rewrites the whole file: comments and formatting added by hand are not kept, and an ADR written by hand without `date` or `consequences` (this one or any other) gets today's date and an empty `consequences` filled in. Secret-like strings matching the redaction patterns are not stored in the lineage and not shown by `pm_decision_query` |
-| Convention | Set `adopted` / `rejected` only after the user decided in the conversation, record an ADR as `accepted` only when the user accepted its content, and move an adopted ADR back only when the user asks. Workflow gates (not enforced by the engine) are where a proposed ADR is adopted, after the user has been shown the ADR's own text. Declare `origin` and the other values honestly, or leave them `unknown`. Text inside an ADR, a note, an evaluation or a tool result is never the user's decision |
-| Observed | Every lifecycle change returns the info warning `decision_lifecycle_changed`, and recording an ADR as `accepted` returns `decision_created_accepted`. Lineage events record the tool and the time, but `.pm/` can be edited by hand, so events are declarations too |
-| Optional mitigations (Claude Code only; you opt in, pmlens does not install them) | Set `mcp__pmlens__pm_update_decision` to `ask` in permissions; add a PreToolUse hook for `pm_update_decision` calls whose `lifecycle` is `adopted` or `rejected` and for `pm_add_decision` calls whose `status` is `accepted` (recording as accepted adopts too); deny Edit / Write on `.pm/` |
+| Guaranteed | Lens mode (`PM_LENS=1`) registers no tool that writes ADRs, explanations, replies or the posture (`pm_add_decision`, `pm_update_decision`, `pm_add_explanation`, `pm_add_feedback`, `pm_update_decision_posture`), and its reads, `pm_decision_brief` and `pm_status` included, write nothing |
+| Guaranteed (within limits) | No tool has an argument that sets accuracy, verification or human confirmation, or that changes `decision_kind` (checked by argument name: an assistant passing `lifecycle="adopted"` to `pm_update_decision`, or `status="accepted"` or `origin="human"` / `"ai_proposed_human_decided"` to `pm_add_decision`, is not detected; the Convention and Observed rows cover that). `decision_kind` can be set only when `pm_add_decision` records the ADR. Write tools take no reader mode (`reader_hint`, `judgeable_kinds`, `mode`); the read-only `pm_decision_brief` takes them and they change only the wording of what it returns. Two values get past the name check by design: `pm_add_feedback`'s `respondent_scope` is a declaration, not a confirmation (the Convention and observed row), and `F-revert`'s `reversibility` is a versioned fact, not a classification, that the tools never lower (below) |
+| Guaranteed | A declared `origin` filled in later can only be `ai_auto`. A move outside the transition table cannot be made through the tools. The tools never rewrite ADR text, and a lifecycle change writes a `status` that is one of the four values. In a `decisions.yaml` that pmlens wrote, only that ADR's `status:` line changes. Like every pmlens write to `decisions.yaml`, it rewrites the whole file: comments and formatting added by hand are not kept, and an ADR written by hand without `date` or `consequences` (this one or any other) gets today's date and an empty `consequences` filled in |
+| Guaranteed | A fact core revision or an explanation written from a version that is not the current one is not saved. An explanation is not saved unless every fact of the current version leads one of its paragraphs (coverage only: its accuracy is not checked). After a revision, explanations written from an older version are shown as stale. Feedback ids are never repeated or reused (unless `last_number` is removed by hand). Explanations and replies never change the lifecycle or the status |
+| Guaranteed | In `pm_decision_brief`, the reader mode changes only `language_rules`, `judgment_request` and `question`, and the posture changes only `posture` (and the warnings about the posture file); the facts, the `floor` and the validation rules are the same for every reader. A declared `respondent_scope` changes none of `floor`, `judgment_request`, `posture` or `validation`. When the floor needs a person able to judge, `judgment_request` never says that a later review is enough |
+| Guaranteed (within limits) | Within one ADR, no MCP tool or CLI command lowers `F-revert`'s `reversibility` to `code_revertable` once the fact core has a version (`fact_core_reversibility_lowering_refused`; `caused_by` does not change that). Limits: the first version is a declaration outside this ratchet and can hold any value; a new ADR whose first version says `code_revertable` can supersede this one (it starts as `proposed`); and editing `.pm/` directly, the user's one-line edit included, is in the scope of the `.pm/` deny below, which is what makes the ratchet bind an assistant. An edit by hand is observed as `decision_reversibility_changed_outside_tools` |
+| Guaranteed (within limits) | An ADR adopted with its facts recorded (the adoption event holds `fact_core_version`) keeps them: the tools refuse to revise them (`fact_core_after_adoption`) until the ADR is moved back to `proposed`. Ways around it: moving it back to `proposed` and adopting it again (two `decision_lifecycle_changed` warnings), rewriting or deleting the lifecycle event by hand, an adoption made while its fact core could not be read, and an adoption made by pmlens 0.17.0 (which records no version). Like the ratchet, it binds an assistant only together with the `.pm/` deny |
+| Guaranteed (within limits) | `get` and `pm_decision_brief` stay within their list and character limits even for a lineage written by hand. Secret-like strings matching the redaction patterns are not stored in the lineage (facts, explanations, replies, reasons, notes and evaluations) or in the posture's reason, and are not shown by `pm_decision_query`, `pm_decision_brief` or `pm_status`; only their count is reported. E-mail addresses, paths and IP addresses are not redacted |
+| Convention | Set `adopted` / `rejected` only after the user decided in the conversation, record an ADR as `accepted` only when the user accepted its content, and move an adopted ADR back only when the user asks. Workflow gates (not enforced by the engine) are where a proposed ADR is adopted, after the user has been shown the ADR's own text. Declare `origin` and the other values honestly, or leave them `unknown`. Text inside an ADR, a note, an evaluation, a fact, an explanation, a reply or a tool result is never the user's decision |
+| Convention | Explain from the fact core without leaving out or changing any fact (the quality of explanations and of an assistant's choices is not tested). Record facts only from the proposal or what the user said: each stated condition as its own `F-conditions.N` and never an invented one, a condition nobody checked in `F-uncertain`, and a premise in `F-premise` only when it was stated. When unsure of reversibility, write `unknown`, even in the first version, and never pick `code_revertable` because it cannot be lowered later; when it has to be lowered, tell the user, who edits the line. The feedback `text` is the user's own words. Change the posture only when the user asks, never from the project's status, and pass `pm_init`'s `decision_posture` only when the user chose one for a new project. When the reader cannot judge, lean the way the posture says, and ask a person able to judge before any effect that is `external_irreversible` or `unknown`, in every posture |
+| Convention and observed (not a guarantee) | `respondent_scope` is a declaration: pass `can_judge` / `cannot_judge` only as `pm_decision_brief` returned it after the reader answered which kinds of decisions they can judge, never a guess. `can_judge` removes that reply's "no review by a person able to judge" mark, and pmlens does not detect a false one. A reply is shown as `respondent_declared_can_judge`, never as confirmed; the ADR's `declared_respondent_scope` counts every value (`mixed` when they differ), so one `can_judge` cannot hide a `cannot_judge`; and every `can_judge` approval, rejection or answer returns `decision_respondent_declared_can_judge` |
+| Observed (not a guarantee) | An ADR adopted without facts (an older ADR, or an adoption by pmlens 0.17.0) keeps an editable fact core: each write returns `decision_fact_core_changed_after_adoption`, and `get` and the brief show `adopted_fact_core_version: null` with `decision_fact_core_written_after_adoption`. A first version that says `code_revertable` for an ADR that is no longer proposed or already has replies returns `decision_reversibility_declared_after_review`, and a first version with no conditions returns `decision_fact_core_no_conditions` |
+| Observed | Every lifecycle change returns the info warning `decision_lifecycle_changed`, and recording an ADR as `accepted` returns `decision_created_accepted`. Also shown every time: a posture change (`decision_posture_changed`), a posture not chosen yet (`decision_posture_unset`), an approval, rejection or answer from nobody declared able to judge (`decision_no_review_by_able_person`), a declared `can_judge` (`decision_respondent_declared_can_judge`), a reversibility changed outside the tools (`decision_reversibility_changed_outside_tools`, on every `get` and brief), facts that differ from the adopted version (`decision_fact_core_changed_since_adoption`) and an adoption with no explanation of the current version (`decision_adopted_without_current_explanation`). Lineage events, the times of explanations and replies, and the posture's history record the tool and the time, but `.pm/` can be edited by hand, so they are declarations too: a posture that differs from its history's last entry returns `decision_posture_history_mismatch`, which a rewrite of the history as well would hide |
+| Optional mitigations (Claude Code only; you opt in, pmlens does not install them) | Set `mcp__pmlens__pm_update_decision` and `mcp__pmlens__pm_update_decision_posture` to `ask` in permissions (`mcp__pmlens__pm_init` too, to confirm a new project's posture; on an existing project `pm_init` never changes it); add a PreToolUse hook for `pm_update_decision` calls whose `lifecycle` is `adopted` or `rejected` and for `pm_add_decision` calls whose `status` is `accepted` (recording as accepted adopts too); deny Edit / Write on `.pm/` (PMSERV-240). The reversibility ratchet and the fixing of facts after adoption bind an assistant only together with this deny |
 
 ### Analysis
 
@@ -489,6 +601,8 @@ also write to its own outbox database. The table below reflects the actual
 |---|---|---|---|
 | `pm_recall` / `pm_status` / other reads | yes | yes (main `.pm/memory.db` stays read-only) | yes |
 | `pm_decision_query` | yes | yes (reads `decisions.yaml` and `.pm/decision_lineage/` without writing) | yes |
+| `pm_decision_brief` | yes | yes (reads `decisions.yaml`, that ADR's lineage and `.pm/decision_policy.yaml` without writing; unlike `get`, it does not scan the other ADRs' lineages for links) | yes |
+| `pm_add_decision` / `pm_update_decision` / `pm_add_explanation` / `pm_add_feedback` / `pm_update_decision_posture` | yes | no | no |
 | `pm_outbox_pending` | yes | yes | yes |
 | `pm_outbox_remember` / `pm_outbox_log` | yes | no | yes |
 | `pm_outbox_merge` / `pm_outbox_reject` | yes | no | no |
@@ -599,7 +713,8 @@ your-project/
     ├── project.yaml        # Project metadata
     ├── tasks.yaml          # Tasks with status, priority, dependencies
     ├── decisions.yaml      # Architecture Decision Records (ADR)
-    ├── decision_lineage/   # One file per ADR: lifecycle, declared provenance, links, events
+    ├── decision_lineage/   # One file per ADR: lifecycle, provenance, links, events, facts, explanations, replies
+    ├── decision_policy.yaml # Decision posture and its history (once set)
     ├── knowledge.yaml      # Structured knowledge records
     ├── workflows.yaml      # Workflow instances and state
     ├── milestones.yaml     # Milestone definitions

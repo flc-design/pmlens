@@ -92,12 +92,28 @@ Claude Code セッション:
 | `pm_add_decision` | ADR（設計判断記録）を保存（ID自動採番）。既定は proposed、`accepted` はユーザーが内容を受け入れた時だけ | `title`, `context`, `decision`, `status="proposed"`, `origin?`, `recorded_timing?`, `decision_kind?` |
 | `pm_decision_query` | ADR と lineage を何も変えずに読む（Lens 対応）。`lifecycle="proposed"` でユーザーの確認待ちの一覧。list は `limit` / `offset` でページ送り | `action="list"`, `decision_id?`（get）, `lifecycle?`, `limit=50`, `offset=0` |
 | `pm_decision_brief` | 1 件の ADR をこの読み手に説明するための材料を、何も変えずに返す（Lens 対応）。事実・説明の規則・下限・説明の後の 1 問。読み手のモードで変わるのは言葉・判断を求める種類・問いだけ | `decision_id`, `judgeable_kinds?`, `reader_hint?`（`more_detail` / `simpler`） |
-| `pm_update_decision` | ADR の lifecycle を移す（ユーザーが承認したら proposed → adopted など）、関係を変える、evaluation や note を追記する。本文は変えない（full モードだけ） | `decision_id`, `lifecycle?`, `reason?`, `add_links?`, `remove_links?`, `evaluation?`, `note?` |
+| `pm_update_decision` | ADR の lifecycle を移す（ユーザーが承認したら proposed → adopted など）、関係を変える、evaluation や note を追記する、判断の事実を `fact_core` の新しい版として記録する（きっかけの返事を `caused_by` で示す）。本文は変えない。下の表の範囲の中で、ツールは可逆性を `code_revertable` へ下げず、採択と一緒に固定された事実は proposed に戻すまでツールでは変えられない（full モードだけ） | `decision_id`, `lifecycle?`, `reason?`, `add_links?`, `remove_links?`, `evaluation?`, `note?`, `fact_core?` + `expected_fact_core_version?`, `caused_by?` |
 | `pm_add_explanation` | ADR の現在の fact_core から書いた説明を保存する。現在の事実はすべて段落の先頭に要る。正確さは確かめず（unconfirmed と示す）、改版すると前の説明は古いと示される（full モードだけ） | `decision_id`, `fact_core_version`, `paragraphs`, `question?` |
 | `pm_add_feedback` | ADR へのユーザーの返事をその言葉のまま記録する（8 種。`check_answer` を含む）。申告の `respondent_scope` は確かめず、承認で lifecycle は変わらず、点数は付けない（full モードだけ） | `decision_id`, `feedback_kind`, `text`, `explanation_id?`, `fact_ids?`, `respondent_scope="unknown"` |
 | `pm_update_decision_posture` | プロジェクトの姿勢（bold / cautious / unset）を、ユーザーが求めた時だけその理由を添えて変える。履歴に残る（full モードだけ） | `decision_posture`, `reason` |
 | `pm_velocity` | ベロシティとトレンド分析 | `weeks=4` |
 | `pm_risks` | 自動検出 + 手動登録リスク一覧 | `project_path?` |
+
+#### 判断のツールが保証すること・しないこと
+
+pmlens は呼び出し元が人か AI かを区別できず、`.pm/` は直接書き換えられるので、
+README の表は判断のツールを、保証・保証（範囲つき）・規約・観測・緩和策に分けている
+（ADR-056）。要点:
+
+| 区分 | 内容 |
+|---|---|
+| 保証 | Lens モードは ADR・説明・返事・姿勢を書くツールを登録せず、`pm_decision_brief` と `pm_status` は何も書かない。現在でない版からの fact_core の改版と説明は保存されず、現在の事実を 1 つでも欠く説明は保存されない（網羅だけで、正確さは見ない）。改版すると古い説明は古いと示され、フィードバック ID は使い回されない |
+| 保証（範囲つき） | 正確性・検証・人間による確認を設定する引数はどのツールにも無い（引数名による検査。AI が `lifecycle="adopted"` や `status="accepted"` を渡すことは検出しない）。`respondent_scope` は申告、`F-revert` の `reversibility` は版で管理する事実で、どちらも名前の検査を通り抜けるものとして扱いを決めてある |
+| 保証（範囲つき） | 同じ ADR の中で、初版の後にツールが `reversibility` を `code_revertable` へ下げることはなく、採択と一緒に固定された事実は `proposed` に戻すまで変えられない。抜け道: 初版は自由な申告、置き換える（supersedes）新しい ADR、`proposed` に戻して採択し直す往復、`.pm/` の手での書き換え。どちらも AI に効くのは下の `.pm/` の deny と組み合わせた時だけ |
+| 保証（範囲つき） | redact のパターンに合う秘密らしき文字列は保存も表示もされず、`get` と brief は上限を超えない。メールアドレス・パス・IP アドレスは伏せない |
+| 規約 | 採択・却下・accepted での起票はユーザーの言葉があった時だけ。説明は fact_core の事実を省かず意味を変えずに書く。返事はユーザーの言葉のまま記録する。姿勢はユーザーが求めた時だけ変える。可逆性に迷ったら `unknown` と書く |
+| 観測（保証ではない） | lifecycle の変更、姿勢の変更、申告された `can_judge`、判断できると申告された人のいない返事、ツールの外での可逆性の変更、採択の後に書かれた事実を、毎回 warnings で示す。events と姿勢の履歴も手で書き換えられるので申告と同じ扱い |
+| 緩和策（Claude Code 専用。ユーザーが選んで入れる） | permissions で `mcp__pmlens__pm_update_decision` と `mcp__pmlens__pm_update_decision_posture` を ask にし、`.pm/` への Edit / Write を deny にする（PMSERV-240） |
 
 ### 知識レコード
 
@@ -441,7 +457,8 @@ pm-server hook post-tool-use   # PostToolUse フックハンドラ
 ├── project.yaml                # プロジェクトメタデータ
 ├── tasks.yaml                  # 全タスク
 ├── decisions.yaml              # ADR（設計判断記録）
-├── decision_lineage/           # ADR ごとの lifecycle・申告・links・events
+├── decision_lineage/           # ADR ごとの lifecycle・申告・links・events・事実・説明・返事
+├── decision_policy.yaml        # プロジェクトの姿勢と変更の履歴（設定した時に作る）
 ├── knowledge.yaml              # 知識レコード
 ├── workflows.yaml              # ワークフローインスタンス
 ├── risks.yaml                  # 手動リスク
