@@ -2502,11 +2502,118 @@ def _enclosing_function(tree: ast.AST) -> dict[int, str]:
     return owner
 
 
+# getattr-like callables whose attribute name decides what is reached. They
+# may only be called directly with a literal name: passed along uncalled
+# (``map(getattr, [p], ["write_text"])``) the name escapes the check.
+_ATTRIBUTE_GETTERS = frozenset(
+    {
+        "getattr",
+        "getattr_static",
+        "__getattribute__",
+        "__getattr__",
+        "attrgetter",
+        "methodcaller",
+    }
+)
+# Getters whose attribute name is the second argument (``getattr(obj, name)``,
+# ``inspect.getattr_static(obj, name)``); the others take it first, except an
+# unbound ``object.__getattribute__(obj, name)``.
+_GETTERS_NAME_SECOND = frozenset({"getattr", "getattr_static"})
+# Attributes that walk the class graph, from which any loaded class is reached
+# (``type.__subclasses__(object)`` finds io.FileIO with builtins alone).
+_CLASS_WALKS = frozenset({"__subclasses__", "__bases__", "__base__", "__mro__", "mro"})
+# os attributes that may be read without calling them (the bounded reader's
+# O_ flags; os.path holds no writer).
+_OS_DATA_PREFIX = "O_"
+_OS_DATA_NAMES = frozenset({"path", "PathLike"})
+# Attributes that hop from one module to another: a module that imports os
+# exposes it as an attribute (``os.path.os``, ``dataclasses.inspect.os``,
+# ``tempfile._os``), and sys.modules or a namespace dict reaches any module.
+# Matched with leading and trailing underscores stripped (``_os``, ``_io``).
+_MODULE_HOPS = frozenset(
+    {
+        "os",
+        "posix",
+        "nt",
+        "io",
+        "sys",
+        "builtins",
+        "importlib",
+        "shutil",
+        "pathlib",
+        "tempfile",
+        "subprocess",
+        "posixpath",
+        "ntpath",
+        "genericpath",
+        "modules",
+        "dict",
+        "globals",
+        "loader",
+        "spec",
+    }
+)
+# Builtins that hand out a namespace, from which any imported module is reached.
+_NAMESPACE_BUILTINS = frozenset({"vars", "globals", "locals", "__builtins__", "__loader__"})
+
+
 def _write_violations(tree: ast.AST, allowed: frozenset[str] = _ALLOWED_IMPORTS) -> list[str]:
-    """Every way the source could write, open for writing or reach a writer."""
+    """Every way the source could write, open for writing or reach a writer.
+
+    Calls are matched by name, and so are references that are not called
+    (``_w = p.write_text``, ``_opener = os.open``), so a writer cannot be
+    reached under another name. ``os`` is reachable only as ``import os``
+    (no alias, no ``from os import``) and only as ``os.<allowed call>(...)``,
+    an ``os.O_*`` flag or ``getattr(os, "O_...")``; any other use of the
+    name ``os`` (binding it, passing it, rebinding it) is a violation. No
+    module is reached through another one (``os.path.os``,
+    ``dataclasses.inspect.os``, ``sys.modules``, ``vars(...)``, ``__dict__``),
+    no class through the class graph (``__subclasses__``, ``__mro__``), and a
+    getattr-like callable is only called directly with a literal name, never
+    passed along (``map(getattr, ...)``).
+    """
     found = [f"import {name}" for name in _import_names(tree) if name not in allowed]
     owner = _enclosing_function(tree)
+    called: set[int] = set()  # id of every node that is the func of a Call
+    os_ok: set[int] = set()  # id of every ``os`` Name in an allowed position
     for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.split(".")[0] == "os" and alias.asname is not None:
+                    found.append(f"import {alias.name} as {alias.asname}")
+        elif isinstance(node, ast.ImportFrom):
+            if node.level == 0 and (node.module or "").split(".")[0] == "os":
+                found.append(f"from {node.module} import ...")
+        elif isinstance(node, ast.Call):
+            called.add(id(node.func))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute):
+            attr = node.attr
+            if id(node) not in called and (attr in _BANNED_CALLS or attr == "open"):
+                found.append(f"reference to .{attr} without calling it")
+            if attr.strip("_") in _MODULE_HOPS:
+                found.append(f"reference to .{attr}, a way from one module to another")
+            if attr in _CLASS_WALKS:
+                found.append(f"reference to .{attr}, a walk of the class graph")
+            if attr in _ATTRIBUTE_GETTERS and id(node) not in called:
+                found.append(f"reference to .{attr} without calling it")
+            if isinstance(node.value, ast.Name) and node.value.id == "os":
+                if id(node) in called:
+                    os_ok.add(id(node.value))  # judged as a call below
+                elif attr.startswith(_OS_DATA_PREFIX) or attr in _OS_DATA_NAMES:
+                    os_ok.add(id(node.value))
+                else:
+                    found.append(f"reference to os.{attr} without calling it")
+        elif isinstance(node, ast.Name) and id(node) not in called:
+            if (
+                node.id in _BANNED_BUILTINS
+                or node.id in _BANNED_CALLS
+                or node.id in _ATTRIBUTE_GETTERS
+            ):
+                if isinstance(node.ctx, ast.Load):
+                    found.append(f"reference to {node.id} without calling it")
+        if isinstance(node, ast.Name) and node.id in _NAMESPACE_BUILTINS:
+            found.append(f"{node.id}, a namespace that reaches any module")
         if not isinstance(node, ast.Call):
             continue
         func = node.func
@@ -2525,24 +2632,47 @@ def _write_violations(tree: ast.AST, allowed: frozenset[str] = _ALLOWED_IMPORTS)
                 found.append("open() outside os.open in _read_bounded")
         if on_os and name not in _ALLOWED_OS_CALLS:
             found.append(f"os.{name}()")
-        if (
-            isinstance(func, ast.Name)
-            and name == "getattr"
-            and node.args
-            and isinstance(node.args[0], ast.Name)
-            and node.args[0].id == "os"
-        ):
-            attr = node.args[1] if len(node.args) > 1 else None
-            if not (
-                isinstance(attr, ast.Constant)
-                and isinstance(attr.value, str)
-                and attr.value.startswith("O_")
+        if name in _ATTRIBUTE_GETTERS:
+            # getattr(obj, name): the obj is node.args[0], the name the next
+            # argument; obj.__getattribute__(name): the name is the first.
+            on_os_getattr = (
+                isinstance(func, ast.Name)
+                and name == "getattr"
+                and node.args
+                and isinstance(node.args[0], ast.Name)
+                and node.args[0].id == "os"
+            )
+            second = name in _GETTERS_NAME_SECOND or (
+                name in {"__getattribute__", "__getattr__"} and len(node.args) > 1
+            )
+            index = 1 if second else 0
+            attr_node = node.args[index] if len(node.args) > index else None
+            literal = (
+                attr_node.value
+                if isinstance(attr_node, ast.Constant) and isinstance(attr_node.value, str)
+                else None
+            )
+            if on_os_getattr:
+                if literal is None or not literal.startswith(_OS_DATA_PREFIX):
+                    found.append("getattr(os, <not an O_ flag>)")
+                else:
+                    os_ok.add(id(node.args[0]))
+            elif literal is None:
+                found.append(f"{name}() with a computed attribute name")
+            elif (
+                literal in _BANNED_CALLS
+                or literal == "open"
+                or literal.strip("_") in _MODULE_HOPS
+                or literal in _CLASS_WALKS
             ):
-                found.append("getattr(os, <not an O_ flag>)")
+                found.append(f"{name}(..., {literal!r})")
         if name in _YAML_DUMPS and (
             len(node.args) != 1 or any(kw.arg == "stream" for kw in node.keywords)
         ):
             found.append(f"{name}() with a stream")
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id == "os" and id(node) not in os_ok:
+            found.append("the name os used other than as os.<allowed>")
     return found
 
 
@@ -2623,20 +2753,19 @@ class TestModuleBoundary:
         assert _write_violations(_SAFE_YAML_TREE, allowed) == []
 
     def test_os_open_is_one_read_only_call_in_the_bounded_reader(self):
-        opens = []
-        for fn in ast.walk(_LINEAGE_TREE):
-            if not isinstance(fn, ast.FunctionDef):
-                continue
-            for node in ast.walk(fn):
-                if (
-                    isinstance(node, ast.Call)
-                    and isinstance(node.func, ast.Attribute)
-                    and node.func.attr == "open"
-                    and isinstance(node.func.value, ast.Name)
-                    and node.func.value.id == "os"
-                ):
-                    opens.append(fn.name)
-        assert opens == ["_read_bounded"]
+        # Every reference to os.open, called or not, at any level (a module-
+        # level ``_opener = os.open`` has no enclosing function).
+        owner = _enclosing_function(_LINEAGE_TREE)
+        calls = {id(node.func) for node in ast.walk(_LINEAGE_TREE) if isinstance(node, ast.Call)}
+        opens = [
+            (owner.get(id(node)), id(node) in calls)
+            for node in ast.walk(_LINEAGE_TREE)
+            if isinstance(node, ast.Attribute)
+            and node.attr == "open"
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "os"
+        ]
+        assert opens == [("_read_bounded", True)]
         reader = next(
             fn
             for fn in ast.walk(_LINEAGE_TREE)
@@ -2669,6 +2798,47 @@ class TestModuleBoundary:
             "def f(a, b):\n    a.copy(b)\n",
             "import yaml\ndef f(d, s):\n    yaml.safe_dump(d, s)\n",
             "import yaml\ndef f(d, s):\n    yaml.safe_dump(d, stream=s)\n",
+            # Aliased and indirect forms (adversarial review, round 1).
+            "import os as _os\ndef f(a, b):\n    _os.renames(a, b)\n",
+            "import os as _os\ndef f(p):\n    _os.mkfifo(p)\n",
+            "import os as _os\ndef f(p):\n    _os.removedirs(p)\n",
+            "from os import replace as _swap\ndef f(a, b):\n    _swap(a, b)\n",
+            "from os import open as _o\ndef _read_bounded(p):\n    _o(p, 0)\n",
+            "import os\n_opener = os.open\ndef f(p):\n    _opener(p, os.O_WRONLY | os.O_CREAT)\n",
+            "import os\ndef f(a, b):\n    _r = os.renames\n    _r(a, b)\n",
+            "import os\n_o = os\ndef f(a, b):\n    _o.renames(a, b)\n",
+            "import os\ndef f(g, a, b):\n    g(os).renames(a, b)\n",
+            "def f(p):\n    _w = p.write_text\n    _w('x')\n",
+            "def f(p):\n    _o = open\n    _o(p, 'w')\n",
+            "def f(p):\n    getattr(p, 'write_' + 'text')('x')\n",
+            "def f(p):\n    getattr(p, 'write_text')('x')\n",
+            "def f(p):\n    p.__getattribute__('write_text')('x')\n",
+            "import os\ndef f():\n    getattr(os, 'O_' + 'X')\n",
+            # A module reached through another module's attributes.
+            "import os\ndef f(a, b):\n    os.path.os.renames(a, b)\n",
+            "import os\ndef f(p):\n    os.path.os.mkfifo(p)\n",
+            "import os\ndef f(c):\n    os.path.os.system(c)\n",
+            "import os\ndef f(p):\n    os.path.sys.modules['os'].removedirs(p)\n",
+            "import dataclasses\ndef f(p):\n    dataclasses.inspect.os.mkfifo(p)\n",
+            "import pathlib\ndef f(p):\n    pathlib._local.os.mkfifo(p)\n",
+            "import dataclasses\ndef f(p):\n    getattr(dataclasses.inspect, 'os').mkfifo(p)\n",
+            "import os\ndef f(p):\n    vars(os.path)['os'].mkfifo(p)\n",
+            "import os\ndef f(p):\n    os.path.__dict__['os'].mkfifo(p)\n",
+            # A getter passed along uncalled, another getter, or a walk of the
+            # class graph (adversarial review, round 3).
+            "import os\ndef f(p):\n    next(map(getattr, [os.path], ['os'])).mkfifo(p)\n",
+            "def f(p):\n    next(map(getattr, [p], ['write_text']))('x')\n",
+            "def f(p):\n    next(map(p.__getattribute__, ['write_text']))('x')\n",
+            "import dataclasses\ndef f(p):\n"
+            "    dataclasses.inspect.getattr_static(dataclasses.inspect, 'os').mkfifo(p)\n",
+            "def f(p):\n    object.__getattribute__(p, 'write_text')('x')\n",
+            "def f(p, g):\n    g.attrgetter('write_text')(p)('x')\n",
+            "def f(p, g):\n    g.methodcaller('write_text', 'x')(p)\n",
+            "def f(p):\n    todo = [object]\n    while todo:\n        c = todo.pop()\n"
+            "        if c.__name__ == 'FileIO':\n            c(p, 'w')\n            return\n"
+            "        todo.extend(type.__subclasses__(c))\n",
+            "def f(p):\n    [c for c in ().__class__.__base__.__subclasses__()][0](p, 'w')\n",
+            "def f(p):\n    getattr(object, '__subclasses__')()[0](p, 'w')\n",
         ],
     )
     def test_the_checks_have_teeth(self, source: str):
