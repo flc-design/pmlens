@@ -207,6 +207,19 @@ def test_lens_shows_decisions_but_cannot_record_them(lens_server):
     assert "pm_update_decision" not in lens_server.REGISTERED_TOOLS
 
 
+def test_lens_shows_the_decision_brief(lens_server):
+    """Decision Lineage S2 (S2 spec §3.5, §6.3): ADR を説明するための brief は
+    読み取り専用で Lens に出る（mutator ではない）."""
+    assert "pm_decision_brief" in lens_server.RO_ALLOWLIST
+    assert "pm_decision_brief" in lens_server.REGISTERED_TOOLS
+    assert "pm_decision_brief" not in MUTATOR_TOOLS
+
+
+def test_full_mode_registers_the_decision_brief(normal_server):
+    """Vacuity guard for the test above: the brief is registered in full mode too."""
+    assert "pm_decision_brief" in normal_server.REGISTERED_TOOLS
+
+
 def test_full_mode_registers_the_decision_writers(normal_server):
     """Vacuity guard for the test above (PMSERV-224): the ADR writers exist and
     are registered in full mode, and the derived mutator set holds them."""

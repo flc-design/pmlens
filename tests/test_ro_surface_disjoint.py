@@ -519,6 +519,22 @@ class TestWidenedSurfaces:
         assert "pm_add_explanation" not in _RO_SEED
         assert "pm_add_feedback" in _ALL_TOOLS
         assert "pm_add_feedback" not in _RO_SEED
+        # The brief (S2 spec §3.5, §6.3) sits on the Lens surface: its builder
+        # and the posture reader must be in the RO closure, or the
+        # disjointness checks below would pass without looking at them, and
+        # the builder reaches no ledger writer and nothing that shells out.
+        assert "pm_decision_brief" in _RO_SEED
+        assert {
+            "build_decision_brief",
+            "brief_call_error",
+            "read_decision_policy",
+            "lineage_view",
+            "scrub_view",
+        } <= _RO_CLOSURE
+        brief_closure = _GRAPH.reachable({"build_decision_brief"})
+        assert not brief_closure & _GRAPH.ledger_writers
+        assert not brief_closure & _GRAPH.shell_out_fns
+        assert not brief_closure & _GRAPH.subprocess_fns
 
     def test_ro_surface_never_writes_a_ledger(self):
         leaked = _RO_CLOSURE & _GRAPH.ledger_writers

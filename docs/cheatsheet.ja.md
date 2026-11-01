@@ -1,6 +1,6 @@
 # PM Lens チートシート
 
-> Claude Code / Codex CLI / Cursor / Grok Build 用プロジェクト管理 MCP Server — **49 ツール + 互換名2個**
+> Claude Code / Codex CLI / Cursor / Grok Build 用プロジェクト管理 MCP Server — **50 ツール + 互換名2個**
 > Version 0.17.0 | Python 3.11+ | PyPI: `pmlens`
 
 ---
@@ -91,6 +91,7 @@ Claude Code セッション:
 | `pm_log` | デイリーログに記録（作業中タスクに自動紐付け） | `entry`, `category="progress"` |
 | `pm_add_decision` | ADR（設計判断記録）を保存（ID自動採番）。既定は proposed、`accepted` はユーザーが内容を受け入れた時だけ | `title`, `context`, `decision`, `status="proposed"`, `origin?`, `recorded_timing?`, `decision_kind?` |
 | `pm_decision_query` | ADR と lineage を何も変えずに読む（Lens 対応）。`lifecycle="proposed"` でユーザーの確認待ちの一覧。list は `limit` / `offset` でページ送り | `action="list"`, `decision_id?`（get）, `lifecycle?`, `limit=50`, `offset=0` |
+| `pm_decision_brief` | 1 件の ADR をこの読み手に説明するための材料を、何も変えずに返す（Lens 対応）。事実・説明の規則・下限・説明の後の 1 問。読み手のモードで変わるのは言葉・判断を求める種類・問いだけ | `decision_id`, `judgeable_kinds?`, `reader_hint?`（`more_detail` / `simpler`） |
 | `pm_update_decision` | ADR の lifecycle を移す（ユーザーが承認したら proposed → adopted など）、関係を変える、evaluation や note を追記する。本文は変えない（full モードだけ） | `decision_id`, `lifecycle?`, `reason?`, `add_links?`, `remove_links?`, `evaluation?`, `note?` |
 | `pm_add_explanation` | ADR の現在の fact_core から書いた説明を保存する。現在の事実はすべて段落の先頭に要る。正確さは確かめず（unconfirmed と示す）、改版すると前の説明は古いと示される（full モードだけ） | `decision_id`, `fact_core_version`, `paragraphs`, `question?` |
 | `pm_add_feedback` | ADR へのユーザーの返事をその言葉のまま記録する（8 種。`check_answer` を含む）。申告の `respondent_scope` は確かめず、承認で lifecycle は変わらず、点数は付けない（full モードだけ） | `decision_id`, `feedback_kind`, `text`, `explanation_id?`, `fact_ids?`, `respondent_scope="unknown"` |

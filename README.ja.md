@@ -36,7 +36,7 @@
 ## 特徴
 
 - **🔌 マルチホストファースト** — `pmlens install --target=auto` 一発で **Claude Code / Codex CLI / Cursor / Grok Build に登録**。プロジェクトのルールも `CLAUDE.md` と `AGENTS.md` の両方に自動同期 (ADR-008)。プロジェクト途中でホストを切り替えてもコンテキストを失わない — 同じ `.pm/` データ、同じワークフロー
-- **49 の MCP ツール + 互換名2個** — タスク CRUD、子イシュー、ステータス、ブロッカー、ベロシティ、ダッシュボード、プロンプトパック、ADR、セッションメモリ、ワークフロー、ナレッジレコード、マルチホストルール注入、クロスホスト Outbox ブリッジ、コンテンツパイプライン（記録済み知見 → redact 済み下書き） 等
+- **50 の MCP ツール + 互換名2個** — タスク CRUD、子イシュー、ステータス、ブロッカー、ベロシティ、ダッシュボード、プロンプトパック、ADR、セッションメモリ、ワークフロー、ナレッジレコード、マルチホストルール注入、クロスホスト Outbox ブリッジ、コンテンツパイプライン（記録済み知見 → redact 済み下書き） 等
 - **ワークフローエンジン** — テンプレートベースの開発ワークフロー（ループ、ユーザーゲート、チェイン対応：Discovery → Development）
 - **ナレッジレコード** — カジュアルなメモリとフォーマルな ADR の中間に位置する構造化された知見記録（research、tradeoff、spec 等）
 - **Super Research スキル** — 3 並列エージェント（Domain Expert、Critical Analyst、Lateral Thinker）+ Depth Check（6 次元）+ Fact Check + Cross-Check
@@ -262,7 +262,7 @@ pmlens uninstall --target auto
 
 ---
 
-## MCP ツール一覧（49ツール + 互換名2個）
+## MCP ツール一覧（50ツール + 互換名2個）
 
 ### プロジェクト管理
 
@@ -284,6 +284,7 @@ pmlens uninstall --target auto
 | `pm_log` | 日次ログ記録 + タスク自動紐付け（progress / decision / blocker / note / milestone） |
 | `pm_add_decision` | ADR 追加（context、decision、consequences を構造化）。既定は `proposed` で記録し、`status="accepted"` はユーザーが内容そのものを受け入れた時だけ渡す（規約であり、誰が受け入れたかを pmlens は確かめられないので、accepted で記録すると伝えるべき警告 `decision_created_accepted` を返す）。申告（`origin`・`recorded_timing`・`decision_kind`、既定は `unknown`）と記録時刻は `.pm/decision_lineage/ADR-NNN.yaml` に申告のまま保存し、検証はしない |
 | `pm_decision_query` | ADR と lineage を、何も変えずに読む（読み取り専用。Lens モードでも使える）。`action="list"` は ADR を status・lifecycle・申告された origin 付きで、`offset` から `limit` 件（既定 50）ずつ返し、`has_more` / `next_offset` で続きを示す（`lifecycle="proposed"` でユーザーの確認待ちの一覧。長い title はここでは切り、`get` は全文を返す）。`action="get"` は ADR の本文、申告、双方向の関係、最近の events を返す。使える lineage の無い ADR は status から導いた値（`derived`）で示し、記録の無い項目は `not_recorded` に出す。申告と events は記録されたままを示し、検証はしない。未知のキーは名前だけを返し、秘密らしき文字列は応答で伏せる |
+| `pm_decision_brief` | 1 件の ADR を目の前のユーザーに説明するのに要るものを、何も変えずに返す（読み取り専用。Lens モードでも使える）: 現在の `fact_core`、説明が守る規則、`floor`（下限）、説明の後に聞く 1 問の `question`（引用する事実は雛形に埋め込まず `question.quoted_fact` に別に返す）。`judgeable_kinds`（`spec_policy`・`premise_dependent`・`technical` のうち読み手が自分で判断できるもの。読み手が答えるまでは省き、その間は尋ねる問いが返る）と `reader_hint`（`more_detail` / `simpler`。この呼び出しだけ）で変わるのは `language_rules`・`judgment_request`・`question` だけで、プロジェクトの姿勢で変わるのは `posture` だけ。事実・下限・検証の規則は読み手によらず同じで、`external_irreversible`（と可逆性が分からないもの）は、どの種類の判断でも、取り消せない作用の前に判断できる人の確認を求める。秘密らしき文字列は応答で伏せる |
 | `pm_update_decision` | ADR の lifecycle（`proposed` / `adopted` / `deprecated` / `superseded` / `rejected` / `reverted`）を決まった遷移表に沿って移し、関係（`supersedes` / `superseded_by` / `amends`）を変え、evaluation（AI の記録として示し、人間のレビューとはしない）や note を追記する。ADR の本文は変えない。`decisions.yaml` の `status` は lifecycle の射影として書き直す（`adopted` → `accepted`、`rejected` → `deprecated`）。lifecycle を変える時は `reason` が必須。`adopted` にするのはユーザーが ADR の内容そのものを受け入れた時だけ、`rejected` にするのはユーザーが判断した後だけ。pmlens はそれを確かめられないので、lifecycle を変えるたびに伝えるべき警告 `decision_lifecycle_changed` を返す。申告の `origin`（`ai_auto` だけ）と `recorded_timing` は、`unknown` のままなら reason を添えて後から入れられる。full モードだけ（Lens には出ない） |
 | `pm_add_explanation` | アシスタントが ADR の現在の fact_core からユーザー向けに書いた説明を保存する。`paragraphs`（`[{"fact_ids": [1〜2 個の ID。先頭がその段落が主に述べる事実], "text": "..."}]`）と、書いた元の `fact_core_version`、任意の締めの `question` を渡す。現在の版のすべての事実が、mermaid の図だけではない段落の先頭にある必要があり、足りない ID・知らない ID は拒否して一覧で返す（`missing_fact_ids` / `unknown_fact_ids`）。版が現在のものでなければ `current_version` を添えて拒否する。pmlens が確かめるのは事実の ID がそろっていることと版が現在であることだけで、正確さは確かめず、常に `unconfirmed` と示す。fact_core を改版すると、それより前の説明は変わった ID と一緒に古い（stale）と示される。その ADR の lineage のロックだけを取り、lifecycle・status・`decisions.yaml` は変えない（full モードだけ。Lens には登録しない） |
 | `pm_add_feedback` | ADR についてユーザーが言ったことを、ユーザーの言葉のまま（`text`。必須）記録する。種別 `feedback_kind` は 8 つ: `premise_mismatch`・`what_if`・`unacceptable`・`try_alternative`・`approve`・`reject`・`comment`・`check_answer`（説明の後に聞いた問いへの答え。その `explanation_id` が要る）。任意で現在の fact_core の版の `fact_ids` を渡す。返事には `ADR-NNN.FB-n` の ID が振られ、`pm_update_decision` の `caused_by` から指せる。`respondent_scope`（`can_judge` / `cannot_judge` / `unknown`。既定）は pmlens が確かめない申告で、返事は `respondent_declared_can_judge` か `no_review_by_able_person` と示され、確認済みとは示さない。点数は付けない。ここで記録した承認・却下で lifecycle と status は変わらない。その ADR の lineage のロックだけを取り、lineage の無い ADR では lineage を始める（full モードだけ。Lens には登録しない） |
@@ -736,7 +737,7 @@ Claude Code Session
   └── MCP Server (stdio)
         └── pmlens serve
               │
-              ├── server.py    → 49 MCP ツール + 互換名2個 (FastMCP)
+              ├── server.py    → 50 MCP ツール + 互換名2個 (FastMCP)
               ├── models.py    → Pydantic v2 データモデル (18 models, 26 enums)
               ├── storage.py   → YAML 読み書き
               ├── workflow.py  → ワークフローエンジン (state machine)

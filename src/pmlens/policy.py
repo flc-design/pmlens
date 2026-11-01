@@ -249,6 +249,9 @@ class PolicyView:
             unset notice is not among them: its wording depends on the host.
         redactions: How many redactions the labels above needed, for a
             reader that reports them; the count carries no cleartext.
+        value_redactions: The part of ``redactions`` made in ``value``
+            alone, for a reader that shows the value but not
+            ``last_change`` (the brief, S2 spec §3.5).
         state: STATE_MISSING, STATE_READ or STATE_UNREADABLE.
     """
 
@@ -258,6 +261,7 @@ class PolicyView:
     history_total: int = 0
     warnings: list[dict] = field(default_factory=list)
     redactions: int = 0
+    value_redactions: int = 0
     state: str = STATE_MISSING
 
     def as_dict(self) -> dict:
@@ -358,6 +362,7 @@ def policy_view(raw: RawPolicy) -> PolicyView:
         history_total=total,
         warnings=warnings,
         redactions=redactions + hits,
+        value_redactions=redactions,
         state=STATE_READ,
     )
 

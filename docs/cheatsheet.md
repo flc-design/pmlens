@@ -1,6 +1,6 @@
 # PM Lens Cheatsheet
 
-> **49 MCP tools + 2 compatibility aliases** for Claude Code, Codex CLI, Cursor and Grok Build.
+> **50 MCP tools + 2 compatibility aliases** for Claude Code, Codex CLI, Cursor and Grok Build.
 > Version 0.17.0 | Python 3.11+ | PyPI: `pmlens`
 
 ---
@@ -90,6 +90,7 @@ The names below are the standard ones; the legacy names remain as aliases. See t
 | `pm_log` | Add daily log entry (auto-links to active task) | `entry`, `category="progress"` |
 | `pm_add_decision` | Record an ADR (ID auto-generated). Saved as proposed; `accepted` only when the user accepted the content | `title`, `context`, `decision`, `status="proposed"`, `origin?`, `recorded_timing?`, `decision_kind?` |
 | `pm_decision_query` | Read ADRs and their lineage, changing nothing (Lens-safe). `lifecycle="proposed"` lists ADRs awaiting the user's review; list pages with `limit` / `offset` | `action="list"`, `decision_id?` (get), `lifecycle?`, `limit=50`, `offset=0` |
+| `pm_decision_brief` | What to explain one ADR to this reader with, changing nothing (Lens-safe): the facts, the explanation rules, the floor and the question to ask afterwards; the reader mode changes only the wording, what to ask and the question | `decision_id`, `judgeable_kinds?`, `reader_hint?` (`more_detail` / `simpler`) |
 | `pm_update_decision` | Move an ADR's lifecycle (e.g. proposed → adopted once the user approves), change its links, append an evaluation or a note; the text never changes (full mode only) | `decision_id`, `lifecycle?`, `reason?`, `add_links?`, `remove_links?`, `evaluation?`, `note?` |
 | `pm_add_explanation` | Save an explanation of an ADR written from its current fact core; every current fact must lead a paragraph, the accuracy is never checked (shown as unconfirmed), and a revision marks older ones stale (full mode only) | `decision_id`, `fact_core_version`, `paragraphs`, `question?` |
 | `pm_add_feedback` | Record the user's reply to an ADR in their own words (8 kinds, incl. `check_answer`); the declared `respondent_scope` is never checked, approval changes no lifecycle, replies are never scored (full mode only) | `decision_id`, `feedback_kind`, `text`, `explanation_id?`, `fact_ids?`, `respondent_scope="unknown"` |

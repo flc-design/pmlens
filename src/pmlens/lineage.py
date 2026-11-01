@@ -2236,7 +2236,8 @@ class LineageView:
     means the lifecycle and the rest were inferred from the ADR's status, not
     taken from a lineage. The S2 fields are filled only by a view built with
     ``include_s2=True`` (``s2``); the attributes after ``s2`` are for the
-    notices of :func:`fact_core_notices` and are not part of :meth:`as_dict`.
+    notices of :func:`fact_core_notices` and the brief's floor, and are not
+    part of :meth:`as_dict`.
     """
 
     decision_id: str
@@ -2266,6 +2267,9 @@ class LineageView:
     fact_core_adoption: str | None = None
     # (recorded, current) reversibility labels when they disagree.
     reversibility_change: tuple[str, str] | None = None
+    # What the brief's floor reads (:func:`floor_reversibility` of the stored
+    # fact core, so it agrees with the ratchet); unknown without one.
+    reversibility_floor: str = Reversibility.UNKNOWN.value
 
     @property
     def note_codes(self) -> set[str]:
@@ -3105,8 +3109,10 @@ def lineage_view(
     revert_change: tuple[str, str] | None = None
     adopted: int | None = None
     adoption: str | None = None
+    revert_floor = Reversibility.UNKNOWN.value
     if include_s2:
         fact_core, revert_change = _view_fact_core(doc.get("fact_core"), notes)
+        revert_floor = floor_reversibility(doc.get("fact_core"))
         explanations = _view_explanations(doc.get("explanations"), doc.get("fact_core"), notes)
         feedback = _view_feedback(doc.get("feedback"), notes)
         declared_scope = declared_respondent_scope(doc)
@@ -3147,6 +3153,7 @@ def lineage_view(
         s2=include_s2,
         fact_core_adoption=adoption,
         reversibility_change=revert_change,
+        reversibility_floor=revert_floor,
     )
 
 

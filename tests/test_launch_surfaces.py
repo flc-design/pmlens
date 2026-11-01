@@ -370,10 +370,11 @@ def test_lens_wire_surface_reads_decisions_but_cannot_write_them(desktop_write: 
 
     S2 adds the decision posture's change tool, the explanation writer and the
     feedback writer to the writers (S2 spec §6.1 D9); pm_status, which shows
-    the posture, stays on the wire.
+    the posture, and pm_decision_brief, which reads an ADR to explain it, stay
+    on the wire (S2 spec §6.3).
     """
     tools = set(_mcp_session(lens=True, desktop_write=desktop_write).tools)
-    assert {"pm_decision_query", "pm_status"} <= tools
+    assert {"pm_decision_query", "pm_decision_brief", "pm_status"} <= tools
     writers = {
         "pm_add_decision",
         "pm_update_decision",
@@ -735,6 +736,125 @@ def test_feedback_round_trips_over_stdio(tmp_project: Path) -> None:
         ["F-weak"],
     )
     assert got["lineage"]["declared_respondent_scope"]["label"] == "none"
+
+
+def _pm_snapshot(project: Path) -> dict[str, bytes]:
+    pm = project / ".pm"
+    return {
+        str(path.relative_to(pm)): path.read_bytes()
+        for path in sorted(pm.rglob("*"))
+        if path.is_file()
+    }
+
+
+@pytest.mark.smoke
+def test_brief_round_trips_over_stdio_and_lens_reads_it_unchanged(tmp_project: Path) -> None:
+    """The D10 path over the wire, then the brief from a Lens host (S2 spec §6.3, §7.2).
+
+    Full mode: pm_add_decision (premise_dependent) → pm_update_decision (fact
+    core) → pm_decision_brief → pm_add_explanation with the brief's question →
+    pm_decision_brief again. Proves the brief's argument schema (a
+    ``list[str] | None`` judgeable_kinds and a ``str | None`` reader_hint) and
+    that its response serializes as JSON through a real host path; then a
+    PM_LENS=1 server returns the same brief and leaves .pm byte for byte as it
+    was.
+    """
+    project = str(tmp_project)
+    fact_core = [
+        {"kind": "what", "text": "Keep one shared booking calendar"},
+        {"kind": "change", "text": "Before: one calendar per room. After: one for all rooms"},
+        {"kind": "revert", "text": "Split the calendar again", "reversibility": "code_revertable"},
+        {"kind": "weak", "text": "A busy week is harder to read"},
+        {"kind": "uncertain", "text": "Peak use was not measured", "confidence": "medium"},
+        {"kind": "premise", "text": "At most 30 people book rooms"},
+    ]
+    ids = ["F-what", "F-change", "F-revert", "F-weak", "F-uncertain", "F-premise.1"]
+    brief_call = {
+        "name": "pm_decision_brief",
+        "arguments": {
+            "decision_id": "ADR-001",
+            "judgeable_kinds": ["premise_dependent"],
+            "reader_hint": "simpler",
+            "project_path": project,
+        },
+    }
+    session = _mcp_session(
+        lens=False,
+        calls=[
+            {
+                "name": "pm_add_decision",
+                "arguments": {
+                    "title": "One booking calendar",
+                    "context": "c",
+                    "decision": "d",
+                    "decision_kind": "premise_dependent",
+                    "project_path": project,
+                },
+            },
+            {
+                "name": "pm_update_decision",
+                "arguments": {
+                    "decision_id": "ADR-001",
+                    "fact_core": fact_core,
+                    "expected_fact_core_version": 0,
+                    "project_path": project,
+                },
+            },
+            brief_call,
+            {
+                "name": "pm_add_explanation",
+                "arguments": {
+                    "decision_id": "ADR-001",
+                    "fact_core_version": 1,
+                    "paragraphs": [{"fact_ids": [i], "text": f"About {i}."} for i in ids],
+                    "question": {
+                        "question_kind": "premise_check",
+                        "fact_ids": ["F-premise.1"],
+                        "text": "Do at most 30 people book rooms?",
+                    },
+                    "project_path": project,
+                },
+            },
+            brief_call,
+        ],
+    )
+    schema = session.tool_definitions["pm_decision_brief"]["inputSchema"]
+    assert set(schema["properties"]) == {
+        "decision_id",
+        "judgeable_kinds",
+        "reader_hint",
+        "project_path",
+    }
+    assert schema.get("required") == ["decision_id"]
+    assert {"type": "array", "items": {"type": "string"}} in (
+        schema["properties"]["judgeable_kinds"]["anyOf"]
+    )
+    assert {"type": "string"} in schema["properties"]["reader_hint"]["anyOf"]
+
+    _added, revised, before, explained, after = (
+        json.loads(response["content"][0]["text"]) for response in session.responses
+    )
+    assert revised["status"] == "updated"
+    assert before["fact_core"]["version"] == 1
+    assert [item["id"] for item in before["fact_core"]["items"]] == ids
+    question = before["question"]
+    assert (question["question_kind"], question["fact_ids"]) == ("premise_check", ["F-premise.1"])
+    assert question["quoted_fact"] == {"id": "F-premise.1", "text": "At most 30 people book rooms"}
+    assert "30 people" not in question["template"]
+    assert before["language_rules"]["detail"] == "less"
+    assert before["judgment_request"]["ask_to_judge"] is True
+    assert before["floor"]["needs_person_able_to_judge"] is False
+    assert before["explanations"] == {"current": [], "stale": []}
+    assert explained["status"] == "recorded"
+    assert after["explanations"] == {"current": ["ADR-001.EX-1"], "stale": []}
+
+    snapshot = _pm_snapshot(tmp_project)
+    lens = _mcp_session(lens=True, calls=[brief_call])
+    assert "pm_decision_brief" in lens.tools
+    assert lens.tool_definitions["pm_decision_brief"]["inputSchema"] == schema
+    [response] = lens.responses
+    assert json.loads(response["content"][0]["text"]) == after
+    assert _pm_snapshot(tmp_project) == snapshot
 
 
 @pytest.mark.smoke

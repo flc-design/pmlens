@@ -2411,6 +2411,12 @@ _SAFE_YAML_TREE = ast.parse(
 # bounded reader, under lineage.py's rules plus the import of lineage itself.
 _POLICY_TREE = ast.parse((Path(pmlens.__file__).parent / "policy.py").read_text(encoding="utf-8"))
 _POLICY_IMPORTS = _ALLOWED_IMPORTS | {".lineage"}
+# decision_brief.py (S2 spec §3.5, §6.3) builds pm_decision_brief from values
+# already read: lineage.py's rules plus the imports of lineage and policy.
+_BRIEF_TREE = ast.parse(
+    (Path(pmlens.__file__).parent / "decision_brief.py").read_text(encoding="utf-8")
+)
+_BRIEF_IMPORTS = _ALLOWED_IMPORTS | {".lineage", ".policy"}
 _LEDGER_ERRORS_IMPORTS = frozenset(
     {
         "__future__",
@@ -2581,6 +2587,31 @@ class TestModuleBoundary:
             if isinstance(node, ast.Call) and _call_name(node) in {"open", "_read_bounded"}
         ]
         assert opens == []  # it reads through lineage.read_bounded_yaml only
+
+    def test_brief_imports_neither_storage_nor_is_imported_by_lineage_or_policy(self):
+        assert "storage" not in _imported_modules(_BRIEF_TREE)
+        assert "decision_brief" not in _imported_modules(_LINEAGE_TREE)
+        assert "decision_brief" not in _imported_modules(_POLICY_TREE)
+        assert {".lineage", ".policy"} <= set(_import_names(_BRIEF_TREE))  # both used
+
+    def test_brief_makes_no_write_calls_and_reads_nothing(self):
+        assert _write_violations(_BRIEF_TREE, _BRIEF_IMPORTS) == []
+        reads = [
+            _call_name(node)
+            for node in ast.walk(_BRIEF_TREE)
+            if isinstance(node, ast.Call)
+            and _call_name(node)
+            in {
+                "open",
+                "_read_bounded",
+                "read_bounded_yaml",
+                "read_lineage_raw",
+                "read_decision_policy",
+                "read_policy_raw",
+            }
+        ]
+        assert reads == []  # every input is read by the caller
+        assert "os" not in _import_names(_BRIEF_TREE)
 
     def test_ledger_errors_makes_no_write_calls(self):
         # lineage.py imports it, so it is held to the same rules, with no os.

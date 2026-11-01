@@ -55,6 +55,7 @@ from pmlens.server import (
     pm_add_decision,
     pm_add_explanation,
     pm_add_feedback,
+    pm_decision_brief,
     pm_decision_query,
     pm_update_decision,
     pm_update_decision_posture,
@@ -886,6 +887,11 @@ def _tool_parameters() -> dict[str, list[str]]:
 
 _TOOL_PARAMETERS = _tool_parameters()
 _FORBIDDEN_NAME = re.compile(r"accura|verif|confirm|human|reader_hint|anchor|^mode$")
+# The reader's mode, which only the read-only brief takes (S2 spec §3.5,
+# §6.4): it changes how an explanation is worded and what the reader is asked,
+# never a record. D8 (a) excludes it there and nowhere else.
+_READER_MODE_ARGUMENTS = ("judgeable_kinds", "reader_hint")
+_READER_MODE_TOOL = "pm_decision_brief"
 
 # Design §4.3: the whole argument list of pm_update_decision. Adding one is a
 # deliberate change to this set (and to the design). S2 spec §3.1 adds the fact
@@ -923,6 +929,7 @@ class TestD8:
             for tool, names in _TOOL_PARAMETERS.items()
             for name in names
             if _FORBIDDEN_NAME.search(name)
+            and not (tool == _READER_MODE_TOOL and name in _READER_MODE_ARGUMENTS)
         ]
         assert hits == []
         # "kind" alone is the content pipeline's draft kind, nothing else.
@@ -930,6 +937,31 @@ class TestD8:
             "pm_draft_content",
             "pm_draft_x",
         ]
+
+    def test_a_only_the_brief_takes_the_reader_mode(self):
+        # S2 spec §6.4: no tool that writes takes the reader's mode, so a mode
+        # can never change a record; the brief, which writes nothing, is the
+        # one tool that takes it. The exclusion above covers only its name.
+        for name in _READER_MODE_ARGUMENTS:
+            takers = sorted(t for t, names in _TOOL_PARAMETERS.items() if name in names)
+            assert takers == [_READER_MODE_TOOL], name
+        assert _FORBIDDEN_NAME.search("reader_hint")
+        assert _READER_MODE_TOOL in server.RO_ALLOWLIST
+        assert _TOOL_PARAMETERS[_READER_MODE_TOOL] == [
+            "decision_id",
+            "judgeable_kinds",
+            "reader_hint",
+            "project_path",
+        ]
+        signature = inspect.signature(pm_decision_brief)
+        required = [
+            name
+            for name, parameter in signature.parameters.items()
+            if parameter.default is inspect.Parameter.empty
+        ]
+        assert required == ["decision_id"]
+        assert signature.parameters["judgeable_kinds"].default is None
+        assert signature.parameters["reader_hint"].default is None
 
     def test_a_the_name_check_would_catch_them(self):
         for name in ("accuracy", "verified", "user_confirmed", "human_reviewed", "anchor", "mode"):
@@ -1138,6 +1170,7 @@ class TestToolDescriptions:
             pm_update_decision_posture,
             pm_add_explanation,
             pm_add_feedback,
+            pm_decision_brief,
         ],
     )
     def test_descriptions_carry_no_ticket_or_adr_numbers(self, tool: Callable):
