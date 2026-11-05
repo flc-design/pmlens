@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.18.0] - 2026-11-05
 
 Decision Lineage v1, second half (ADR-056 / ADR-058): one decision can now go
 the whole way from an explanation to the user, through their reply and a
@@ -15,7 +15,7 @@ what it can check mechanically (the version, that every fact is covered, the
 ids) and shows the rest as declared, not verified.
 
 MCP tool count: 52 names for 50 operations in full mode (the two content tool
-aliases); Lens 18, or 20 with Desktop outbox writes. Test suite: 4,137 passing.
+aliases); Lens 18, or 20 with Desktop outbox writes. Test suite: 4,182 passing.
 
 **Upgrade notes.**
 
@@ -106,6 +106,14 @@ aliases); Lens 18, or 20 with Desktop outbox writes. Test suite: 4,137 passing.
   adopted fact core version.
 - Adopting an ADR that has facts but no explanation of their current version
   returns the info warning `decision_adopted_without_current_explanation`.
+
+### Security
+
+- The dependency locks (`uv.lock`, `requirements.lock`) move Authlib 1.8.0 →
+  1.9.1 (GHSA-6v38-4h7w-rj9h, GHSA-8m4g-j4wp-wgcg), joserfc 1.7.5 → 1.7.6
+  (GHSA-9pg5-8c7x-5hfx), dnspython 2.8.0 → 2.9.0 (GHSA-45c3-73f7-pv4m) and,
+  for development only, setuptools 84.0.0 → 84.1.0 (GHSA-xmj3-9gf7-h52w).
+  pmlens does not import any of them; they arrive through its dependencies.
 
 ### Tests
 

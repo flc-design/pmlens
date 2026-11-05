@@ -280,6 +280,9 @@ IGNORED: dict[str, tuple[tuple[str, str | None, str], ...]] = {
     "docs/architecture.html": (
         (r"outbox\.py</code> は v0\.8\.0", "0.8.0", "frozen: when outbox.py was introduced"),
         (r"PMSERV-105 \(v0\.8\.0 release\)", "0.8.0", "frozen: historical release credit"),
+        (r"v0\.17\.0 で、ADR と lineage を読む", "0.17.0", "frozen: when S1's ADR tools arrived"),
+        (r"書き込みなし、v0\.17\.0\)", "0.17.0", "frozen: when pm_decision_query was introduced"),
+        (r"lifecycle の射影。v0\.17\.0\)", "0.17.0", "frozen: when pm_update_decision arrived"),
     ),
     "docs/README.md": (
         (
