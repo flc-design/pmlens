@@ -1,7 +1,7 @@
 # PM Lens Cheatsheet
 
 > **50 MCP tools + 2 compatibility aliases** for Claude Code, Codex CLI, Cursor and Grok Build.
-> Version 0.17.0 | Python 3.11+ | PyPI: `pmlens`
+> Version 0.18.0 | Python 3.11+ | PyPI: `pmlens`
 
 ---
 
