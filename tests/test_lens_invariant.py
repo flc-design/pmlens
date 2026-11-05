@@ -415,7 +415,7 @@ _T6_SECRET = "AKIA" + "T" * 16
 
 
 def _seed_decisions(pm_dir: Path) -> None:
-    """Five ADRs for pm_decision_query (Decision Lineage S1, design §8.2).
+    """Seven ADRs for pm_decision_query and pm_decision_brief (S1 design §8.2, S2 spec §6.3).
 
     ADR-001 accepted without a lineage; ADR-002 proposed by the assistant with
     a lineage; ADR-003 whose lineage says adopted while decisions.yaml says
@@ -424,6 +424,18 @@ def _seed_decisions(pm_dir: Path) -> None:
     lineage event carrying ``caused_by: !!binary``. No FIFO, symlink or
     oversized file: a reader that blocks would time the sweep out instead of
     failing it (those live in tests/test_decision_query.py).
+
+    S2: ADR-006 is premise_dependent and proposed, with a fact core at version
+    2 (its recorded reversibility agrees with F-revert), a stale explanation
+    EX-1 and a current one EX-2, and replies FB-1 (version 1) and FB-2
+    (version 2); nothing in it looks like a secret. ADR-007 has a fact core
+    with a broken item and an evaluation event whose ``caused_by`` is
+    ``!!binary``. ADR-006 and ADR-007 come before ADR-005 in decisions.yaml,
+    so ADR-005 keeps the unknown keys appended after the loop.
+
+    The project's decision posture is bold with one history entry (S2 spec
+    §6.3), so pm_status and pm_decision_brief read a real
+    .pm/decision_policy.yaml under Lens.
     """
     import datetime as dt
 
@@ -435,9 +447,12 @@ def _seed_decisions(pm_dir: Path) -> None:
         "ADR-002": "proposed by the assistant",
         "ADR-003": "status edited by hand",
         "ADR-004": "broken lineage",
+        # Before ADR-005, which must stay last (review_note and blob below).
+        "ADR-006": "explained with feedback",
+        "ADR-007": "broken fact core",
         "ADR-005": "unknown keys",
     }
-    statuses = {"ADR-002": "proposed", "ADR-003": "proposed"}
+    statuses = {"ADR-002": "proposed", "ADR-003": "proposed", "ADR-006": "proposed"}
     lines = ["# PM Lens - decisions.yaml", "decisions:"]
     for adr_id, title in titles.items():
         lines += [
@@ -461,6 +476,14 @@ def _seed_decisions(pm_dir: Path) -> None:
         ),
         "ADR-003": new_lineage_doc(adr("ADR-003", DecisionStatus.ACCEPTED), {}, now),
         "ADR-005": new_lineage_doc(adr("ADR-005", DecisionStatus.ACCEPTED), {}, now),
+        "ADR-006": new_lineage_doc(
+            adr("ADR-006", DecisionStatus.PROPOSED),
+            {"origin": "ai_auto", "decision_kind": "premise_dependent"},
+            now,
+        ),
+        "ADR-007": new_lineage_doc(
+            adr("ADR-007", DecisionStatus.ACCEPTED), {"decision_kind": "technical"}, now
+        ),
     }
     docs["ADR-005"]["events"].append(
         {
@@ -471,11 +494,90 @@ def _seed_decisions(pm_dir: Path) -> None:
             "via": "pm_update_decision",
         }
     )
+    docs["ADR-006"].update(_explained_sections(now))
+    docs["ADR-007"]["fact_core"] = {
+        "version": 1,
+        "recorded_reversibility": "code_revertable",
+        "items": ["not a fact"],
+        "retired_ids": [],
+        "previous_values": [],
+    }
+    docs["ADR-007"]["events"].append(
+        {
+            "at": now,
+            "kind": "evaluation",
+            "evaluation_kind": "other",
+            "text": "e",
+            "caused_by": b"hello world",
+            "via": "pm_update_decision",
+        }
+    )
     lineage_dir = pm_dir / "decision_lineage"
     lineage_dir.mkdir()
     for adr_id, doc in docs.items():
         (lineage_dir / f"{adr_id}.yaml").write_text(dump_lineage(doc, adr_id), encoding="utf-8")
     (lineage_dir / "ADR-004.yaml").write_text("lifecycle: [unclosed\n", encoding="utf-8")
+    (pm_dir / "decision_policy.yaml").write_text(
+        "# PM Lens - decision_policy.yaml\n"
+        "schema: 1\n"
+        "decision_posture: bold\n"
+        "history:\n"
+        f"- {{at: '{now}', from: unset, to: bold, reason: '', via: pm_init}}\n",
+        encoding="utf-8",
+    )
+
+
+def _explained_sections(now: str) -> dict:
+    """ADR-006's S2 sections: a fact core at version 2, two explanations, two replies.
+
+    F-premise.1 changed in version 2, so EX-1 (written from version 1) is
+    stale and EX-2 is current; FB-1 answers version 1 and FB-2 version 2.
+    """
+    ids = ["F-what", "F-change", "F-revert", "F-weak", "F-uncertain", "F-premise.1"]
+    items = []
+    for fact_id in ids:
+        item: dict = {
+            "id": fact_id,
+            "text": f"fact {fact_id}",
+            "source": "proposal",
+            "since": 2 if fact_id == "F-premise.1" else 1,
+        }
+        if fact_id == "F-revert":
+            item["reversibility"] = "code_revertable"
+        if fact_id == "F-uncertain":
+            item["confidence"] = "medium"
+        items.append(item)
+
+    def explanation(number: int) -> dict:
+        return {
+            "id": f"ADR-006.EX-{number}",
+            "at": now,
+            "fact_core_version": number,
+            "paragraphs": [{"fact_ids": [fact_id], "text": f"about {fact_id}"} for fact_id in ids],
+        }
+
+    def reply(number: int, kind: str) -> dict:
+        return {
+            "id": f"ADR-006.FB-{number}",
+            "at": now,
+            "via": "pm_add_feedback",
+            "feedback_kind": kind,
+            "text": f"reply {number}",
+            "fact_core_version": number,
+            "respondent_scope": "cannot_judge",
+        }
+
+    return {
+        "fact_core": {
+            "version": 2,
+            "recorded_reversibility": "code_revertable",
+            "items": items,
+            "retired_ids": [],
+            "previous_values": [],
+        },
+        "explanations": {"last_number": 2, "items": [explanation(1), explanation(2)]},
+        "feedback": {"last_number": 2, "items": [reply(1, "comment"), reply(2, "approve")]},
+    }
 
 
 # PMSERV-217: a zero-arg call never exercised a tool with a required argument
@@ -520,8 +622,20 @@ _T6_ARG_SETS: dict[str, list[dict]] = {
         {"action": "get", "decision_id": "ADR-003"},
         {"action": "get", "decision_id": "ADR-004"},
         {"action": "get", "decision_id": "ADR-005"},
+        {"action": "get", "decision_id": "ADR-006"},
+        {"action": "get", "decision_id": "ADR-007"},
         {"action": "get", "decision_id": "ADR-999"},
         {"action": "get"},
+    ],
+    # Decision Lineage S2 (S2 spec §6.3): the brief with and without a fact
+    # core, a broken one, a reader mode with each key set, and not found.
+    "pm_decision_brief": [
+        {"decision_id": "ADR-006"},
+        {"decision_id": "ADR-006", "judgeable_kinds": ["technical"], "reader_hint": "simpler"},
+        {"decision_id": "ADR-006", "judgeable_kinds": ["premise_dependent"]},
+        {"decision_id": "ADR-007"},
+        {"decision_id": "ADR-001"},
+        {"decision_id": "ADR-999"},
     ],
 }
 
@@ -532,13 +646,26 @@ _EXPECTED_REACH = {
     "recall_track_matched": True,
     "recall_auto_memory_entries": 1,
     "search_cross_project_hits": 1,
-    "decision_list_total": 5,
-    "decision_proposed_ids": ["ADR-002"],
+    "decision_list_total": 7,
+    "decision_proposed_ids": ["ADR-002", "ADR-006"],
     "decision_get_derived": True,
     "decision_mismatch_warned": True,
     "decision_unreadable_noted": True,
     "decision_unknown_keys_only_names": True,
     "decision_page": [["ADR-002", "ADR-003"], True, 3],
+    # The seeded decision posture (S2 spec §6.3) and its one history entry.
+    "status_posture": "bold",
+    "status_posture_history": [1, "pm_init"],
+    # S2 (S2 spec §6.3): the replies of ADR-006, ADR-007's evaluation caused_by
+    # skipped by type, and the brief's fact core, question, stale explanation,
+    # skipped items and posture.
+    "decision_get_feedback_total": 2,
+    "decision_get_evaluation_caused_by_skipped": True,
+    "brief_fact_core_version": 2,
+    "brief_question_kind": "premise_check",
+    "brief_stale": ["ADR-006.EX-1"],
+    "brief_items_skipped": True,
+    "brief_posture": "bold",
 }
 
 # Runs inside the subprocess: import pmlens.server fresh (so PM_LENS /
@@ -627,6 +754,43 @@ _T6_SWEEP_SCRIPT = textwrap.dedent("""
                 and unknown["decision"]["unknown_keys"] == ["review_note", "blob"]
                 and unknown["lineage"]["events"][-1].get("unknown_fields") == ["caused_by"]
             )
+            explained = query(action="get", decision_id="ADR-006")
+            reach["decision_get_feedback_total"] = (
+                explained["lineage"]["feedback"]["feedback_total"]
+            )
+            broken_core = query(action="get", decision_id="ADR-007")
+            dumped = json.dumps(broken_core)  # raises if a bytes value leaked
+            evaluation = broken_core["lineage"]["events"][-1]
+            # One for the broken fact core item, one for the caused_by value.
+            reach["decision_get_evaluation_caused_by_skipped"] = (
+                "aGVsbG8" not in dumped
+                and evaluation["kind"] == "evaluation"
+                and "caused_by" not in evaluation
+                and "unknown_fields" not in evaluation
+                and {"code": "decision_lineage_items_skipped", "count": 2}
+                in broken_core["lineage"]["notes"]
+            )
+        if "pm_decision_brief" in tool_names:
+            brief = srv.pm_decision_brief
+            plain = brief(decision_id="ADR-006")
+            reach["brief_fact_core_version"] = plain["fact_core"]["version"]
+            reach["brief_question_kind"] = brief(
+                decision_id="ADR-006", judgeable_kinds=["premise_dependent"]
+            )["question"]["question_kind"]
+            reach["brief_stale"] = plain["explanations"]["stale"]
+            broken_brief = brief(decision_id="ADR-007")
+            json.dumps(broken_brief)  # raises if a bytes value leaked
+            reach["brief_items_skipped"] = "decision_lineage_items_skipped" in [
+                w["code"] for w in broken_brief["warnings"]
+            ]
+            reach["brief_posture"] = plain["posture"]["decision_posture"]
+        if "pm_status" in tool_names:
+            posture = srv.pm_status()["decision_posture"]
+            reach["status_posture"] = posture["value"]
+            reach["status_posture_history"] = [
+                posture["history_total"],
+                (posture["last_change"] or {}).get("via"),
+            ]
     except Exception as e:  # noqa: BLE001 - reported and asserted by the test
         reach["error"] = f"{type(e).__name__}: {e}"
 

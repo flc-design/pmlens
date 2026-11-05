@@ -1,6 +1,6 @@
 # PM Lens Cheatsheet
 
-> **46 MCP tools + 2 compatibility aliases** for Claude Code, Codex CLI, Cursor and Grok Build.
+> **50 MCP tools + 2 compatibility aliases** for Claude Code, Codex CLI, Cursor and Grok Build.
 > Version 0.17.0 | Python 3.11+ | PyPI: `pmlens`
 
 ---
@@ -27,7 +27,7 @@ Claude Code session:
 
 | Tool | Description | Key Params |
 |------|-------------|------------|
-| `pm_init` | Initialize .pm/ directory, auto-detect project info | `project_path?`, `project_name?` |
+| `pm_init` | Initialize .pm/ directory, auto-detect project info; `decision_posture` only when the user chose it (new projects only) | `project_path?`, `project_name?`, `decision_posture?` |
 | `pm_status` | Project status: phases, tasks, blockers, velocity | `project_path?` |
 | `pm_list` | List all registered projects | _(none)_ |
 | `pm_discover` | Scan for projects and register them | `scan_path="."` |
@@ -90,9 +90,30 @@ The names below are the standard ones; the legacy names remain as aliases. See t
 | `pm_log` | Add daily log entry (auto-links to active task) | `entry`, `category="progress"` |
 | `pm_add_decision` | Record an ADR (ID auto-generated). Saved as proposed; `accepted` only when the user accepted the content | `title`, `context`, `decision`, `status="proposed"`, `origin?`, `recorded_timing?`, `decision_kind?` |
 | `pm_decision_query` | Read ADRs and their lineage, changing nothing (Lens-safe). `lifecycle="proposed"` lists ADRs awaiting the user's review; list pages with `limit` / `offset` | `action="list"`, `decision_id?` (get), `lifecycle?`, `limit=50`, `offset=0` |
-| `pm_update_decision` | Move an ADR's lifecycle (e.g. proposed → adopted once the user approves), change its links, append an evaluation or a note; the text never changes (full mode only) | `decision_id`, `lifecycle?`, `reason?`, `add_links?`, `remove_links?`, `evaluation?`, `note?` |
+| `pm_decision_brief` | What to explain one ADR to this reader with, changing nothing (Lens-safe): the facts, the explanation rules, the floor and the question to ask afterwards; the reader mode changes only the wording, what to ask and the question | `decision_id`, `judgeable_kinds?`, `reader_hint?` (`more_detail` / `simpler`) |
+| `pm_update_decision` | Move an ADR's lifecycle (e.g. proposed → adopted once the user approves), change its links, append an evaluation or a note, or record the decision's facts as a new `fact_core` version (citing the replies that caused it with `caused_by`); the text never changes; within the limits listed below, the tools never lower reversibility to `code_revertable` and keep facts adopted with the ADR fixed until it is moved back to proposed (full mode only) | `decision_id`, `lifecycle?`, `reason?`, `add_links?`, `remove_links?`, `evaluation?`, `note?`, `fact_core?` + `expected_fact_core_version?`, `caused_by?` |
+| `pm_add_explanation` | Save an explanation of an ADR written from its current fact core; every current fact must lead a paragraph, the accuracy is never checked (shown as unconfirmed), and a revision marks older ones stale (full mode only) | `decision_id`, `fact_core_version`, `paragraphs`, `question?` |
+| `pm_add_feedback` | Record the user's reply to an ADR in their own words (8 kinds, incl. `check_answer`); the declared `respondent_scope` is never checked, approval changes no lifecycle, replies are never scored (full mode only) | `decision_id`, `feedback_kind`, `text`, `explanation_id?`, `fact_ids?`, `respondent_scope="unknown"` |
+| `pm_update_decision_posture` | Change the project's decision posture (bold / cautious / unset) when the user asks, with their reason; kept in a history (full mode only) | `decision_posture`, `reason` |
 | `pm_velocity` | Velocity and trend analysis | `weeks=4` |
 | `pm_risks` | Auto-detected + manual risks | `project_path?` |
+
+#### What the decision tools guarantee, and what they do not
+
+pmlens cannot tell a person from an assistant, and `.pm/` can be edited
+directly, so the README's table splits the decision tools into what is
+guaranteed, guaranteed within limits, a convention, observed, or an optional
+mitigation (ADR-056). In short:
+
+| Kind | What |
+|---|---|
+| Guaranteed | Lens mode registers no tool that writes ADRs, explanations, replies or the posture, and `pm_decision_brief` and `pm_status` write nothing. A fact core revision or an explanation from a version that is not the current one is not saved; an explanation that leaves out a current fact is not saved (coverage only, never accuracy); older explanations are shown as stale after a revision; feedback ids are never reused |
+| Guaranteed (within limits) | No tool has an argument that sets accuracy, verification or human confirmation (checked by argument name: an assistant passing `lifecycle="adopted"` or `status="accepted"` is not detected). `respondent_scope` is a declaration and `F-revert`'s `reversibility` a versioned fact, both past the name check by design |
+| Guaranteed (within limits) | Within one ADR the tools never lower `reversibility` to `code_revertable` after the first version, and facts adopted with the ADR stay fixed until it is moved back to `proposed`. Ways around: the first version is a free declaration, a superseding ADR, moving back to `proposed` and adopting again, and editing `.pm/` by hand. Both bind an assistant only together with the `.pm/` deny below |
+| Guaranteed (within limits) | Secret-like strings matching the redaction patterns are not stored or shown, and `get` and the brief stay within their size limits; e-mail addresses, paths and IP addresses are not redacted |
+| Convention | Adopt, reject or record as accepted only on the user's word; explain from the fact core without leaving out or changing a fact; record the user's own words; change the posture only when the user asks; when unsure of reversibility, write `unknown` |
+| Observed (not a guarantee) | Lifecycle changes, posture changes, a declared `can_judge`, replies from nobody declared able to judge, reversibility changed outside the tools and facts written after adoption are shown as warnings every time. Events and the posture history can be edited by hand, so they are declarations too |
+| Optional mitigations (Claude Code only, you opt in) | Set `mcp__pmlens__pm_update_decision` and `mcp__pmlens__pm_update_decision_posture` to `ask` in permissions, and deny Edit / Write on `.pm/` (PMSERV-240) |
 
 ### Knowledge Records
 
@@ -434,7 +455,8 @@ pm-server hook post-tool-use   # PostToolUse hook handler
 ├── project.yaml        # Project metadata
 ├── tasks.yaml          # All tasks
 ├── decisions.yaml      # ADRs
-├── decision_lineage/   # One file per ADR: lifecycle, provenance, links, events
+├── decision_lineage/   # One file per ADR: lifecycle, provenance, links, events, facts, explanations, replies
+├── decision_policy.yaml # Decision posture and its history (once set)
 ├── knowledge.yaml      # Knowledge records
 ├── workflows.yaml      # Workflow instances
 ├── risks.yaml          # Manual risks
@@ -464,6 +486,11 @@ pm-server hook post-tool-use   # PostToolUse hook handler
 | RecordedTiming | `before_impl`, `during_impl`, `post_hoc`, `unknown` |
 | DecisionKind | `spec_policy`, `premise_dependent`, `technical`, `unknown` |
 | EvaluationKind | `test`, `ai_review`, `outcome`, `other` |
+| FactSource | `proposal`, `observed` (reserved; pmlens writes only proposal) |
+| Reversibility | `code_revertable`, `external_irreversible`, `unknown` (treated like external_irreversible) |
+| FeedbackKind | `premise_mismatch`, `what_if`, `unacceptable`, `try_alternative`, `approve`, `reject`, `comment`, `check_answer` (the answer to the question after an explanation; approve and reject do not change the lifecycle) |
+| RespondentScope | `can_judge`, `cannot_judge`, `unknown` (the default; a declaration pmlens never checks) |
+| DecisionPosture | `bold` (new or exploratory work), `cautious` (maintenance and fixes), `unset` (not chosen yet; acts as cautious) |
 | LogCategory | `progress`, `decision`, `blocker`, `note`, `milestone` |
 | MemoryType | `observation`, `insight`, `lesson` |
 | KnowledgeCategory | `research`, `market`, `spike`, `requirement`, `constraint`, `tradeoff`, `risk_analysis`, `spec`, `api_design` |

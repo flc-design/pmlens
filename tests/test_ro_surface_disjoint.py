@@ -492,6 +492,49 @@ class TestWidenedSurfaces:
         } <= _ALL_TOOLS
         # The ADR writer is a full-mode tool only (design §8.2, D9).
         assert "pm_update_decision" not in _RO_SEED
+        # Decision posture (S2 spec §6.3): the writer takes its own lock, so it
+        # is a ledger writer; pm_status reads the posture through
+        # read_decision_policy, which must sit in the RO closure for the
+        # disjointness checks below to look at it. The change tool is full
+        # mode only.
+        assert "change_decision_posture" in _GRAPH.ledger_writers
+        assert {"read_decision_policy", "read_policy_raw", "policy_view"} <= _RO_CLOSURE
+        assert "pm_update_decision_posture" in _ALL_TOOLS
+        assert "pm_update_decision_posture" not in _RO_SEED
+        assert "change_decision_posture" in _GRAPH.reachable({"pm_update_decision_posture"})
+        # Explanations (S2 spec §5.1, §6.3): _append_to_lineage takes the
+        # lineage lock itself, so it is a ledger writer. record_lineage_explanation
+        # only hands it a pure step, so it is not one itself (ledger_writers is
+        # not transitive); it must reach _append_to_lineage and stay out of
+        # the RO closure. The tool is full mode only.
+        assert "_append_to_lineage" in _GRAPH.ledger_writers
+        assert "_append_to_lineage" in _GRAPH.reachable({"record_lineage_explanation"})
+        assert "_append_to_lineage" in _GRAPH.reachable({"pm_add_explanation"})
+        assert not {"_append_to_lineage", "record_lineage_explanation"} & _RO_CLOSURE
+        # Feedback goes the same way (S2 spec §5.1, §6.3).
+        assert "_append_to_lineage" in _GRAPH.reachable({"record_lineage_feedback"})
+        assert "_append_to_lineage" in _GRAPH.reachable({"pm_add_feedback"})
+        assert "record_lineage_feedback" not in _RO_CLOSURE
+        assert "pm_add_explanation" in _ALL_TOOLS
+        assert "pm_add_explanation" not in _RO_SEED
+        assert "pm_add_feedback" in _ALL_TOOLS
+        assert "pm_add_feedback" not in _RO_SEED
+        # The brief (S2 spec §3.5, §6.3) sits on the Lens surface: its builder
+        # and the posture reader must be in the RO closure, or the
+        # disjointness checks below would pass without looking at them, and
+        # the builder reaches no ledger writer and nothing that shells out.
+        assert "pm_decision_brief" in _RO_SEED
+        assert {
+            "build_decision_brief",
+            "brief_call_error",
+            "read_decision_policy",
+            "lineage_view",
+            "scrub_view",
+        } <= _RO_CLOSURE
+        brief_closure = _GRAPH.reachable({"build_decision_brief"})
+        assert not brief_closure & _GRAPH.ledger_writers
+        assert not brief_closure & _GRAPH.shell_out_fns
+        assert not brief_closure & _GRAPH.subprocess_fns
 
     def test_ro_surface_never_writes_a_ledger(self):
         leaked = _RO_CLOSURE & _GRAPH.ledger_writers

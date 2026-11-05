@@ -89,7 +89,7 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
 <header class="hero">
   <h1>PM Lens — Architecture &amp; Behavior</h1>
   <div class="subtitle">Claude Code 用プロジェクト管理 MCP サーバーの全体機能・データフロー・状態遷移マップ</div>
-  <div class="meta">バージョン 0.17.0 (2026-08-01 時点) · 46 MCP tools · 17 RO + 2 outbox-RW + 27 full-RW（<code>pm_decision_query</code> と <code>pm_update_decision</code> は v0.17.0 で追加）· 1,530 tests · MIT</div>
+  <div class="meta">バージョン 0.17.0 (2026-11-01 時点。Decision Lineage S2 は未リリース) · 50 MCP tools · 18 RO + 2 outbox-RW + 30 full-RW（<code>pm_decision_brief</code>・<code>pm_add_explanation</code>・<code>pm_add_feedback</code>・<code>pm_update_decision_posture</code> は S2 で追加）· 4,137 tests · MIT</div>
   <div class="meta">関連ドキュメント: <a href="user-guide.html">User Guide (CLI &amp; UX Tips)</a> · <a href="workflow-guide.html">Workflow Guide (作り方)</a> · <a href="cheatsheet.ja.md">Cheatsheet (ja)</a></div>
 </header>
 
@@ -262,8 +262,11 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
      （既存の下書きDBを共有する。<a href="content-tool-migration.md">移行ガイド</a>参照）。
      v0.17.0 で、ADR と lineage を読む読み取り専用の <code>pm_decision_query</code>（Lens にも登録）と、
      ADR の lifecycle・関係・evaluation・note を記録する <code>pm_update_decision</code>（full モードだけ）を追加した。
-     Full は46機能・48登録名、Lens は17登録名（Desktop outbox有効時19）。</p>
-  <p>46 個の MCP ツールがカテゴリ別に提供される。配布モードによって登録される ツール集合が異なる:
+     Decision Lineage S2 で、1 件の ADR の説明に要るものを返す読み取り専用の <code>pm_decision_brief</code>（Lens にも登録）と、
+     説明・返事・プロジェクトの姿勢を記録する <code>pm_add_explanation</code>・<code>pm_add_feedback</code>・<code>pm_update_decision_posture</code>（full モードだけ）を追加し、
+     <code>pm_update_decision</code> に版つきの事実（<code>fact_core</code>）と <code>caused_by</code> を足した。
+     Full は50機能・52登録名、Lens は18登録名（Desktop outbox有効時20）。</p>
+  <p>50 個の MCP ツールがカテゴリ別に提供される。配布モードによって登録される ツール集合が異なる:
      <span class="badge badge-ro">RO</span> は Lens モード (<code>PM_LENS=1</code>) で利用可能、
      <span class="badge" style="background:#ede9fe;color:#6d28d9">OUTBOX</span> は Lens + <code>PM_DESKTOP_WRITE=1</code> で追加開放される Desktop Outbox 書込み tool、
      <span class="badge badge-rw">RW</span> は full PM Lens (Claude Code / Codex 配布) のみ。</p>
@@ -314,10 +317,14 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
     <tr><td><code>pm_outbox_merge</code></td><td>pending entries を target project の memory.db / daily log へ promote</td><td><span class="badge badge-rw">RW</span></td></tr>
     <tr><td><code>pm_outbox_reject</code></td><td>pending entries を reason 付きで reject (append-only 保持)</td><td><span class="badge badge-rw">RW</span></td></tr>
 
-    <tr><td rowspan="3">Decisions (ADR)</td>
+    <tr><td rowspan="7">Decisions (ADR)</td>
       <td><code>pm_add_decision</code></td><td>Architecture Decision Record の登録</td><td><span class="badge badge-rw">RW</span></td></tr>
     <tr><td><code>pm_decision_query</code></td><td>ADR と lineage の読み取り (list/get。書き込みなし、v0.17.0)</td><td><span class="badge badge-ro">RO</span></td></tr>
-    <tr><td><code>pm_update_decision</code></td><td>ADR の lifecycle を遷移表に沿って移し、links・evaluation・note を記録 (本文は変えない。status は lifecycle の射影。v0.17.0)</td><td><span class="badge badge-rw">RW</span></td></tr>
+    <tr><td><code>pm_update_decision</code></td><td>ADR の lifecycle を遷移表に沿って移し、links・evaluation・note を記録 (本文は変えない。status は lifecycle の射影。v0.17.0)。S2 で版つきの事実 <code>fact_core</code> と、きっかけの返事を示す <code>caused_by</code> を追加 (可逆性は code_revertable へ下げない。事実を持って採択した ADR の事実は proposed に戻すまで固定)</td><td><span class="badge badge-rw">RW</span></td></tr>
+    <tr><td><code>pm_decision_brief</code></td><td>1 件の ADR を読み手に説明するための事実・説明の規則・下限 (floor)・説明後の 1 問 (読み取り専用、S2)</td><td><span class="badge badge-ro">RO</span></td></tr>
+    <tr><td><code>pm_add_explanation</code></td><td>AI が fact_core から書いた説明を保存 (全事実の網羅と版だけを確かめ、正確さは unconfirmed、S2)</td><td><span class="badge badge-rw">RW</span></td></tr>
+    <tr><td><code>pm_add_feedback</code></td><td>ユーザーの返事を言葉のまま記録 (8 種。respondent_scope は申告で検証しない。lifecycle は変えない、S2)</td><td><span class="badge badge-rw">RW</span></td></tr>
+    <tr><td><code>pm_update_decision_posture</code></td><td>プロジェクトの姿勢 (bold = 攻め / cautious = 慎重 / unset = 未設定) をユーザーの理由付きで変更 (.pm/decision_policy.yaml に履歴、S2)</td><td><span class="badge badge-rw">RW</span></td></tr>
 
     <tr><td rowspan="3">Knowledge records</td>
       <td><code>pm_record</code></td><td>research/spec/tradeoff/risk_analysis を構造化記録</td><td><span class="badge badge-rw">RW</span></td></tr>
@@ -332,9 +339,17 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
     <tr><td><code>pm_workflow_list</code></td><td>active/completed/paused/abandoned 一覧</td><td><span class="badge badge-ro">RO</span></td></tr>
     <tr><td><code>pm_workflow_templates</code></td><td>builtin + custom テンプレート一覧</td><td><span class="badge badge-ro">RO</span></td></tr>
   </table>
-  <p class="muted">17 RO + 2 OUTBOX-RW + 27 Full-RW = 46 ツール (2026-08-01 時点の 44 ツールに、v0.17.0 で追加した <code>pm_decision_query</code> と <code>pm_update_decision</code> を加えた数, v0.17.0)。Lens 配布では RO_ALLOWLIST 外の
+  <p class="muted">18 RO + 2 OUTBOX-RW + 30 Full-RW = 50 ツール (S1 までの 46 ツールに、Decision Lineage S2 で追加した <code>pm_decision_brief</code>・<code>pm_add_explanation</code>・<code>pm_add_feedback</code>・<code>pm_update_decision_posture</code> を加えた数。互換名 2 個を含む登録名は 52, v0.17.0)。Lens 配布では RO_ALLOWLIST 外の
      ツールが FastMCP に未登録 = 構造的不変条件 (ADR-015/017/018)。OUTBOX 2 ツールは <code>PM_DESKTOP_WRITE=1</code>
      が追加で立った時のみ登録され、main <code>.pm/memory.db</code> は touch しない (ADR-019)。</p>
+  <p class="muted">Decision ツールの保証の区分 (ADR-056「検証能力を過大に見せない」。詳細は README の表):
+     <strong>保証</strong> — Lens は ADR・説明・返事・姿勢の書き込み系ツールを登録せず、<code>pm_decision_brief</code> と <code>pm_status</code> は何も書かない。
+     版が現在でない改版と説明、全事実を網羅しない説明は保存されない。
+     <strong>保証 (範囲つき)</strong> — 同じ ADR の中で可逆性を code_revertable へ下げる MCP / CLI の経路は無く、事実を持って採択した ADR の事実は proposed に戻すまで変えられない。
+     どちらも AI に対して効くのは <code>.pm/</code> への Edit / Write の deny (PMSERV-240) と組み合わせた時だけである。
+     <strong>規約</strong> — 説明の正確さ、返事がユーザーの言葉であること、姿勢をユーザーが決めること。
+     <strong>観測</strong> — 姿勢の変更・申告された回答者の範囲・ツールの外での可逆性の変更などを毎回 warnings で示す。
+     <strong>緩和策</strong> (Claude Code 専用、文書のみ) — permissions の ask と <code>.pm/</code> の deny。</p>
 </section>
 
 <section class="card" id="lens">
@@ -397,18 +412,18 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
 
     <!-- Outcomes: RO registered + RW excluded -->
     <rect x="100" y="210" width="320" height="60" rx="6" fill="#dcfce7" stroke="#16a34a" stroke-width="1.5"/>
-    <text x="260" y="232" text-anchor="middle" font-weight="700">FastMCP に登録 (17 tools)</text>
+    <text x="260" y="232" text-anchor="middle" font-weight="700">FastMCP に登録 (18 tools)</text>
     <text x="260" y="250" text-anchor="middle" fill="#666" font-size="10">pm_status, pm_next, pm_tasks, pm_blockers, pm_recall,</text>
     <text x="260" y="264" text-anchor="middle" fill="#666" font-size="10">pm_memory_search, pm_dashboard, pm_workflow_status …</text>
 
     <rect x="460" y="210" width="320" height="60" rx="6" fill="#fee2e2" stroke="#dc2626" stroke-width="1.5"/>
-    <text x="620" y="232" text-anchor="middle" font-weight="700">FastMCP 未登録 (28 tools)</text>
+    <text x="620" y="232" text-anchor="middle" font-weight="700">FastMCP 未登録 (34 tools)</text>
     <text x="620" y="250" text-anchor="middle" fill="#666" font-size="10">pm_add_task, pm_update_task, pm_log, pm_remember,</text>
-    <text x="620" y="264" text-anchor="middle" fill="#666" font-size="10">pm_init, pm_cleanup, pm_workflow_start, pm_outbox_pending …</text>
+    <text x="620" y="264" text-anchor="middle" fill="#666" font-size="10">pm_init, pm_cleanup, pm_workflow_start, pm_add_feedback …</text>
 
     <!-- Result -->
     <rect x="280" y="300" width="320" height="40" rx="6" fill="#fff" stroke="#888"/>
-    <text x="440" y="324" text-anchor="middle" font-weight="700">MCP クライアントは RO 17 tools のみ確認 (+OUTBOX-RW 2 if PM_DESKTOP_WRITE=1)</text>
+    <text x="440" y="324" text-anchor="middle" font-weight="700">MCP クライアントは RO 18 tools のみ確認 (+OUTBOX-RW 2 if PM_DESKTOP_WRITE=1)</text>
 
     <line x1="260" y1="270" x2="400" y2="300" stroke="#888" stroke-width="1" marker-end="url(#arrow2)"/>
     <line x1="620" y1="270" x2="480" y2="300" stroke="#dc2626" stroke-width="1" marker-end="url(#redarrow)"/>
@@ -605,7 +620,8 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
 ├── project.yaml        <span class="comment"># メタデータ + phases + pm_schema</span>
 ├── tasks.yaml          <span class="comment"># 全タスク (parent_id で issue 親子)</span>
 ├── decisions.yaml      <span class="comment"># ADR-NNN</span>
-├── decision_lineage/   <span class="comment"># ADR-NNN.yaml: lifecycle・申告・links・events</span>
+├── decision_lineage/   <span class="comment"># ADR-NNN.yaml: lifecycle・申告・links・events・事実・説明・返事</span>
+├── decision_policy.yaml <span class="comment"># プロジェクトの姿勢と変更の履歴 (S2。設定した時に作る)</span>
 ├── workflows.yaml      <span class="comment"># WF-NNN 状態マシン</span>
 ├── knowledge.yaml      <span class="comment"># KR-NNN (research/spec/etc)</span>
 ├── memory.db           <span class="comment"># SQLite + FTS5 (per-project)</span>
@@ -643,7 +659,7 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
     <tr><th></th><th>PyPI <code>pmlens</code></th><th>.mcpb bundle (Lens)</th><th>.mcpb + PM_DESKTOP_WRITE</th></tr>
     <tr><td><strong>対象 host</strong></td><td>Claude Code (CLI) / Codex CLI</td><td>Claude Cowork / その他 viewer</td><td>Claude Desktop (Phase 2 bridge)</td></tr>
     <tr><td><strong>インストール</strong></td><td><code>pipx install pmlens</code> &rarr; <code>pmlens install</code></td><td>.mcpb ファイルを host に drag &amp; drop</td><td>.mcpb + manifest が <code>PM_DESKTOP_WRITE=1</code> を auto-propagate (PMSERV-100)</td></tr>
-    <tr><td><strong>登録 tools</strong></td><td>Full RW (46 tools)</td><td>Lens RO (17 tools)</td><td>RO 17 + OUTBOX-RW 2 = 19 tools</td></tr>
+    <tr><td><strong>登録 tools</strong></td><td>Full RW (50 tools、互換名を含め 52 登録名)</td><td>Lens RO (18 tools)</td><td>RO 18 + OUTBOX-RW 2 = 20 tools</td></tr>
     <tr><td><strong>環境変数</strong></td><td>未設定</td><td><code>PM_LENS=1</code></td><td><code>PM_LENS=1, PM_DESKTOP_WRITE=1</code></td></tr>
     <tr><td><strong>SQLite モード</strong></td><td>RW main + outbox</td><td><code>?mode=ro&amp;immutable=1</code> main / outbox 不触</td><td>main は RO 不変、outbox <code>~/.pm/desktop/desktop.db</code> は append-only RW</td></tr>
     <tr><td><strong>同一バイナリ?</strong></td><td>はい — 配布物は 1 種類、env で role gating</td><td colspan="2" style="text-align:center">←</td></tr>
@@ -763,7 +779,7 @@ header.hero .subtitle { color: var(--muted); margin-top: 4px; }
 </section>
 
 <footer style="text-align: center; color: var(--muted); font-size: 12px; margin: 24px 0;">
-  Generated 2026-06-15, counts refreshed 2026-08-06 · PM Lens v0.17.0 · Phase 2 Desktop Outbox (ADR-019) shipped · 1,530 tests · 46 MCP tools
+  Generated 2026-06-15, counts refreshed 2026-11-01 · PM Lens v0.17.0 + Decision Lineage S2 (unreleased) · Phase 2 Desktop Outbox (ADR-019) shipped · 4,137 tests · 50 MCP tools
 </footer>
 
 </main>

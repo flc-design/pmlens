@@ -554,6 +554,8 @@ def pm_update_decision(
 - accuracy・verified・confirmed・human_* の類（正確性の確認や人間による確認の設定）
 - mode・reader_hint
 - caused_by（S2 まで予約）
+
+S2 での注記: caused_by は S2（PMSERV-231）で引数になり、fact_core と expected_fact_core_version も足した（S2 仕様 §3.1）。mode・reader_hint は書き込み系のツールには今も無く、読み取り専用の pm_decision_brief だけが取る（§8.1 の D8 の注記）。
 - anchor（ADR との対応はサーバーだけが決める）
 - dry_run
 
@@ -970,7 +972,7 @@ adopted with pm_update_decision, giving the approval as the reason.
 | D2 | lineage の無い ADR が derived / unknown / not_recorded で返る。読んだ後も decisions.yaml のバイトが変わらず、`.locks/` も `decision_lineage/` も作られない。本リポの .pm のコピーで、58 件すべてを例外なく返せる | tests/test_decision_query.py（新設）と、実データでの検証（§9.3） |
 | D3 | lineage を書いた後に、現行の `storage.add_decision`（storage.py:438-446）を呼んでも、0.16.0 と同じ形の書き戻し（extra=ignore のモデルで decisions.yaml を全件書き直す）をしても、lineage のバイトと射影された status が変わらない | tests/test_lineage.py |
 | D7（S1 の分） | 同じ ADR に、N 本の note の追記をスレッドとプロセスから並行して呼ぶと、note の event がちょうど N 件になる（lifecycle の遷移は並行させない。後続が unchanged や transition_not_allowed になり件数が決まらないため）。pm_add_decision を並行して呼んでも、id が一意で、それぞれの lineage の decision_id と anchor が一致する。フィードバック ID の部分は S2 | tests/test_lineage.py（前例は tests/test_concurrent.py） |
-| D8 | (a) 全 `@_tool()` の引数名に `accura|verif|confirm|human|reader_hint|anchor|^mode$` が無い。今は該当 0 件で、`kind` は pm_draft_content / pm_draft_x の 2 件だけ。(b) pm_update_decision の引数集合が §4.3 の一覧と完全に一致する（足す時は意図してテストを直す）。(c) `decision_kind` が pm_add_decision にしか無い。(d) `origin="human"` と `"ai_proposed_human_decided"` の後付けが `declared_backfill_value_not_allowed` で拒否され、ファイルのバイトが変わらない。**D8 が検査するのは引数の名前と後付けの値だけで、意味の上で同じ経路（AI が pm_update_decision に lifecycle=adopted を、pm_add_decision に status=accepted や origin=human / ai_proposed_human_decided を渡すこと）は検出しない**（§8.4） | tests/test_decision_update.py（新設） |
+| D8 | (a) 全 `@_tool()` の引数名に `accura|verif|confirm|human|reader_hint|anchor|^mode$` が無い。今は該当 0 件で、`kind` は pm_draft_content / pm_draft_x の 2 件だけ。(b) pm_update_decision の引数集合が §4.3 の一覧と完全に一致する（足す時は意図してテストを直す）。(c) `decision_kind` が pm_add_decision にしか無い。(d) `origin="human"` と `"ai_proposed_human_decided"` の後付けが `declared_backfill_value_not_allowed` で拒否され、ファイルのバイトが変わらない。**D8 が検査するのは引数の名前と後付けの値だけで、意味の上で同じ経路（AI が pm_update_decision に lifecycle=adopted を、pm_add_decision に status=accepted や origin=human / ai_proposed_human_decided を渡すこと）は検出しない**（§8.4）。S2 での注記: (a) の対象から、RO_ALLOWLIST にある読み取り専用の pm_decision_brief の `judgeable_kinds`・`reader_hint` を除き（この 2 つを持つツールが pm_decision_brief だけであることを固定）、(b) の引数集合に `fact_core`・`expected_fact_core_version`・`caused_by` を足した。名前の検査をすり抜ける pm_add_feedback の `respondent_scope` と F-revert の `reversibility` の扱いは S2 仕様 §6.4 | tests/test_decision_update.py（新設） |
 | D9 | PM_LENS=1 で pm_decision_query が登録され、pm_update_decision は登録されない。T6 の引数付きの呼び出しで書き込みが 0 件。stdio の wire でも同じ | tests/test_lens_mode.py（自動）、tests/test_lens_invariant.py、tests/test_launch_surfaces.py |
 | D11（S1 の分） | reason / note / evaluation に入れた偽の AWS キーが、lineage ファイルにも応答にも残らない。件数だけが警告に出る。pm_decision_query の出口の redact は、title・未知のキー名・未知の status・events の text に入れた秘密でも効く。秘密鍵は本体ごと残らない（§4.2）。壊れた decisions.yaml（引用符の閉じていない行に秘密）と、ValidationError（title が list で中に秘密）で、pm_decision_query・pm_update_decision・pm_add_decision のエラーの dict に秘密の値が出ない | tests/test_decision_update.py、test_decision_query.py、test_server.py、test_redaction.py |
 
@@ -1025,6 +1027,7 @@ adopted with pm_update_decision, giving the approval as the reason.
   - 今の照合は basename だけを見ているため（:459）、`.pm/decision_lineage/ADR-001.yaml` への書き込みを止められない。
   - テストは tests/test_prompt_pack.py に足す。
   - `decision_policy.yaml` は S2 で足す。その他の未登録の名前（tracks.yaml など）は別のイシュー候補にする（§1.5）。
+    - S2 での注記: `decision_policy.yaml` を予約名に足すのはやめた。ADR-060 の 4（prompt-pack が `.pm` の中に書けるのは `.pm/exports` の下だけ）で既に塞がれており、拒否の一覧に頼らない（ADR-060 の 5）。それをテストで固定した（S2 仕様 §1.6・§7.1 の 255、tests/test_prompt_pack.py）。0.16.0 のホストはこのファイルを上書きできるので、CHANGELOG の Upgrade notes に書いた。
 - **Desktop**: mcpb（Desktop 0.15.0）を更新するまで、新しいツールは見えない。CHANGELOG の Upgrade notes に書く。
 - **git 不使用**: S1 のどの経路も subprocess を使わない（tests/test_ro_surface_disjoint.py:480-486 の full-mode 検査で固定されている）。
 

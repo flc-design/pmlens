@@ -51,7 +51,15 @@ from pmlens.lineage import (
     project_status,
 )
 from pmlens.models import Consequences, Decision, DecisionStatus, PmServerError
-from pmlens.server import pm_add_decision, pm_decision_query, pm_update_decision
+from pmlens.server import (
+    pm_add_decision,
+    pm_add_explanation,
+    pm_add_feedback,
+    pm_decision_brief,
+    pm_decision_query,
+    pm_update_decision,
+    pm_update_decision_posture,
+)
 
 NOW = "2026-10-05T03:12:00Z"
 SECRET = "AKIA" + "Q" * 16
@@ -325,6 +333,7 @@ class TestInvariants:
 
         no_reason = _update(tmp_project, lifecycle="deprecated")
         assert no_reason["code"] == "reason_required"
+        assert no_reason["field"] == "reason"  # S2 spec §4
         retired = _update(tmp_project, lifecycle="deprecated", reason="no successor was recorded")
         assert retired["decision_status"] == "deprecated"
         assert _status(tmp_project) is DecisionStatus.DEPRECATED
@@ -853,6 +862,7 @@ class TestBackfill:
         _add(tmp_project)
         assert _update(tmp_project, origin="ai_auto")["code"] == "reason_required"
         assert _update(tmp_project, recorded_timing="post_hoc")["code"] == "reason_required"
+        assert _update(tmp_project, origin="ai_auto")["field"] == "reason"  # S2 spec §4
 
 
 # ─── D8: no argument that claims more than pmlens can know ───
@@ -877,9 +887,16 @@ def _tool_parameters() -> dict[str, list[str]]:
 
 _TOOL_PARAMETERS = _tool_parameters()
 _FORBIDDEN_NAME = re.compile(r"accura|verif|confirm|human|reader_hint|anchor|^mode$")
+# The reader's mode, which only the read-only brief takes (S2 spec §3.5,
+# §6.4): it changes how an explanation is worded and what the reader is asked,
+# never a record. D8 (a) excludes it there and nowhere else.
+_READER_MODE_ARGUMENTS = ("judgeable_kinds", "reader_hint")
+_READER_MODE_TOOL = "pm_decision_brief"
 
 # Design §4.3: the whole argument list of pm_update_decision. Adding one is a
-# deliberate change to this set (and to the design).
+# deliberate change to this set (and to the design). S2 spec §3.1 adds the fact
+# core, its version and caused_by (the feedback of the same ADR behind a
+# revision or an evaluation).
 _UPDATE_PARAMETERS = {
     "decision_id",
     "lifecycle",
@@ -891,8 +908,14 @@ _UPDATE_PARAMETERS = {
     "note",
     "origin",
     "recorded_timing",
+    "fact_core",
+    "expected_fact_core_version",
+    "caused_by",
     "project_path",
 }
+# Words that would make a recorded reply a grade of the person (S2 spec §6.1
+# D8 (e)).
+_SCORE_NAME = re.compile(r"score|rating|grade|rank|correct")
 
 
 class TestD8:
@@ -906,6 +929,7 @@ class TestD8:
             for tool, names in _TOOL_PARAMETERS.items()
             for name in names
             if _FORBIDDEN_NAME.search(name)
+            and not (tool == _READER_MODE_TOOL and name in _READER_MODE_ARGUMENTS)
         ]
         assert hits == []
         # "kind" alone is the content pipeline's draft kind, nothing else.
@@ -913,6 +937,31 @@ class TestD8:
             "pm_draft_content",
             "pm_draft_x",
         ]
+
+    def test_a_only_the_brief_takes_the_reader_mode(self):
+        # S2 spec §6.4: no tool that writes takes the reader's mode, so a mode
+        # can never change a record; the brief, which writes nothing, is the
+        # one tool that takes it. The exclusion above covers only its name.
+        for name in _READER_MODE_ARGUMENTS:
+            takers = sorted(t for t, names in _TOOL_PARAMETERS.items() if name in names)
+            assert takers == [_READER_MODE_TOOL], name
+        assert _FORBIDDEN_NAME.search("reader_hint")
+        assert _READER_MODE_TOOL in server.RO_ALLOWLIST
+        assert _TOOL_PARAMETERS[_READER_MODE_TOOL] == [
+            "decision_id",
+            "judgeable_kinds",
+            "reader_hint",
+            "project_path",
+        ]
+        signature = inspect.signature(pm_decision_brief)
+        required = [
+            name
+            for name, parameter in signature.parameters.items()
+            if parameter.default is inspect.Parameter.empty
+        ]
+        assert required == ["decision_id"]
+        assert signature.parameters["judgeable_kinds"].default is None
+        assert signature.parameters["reader_hint"].default is None
 
     def test_a_the_name_check_would_catch_them(self):
         for name in ("accuracy", "verified", "user_confirmed", "human_reviewed", "anchor", "mode"):
@@ -929,22 +978,131 @@ class TestD8:
         ]
         assert required == ["decision_id"]
         assert signature.parameters["evaluation_kind"].default == "other"
+        # The S1 arguments keep their positions; the S2 ones come before
+        # project_path, which stays last (S2 spec §3.1).
+        assert list(signature.parameters)[:10] == [
+            "decision_id",
+            "lifecycle",
+            "reason",
+            "add_links",
+            "remove_links",
+            "evaluation",
+            "evaluation_kind",
+            "note",
+            "origin",
+            "recorded_timing",
+        ]
+        assert list(signature.parameters)[-1] == "project_path"
+        assert signature.parameters["fact_core"].default is None
+        assert signature.parameters["expected_fact_core_version"].default is None
+        assert signature.parameters["caused_by"].default is None
+        assert list(signature.parameters)[-4:-1] == [
+            "fact_core",
+            "expected_fact_core_version",
+            "caused_by",
+        ]
         for absent in (
             "title",
             "context",
             "decision",
             "consequences_positive",
             "decision_kind",
-            "caused_by",
             "dry_run",
             "status",
         ):
             assert absent not in _UPDATE_PARAMETERS
 
+    def test_b_the_posture_tool_takes_exactly_the_designed_arguments(self):
+        # S2 spec §3.8, §6.1 D8 (b): the posture, the user's reason and the
+        # project; nothing that sets who decided or how it was confirmed.
+        assert _TOOL_PARAMETERS["pm_update_decision_posture"] == [
+            "decision_posture",
+            "reason",
+            "project_path",
+        ]
+        signature = inspect.signature(pm_update_decision_posture)
+        required = [
+            name
+            for name, parameter in signature.parameters.items()
+            if parameter.default is inspect.Parameter.empty
+        ]
+        assert required == ["decision_posture", "reason"]
+        assert _TOOL_PARAMETERS["pm_init"][-1] == "decision_posture"
+
+    def test_b_the_explanation_tool_takes_exactly_the_designed_arguments(self):
+        # S2 spec §3.2, §6.1 D8 (b): no mode, reader or judgeable-kind argument,
+        # and nothing that sets the accuracy (it is always unconfirmed).
+        assert _TOOL_PARAMETERS["pm_add_explanation"] == [
+            "decision_id",
+            "fact_core_version",
+            "paragraphs",
+            "question",
+            "project_path",
+        ]
+        signature = inspect.signature(pm_add_explanation)
+        required = [
+            name
+            for name, parameter in signature.parameters.items()
+            if parameter.default is inspect.Parameter.empty
+        ]
+        assert required == ["decision_id", "fact_core_version", "paragraphs"]
+        assert signature.parameters["question"].default is None
+
+    def test_b_the_feedback_tool_takes_exactly_the_designed_arguments(self):
+        # S2 spec §3.4, §6.1 D8 (b): the reply, what it is about and the
+        # declared scope; no mode, no reader, nothing that sets a review.
+        assert _TOOL_PARAMETERS["pm_add_feedback"] == [
+            "decision_id",
+            "feedback_kind",
+            "text",
+            "explanation_id",
+            "fact_ids",
+            "respondent_scope",
+            "project_path",
+        ]
+        signature = inspect.signature(pm_add_feedback)
+        required = [
+            name
+            for name, parameter in signature.parameters.items()
+            if parameter.default is inspect.Parameter.empty
+        ]
+        assert required == ["decision_id", "feedback_kind", "text"]
+        assert signature.parameters["respondent_scope"].default == "unknown"
+        assert signature.parameters["explanation_id"].default is None
+        assert signature.parameters["fact_ids"].default is None
+
+    def test_b_a_recorded_reply_cannot_be_changed_afterwards(self):
+        # S2 spec §6.1 (231): no tool names a recorded reply to change it, so
+        # a reply cannot be upgraded later (to can_judge or to another kind).
+        # caused_by only cites replies; pm_add_feedback only appends.
+        takes_a_reply = sorted(
+            tool
+            for tool, names in _TOOL_PARAMETERS.items()
+            if any("feedback" in name for name in names) or "caused_by" in names
+        )
+        assert takes_a_reply == ["pm_add_feedback", "pm_update_decision"]
+        assert [n for n in _TOOL_PARAMETERS["pm_add_feedback"] if "feedback" in n] == [
+            "feedback_kind"
+        ]
+        assert not any("feedback" in name for name in _TOOL_PARAMETERS["pm_update_decision"])
+        assert [t for t, names in _TOOL_PARAMETERS.items() if "respondent_scope" in names] == [
+            "pm_add_feedback"
+        ]
+        assert sorted(t for t in _TOOL_PARAMETERS if "feedback" in t) == ["pm_add_feedback"]
+
     def test_c_decision_kind_is_only_declared_when_recording(self):
         assert [t for t, names in _TOOL_PARAMETERS.items() if "decision_kind" in names] == [
             "pm_add_decision"
         ]
+
+    def test_e_no_argument_scores_a_reply(self):
+        # S2 spec §6.1 D8 (e): replies are recorded, never scored. The keys a
+        # stored reply carries are checked in test_feedback.
+        for tool in ("pm_add_feedback", "pm_update_decision"):
+            hits = [name for name in _TOOL_PARAMETERS[tool] if _SCORE_NAME.search(name)]
+            assert hits == [], tool
+        for name in ("score", "rating", "grade", "rank", "is_correct"):
+            assert _SCORE_NAME.search(name), name
 
     @pytest.mark.parametrize("origin", ["human", "ai_proposed_human_decided"])
     @pytest.mark.parametrize("has_lineage", [True, False], ids=["lineage", "no-lineage"])
@@ -1003,7 +1161,18 @@ class TestToolDescriptions:
         assert "ai_proposed_human_decided (you proposed it and the user decided its content)" in doc
         assert "Recording as accepted returns a warning to relay to the user" in doc
 
-    @pytest.mark.parametrize("tool", [pm_add_decision, pm_update_decision, pm_decision_query])
+    @pytest.mark.parametrize(
+        "tool",
+        [
+            pm_add_decision,
+            pm_update_decision,
+            pm_decision_query,
+            pm_update_decision_posture,
+            pm_add_explanation,
+            pm_add_feedback,
+            pm_decision_brief,
+        ],
+    )
     def test_descriptions_carry_no_ticket_or_adr_numbers(self, tool: Callable):
         doc = _description(tool)
         assert not re.search(r"PMSERV|ADR-\d|docs/", doc), tool.__name__

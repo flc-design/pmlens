@@ -33,6 +33,12 @@ lock while a lineage lock is held, or a second lineage lock, raises
 labels are not ranked and behave as before. Lineage files are read through
 ``lineage.read_lineage_raw`` (bounded, lock-free) and written only through
 ``_save_yaml`` from the two composite functions above.
+
+The project's decision posture (S2) has a lock of its own,
+``.pm/.locks/decision_policy.lock``, taken alone: ``change_decision_posture``
+takes no other lock while it holds it, and no writer takes it inside another
+lock. The label is not ranked, so the run-time check above does not cover it;
+tests/test_decision_posture.py pins the convention.
 """
 
 from __future__ import annotations
@@ -53,6 +59,7 @@ from filelock import Timeout as FileLockTimeout
 from pydantic import BaseModel
 
 from . import lineage as _lineage
+from . import policy as _policy
 from . import safe_yaml as _safe_yaml
 from .ledger_errors import LedgerReadError, LedgerWriteRefused, build_record, build_records
 from .lineage import LineageChange, LineageWriteRefused
@@ -66,6 +73,7 @@ from .models import (
     Milestone,
     PmServerError,
     Project,
+    ProjectNotFoundError,
     Registry,
     RegistryEntry,
     Risk,
@@ -806,14 +814,30 @@ class _SizeCapExceededError(Exception):
     """The text a :class:`_CappedText` holds would exceed its cap."""
 
 
+def written_size(text: str) -> int:
+    """How many bytes ``_save_yaml(root=...)`` writes for ``text`` (S2 spec §2.8).
+
+    It writes the platform's newlines, so on Windows every newline becomes two
+    bytes on disk, and readers cap a file by its size on disk
+    (``lineage._read_bounded``). Comparing the LF text's UTF-8 length with a
+    cap would accept a lineage that is then too large to read back; every
+    size cap of a rewritten ledger counts through this one function instead.
+    """
+    size = len(text) if text.isascii() else len(text.encode("utf-8"))
+    if os.linesep != "\n":
+        size += text.count("\n") * (len(os.linesep.encode("utf-8")) - 1)
+    return size
+
+
 class _CappedText:
-    """A text stream for ``safe_dump`` that refuses to hold more than ``limit`` UTF-8 bytes.
+    """A text stream for ``safe_dump`` that refuses to hold more than ``limit`` bytes on disk.
 
     safe_dump writes a string out once per place it appears (PyYAML never
     gives a str an anchor), so a small lineage whose unknown keys repeat one
     long string through aliases expands on every rewrite: a 45 KB file took
     20 s and 300 MB to dump, under both locks. Counting while the emitter
-    writes stops after about ``limit`` bytes instead.
+    writes stops after about ``limit`` bytes instead. The bytes are counted as
+    ``_save_yaml`` writes them (:func:`written_size`).
     """
 
     def __init__(self, limit: int) -> None:
@@ -827,7 +851,7 @@ class _CappedText:
         Raises:
             _SizeCapExceededError: The text would exceed the cap.
         """
-        self._size += len(text) if text.isascii() else len(text.encode("utf-8"))
+        self._size += written_size(text)
         if self._size > self._limit:
             raise _SizeCapExceededError
         self._parts.append(text)
@@ -840,13 +864,20 @@ class _CappedText:
         return "".join(self._parts)
 
 
-def _dump_lineage_capped(doc: Mapping, decision_id: str, max_bytes: int) -> str | None:
-    """``lineage.dump_lineage``, giving up once the text would exceed ``max_bytes``.
+def _dump_yaml_capped(doc: Mapping, header_name: str, max_bytes: int) -> str | None:
+    """The text ``_save_yaml`` writes for ``doc``, giving up once it would exceed ``max_bytes``.
 
-    Produces the same text (header included) as ``lineage.dump_lineage`` and
-    ``_save_yaml``; lineage.py cannot hold this because it never writes, not
-    even to a stream. The time and memory a rewrite takes under the locks stay
-    proportional to the cap, whatever the loaded document repeats.
+    Produces the same text (header included) as ``_save_yaml`` with the LF
+    newlines it holds before writing; ``max_bytes`` is compared with what
+    goes to disk (:func:`written_size`). lineage.py cannot hold this because
+    it never writes, not even to a stream. The time and memory a rewrite takes
+    under a lock stay proportional to the cap, whatever the loaded document
+    repeats.
+
+    Args:
+        doc: The document.
+        header_name: The name in the file's comment header.
+        max_bytes: The cap, in bytes as written.
 
     Returns:
         The text, or ``None`` when it would be larger than ``max_bytes``.
@@ -858,7 +889,7 @@ def _dump_lineage_capped(doc: Mapping, decision_id: str, max_bytes: int) -> str 
     """
     out = _CappedText(max_bytes)
     try:
-        out.write(_yaml_header(_lineage.lineage_header_name(decision_id)))
+        out.write(_yaml_header(header_name))
         yaml.safe_dump(
             doc,
             out,
@@ -869,6 +900,11 @@ def _dump_lineage_capped(doc: Mapping, decision_id: str, max_bytes: int) -> str 
     except _SizeCapExceededError:
         return None
     return out.getvalue()
+
+
+def _dump_lineage_capped(doc: Mapping, decision_id: str, max_bytes: int) -> str | None:
+    """``lineage.dump_lineage`` under a cap: :func:`_dump_yaml_capped` with the lineage header."""
+    return _dump_yaml_capped(doc, _lineage.lineage_header_name(decision_id), max_bytes)
 
 
 def _lineage_write_target(pm_path: Path, decision_id: str) -> Path:
@@ -1015,11 +1051,14 @@ class LineageChangeResult:
         error: The error dict when ``status == "error"`` (nothing was written).
         lifecycle: The lineage lifecycle after the call.
         decision_status: decisions.yaml's status after the call (a redacted label).
-        changes: What changed (``lifecycle`` / ``decision_status`` / ``declared``).
+        changes: What changed (``lifecycle`` / ``decision_status`` / ``declared``,
+            or ``fact_core`` for a fact core call).
         links: The ADR's links after the call.
         events_added: Kinds of the events appended, in file order.
         warnings: Warning entries (``server._build_warning`` shape).
         next: A follow-up hint (the other side of a supersedes link), if any.
+        fact_core: ``{"version", "ids"}`` after a call that passed ``fact_core``
+            (``unchanged`` included); ``None`` for any other call (S2 spec §3.1).
     """
 
     status: str
@@ -1032,6 +1071,7 @@ class LineageChangeResult:
     events_added: list[str] = field(default_factory=list)
     warnings: list[dict] = field(default_factory=list)
     next: str | None = None
+    fact_core: dict | None = None
 
 
 def _read_lineage_for_write(pm_path: Path, decision: Decision) -> dict | None:
@@ -1103,15 +1143,17 @@ def _counterpart_hints(
 def change_decision_lineage(
     pm_path: Path, decision_id: str, change: LineageChange
 ) -> LineageChangeResult:
-    """Change one ADR's lineage and project its status (design §5.2).
+    """Change one ADR's lineage and project its status (design §5.2, S2 spec §5.2).
 
     Under the decisions lock and then the ADR's lineage lock: the lineage is
     loaded (or started from the status), the change is validated against the
-    current state and applied (:func:`lineage.apply_change`), the result is
-    serialised under a size cap and checked (:func:`lineage.size_refusal`:
-    notes and evaluations stop short of the cap so lifecycle and link changes
-    still fit), the lineage is saved, and decisions.yaml is rewritten only
-    when the projected status changed — and only that ADR's status. The ADR
+    current state and applied (:func:`lineage.apply_change`; a fact core call
+    is checked against its version there, D5), the result is serialised under
+    a size cap and checked in bytes as written (:func:`lineage.size_refusal`:
+    notes, evaluations and fact core versions stop short of the cap so
+    lifecycle and link changes still fit), the lineage is saved, and
+    decisions.yaml is rewritten only when the projected status changed — and
+    only that ADR's status (a fact core call never changes it). The ADR
     text is never touched. A failure to save decisions.yaml after the lineage
     was saved leaves the lineage (the source of truth) ahead; it is reported as
     ``decision_status_not_projected`` and repaired by calling again with the
@@ -1207,6 +1249,7 @@ def change_decision_lineage(
                 links=outcome.links,
                 events_added=outcome.events_added,
                 warnings=list(outcome.notices),
+                fact_core=outcome.fact_core,
             )
             if not outcome.changed or outcome.doc is None:
                 return result
@@ -1225,8 +1268,12 @@ def change_decision_lineage(
                         f"or move it out of .pm/{_lineage.LINEAGE_DIR} by hand.",
                     ),
                 )
+            # The bytes as written, so a lineage accepted near the cap still
+            # reads back where newlines are CRLF (S2 spec §2.8).
             too_large = _lineage.size_refusal(
-                decision_id, None if text is None else len(text.encode("utf-8")), change
+                decision_id,
+                None if text is None else written_size(text),
+                appends=_lineage.appends(change),
             )
             if too_large is not None:
                 return LineageChangeResult(status="error", decision_id=decision_id, error=too_large)
@@ -1275,6 +1322,487 @@ def change_decision_lineage(
     result.warnings.extend(notices)
     result.next = hint
     return result
+
+
+# ─── Lineage-only writers (S2 spec §5.1) ─────────────
+
+
+@dataclass
+class LineageAppendResult:
+    """Result of :func:`_append_to_lineage` (S2 spec §5.1).
+
+    Attributes:
+        status: ``recorded`` or ``error``.
+        decision_id: The ADR id the call named (a redacted label when it is not one).
+        error: The error dict when ``status == "error"`` (nothing was written).
+        fields: The writer's own response fields (``lineage.AppendOutcome.fields``).
+        warnings: Warning entries (``server._build_warning`` shape).
+    """
+
+    status: str
+    decision_id: str
+    error: dict | None = None
+    fields: dict = field(default_factory=dict)
+    warnings: list[dict] = field(default_factory=list)
+
+
+def _append_to_lineage(
+    pm_path: Path,
+    decision_id: str,
+    apply: Callable[[dict, Decision, str], _lineage.AppendOutcome],
+    *,
+    when_missing: str,
+    via: str,
+    section: str,
+) -> LineageAppendResult:
+    """Append to one ADR's lineage under its lineage lock alone (S2 spec §5.1).
+
+    The one place a lineage-only writer (an explanation, feedback) takes a
+    lock. decisions.yaml is read without its lock, only to find the ADR and
+    its anchor: tools never remove an ADR or change its title or date, and its
+    status changes only under this same lineage lock (S2 spec §5.1). The
+    decisions lock is never taken, so a call finishes while another writer
+    holds it, and decisions.yaml is never written. Under the lineage lock the
+    file is read with the S1 writer's refusals (a symlinked directory or file,
+    size, nesting, shape, schema, lifecycle, anchor), ``apply`` checks and
+    builds the new document, and the result is serialised under a cap and
+    checked in bytes as written against MAX_APPEND_BYTES (S2 spec §2.8)
+    before it is saved.
+
+    Args:
+        pm_path: The project's ``.pm`` directory.
+        decision_id: The ADR id.
+        apply: The writer's pure step, ``apply(doc, adr, now)``; it never
+            changes ``doc`` in place.
+        when_missing: ``refuse`` (an explanation needs a fact core, so a
+            missing lineage is ``decision_fact_core_missing``) or ``start``
+            (a lineage is started from the ADR's status first).
+        via: The tool named on a started lineage's event.
+        section: The section appended to, as size refusals name it.
+
+    Returns:
+        The result. Expected failures come back as ``status="error"`` with
+        nothing written.
+
+    Raises:
+        PmServerError: The lineage lock timed out, or is taken while this
+            thread holds a lineage lock. Nothing is written.
+        LineageWriteRefused: Saving was refused at the file (a link swapped in).
+    """
+
+    def failed(error: dict) -> LineageAppendResult:
+        return LineageAppendResult(status="error", decision_id=decision_id, error=error)
+
+    if not _lineage.is_decision_id(decision_id):
+        return LineageAppendResult(
+            status="error",
+            decision_id=_lineage.scrub_label(decision_id),
+            error=_lineage._error("invalid_decision_id", "decision_id must look like ADR-NNN"),
+        )
+    try:
+        decisions = load_decisions(pm_path)
+    except Exception as exc:  # noqa: BLE001 - reported as a content-free summary
+        # str(exc) could quote a secret from decisions.yaml (design §4, D11).
+        return failed(
+            _lineage._error(
+                "decisions_yaml_unreadable",
+                f"decisions.yaml could not be read: {_lineage.error_summary(exc)}. Fix the file "
+                "by hand; nothing was changed.",
+            )
+        )
+    matches = [d for d in decisions if d.id == decision_id]
+    if not matches:
+        return failed(
+            _lineage._error("decision_not_found", f"{decision_id} is not in decisions.yaml")
+        )
+    if len(matches) > 1:
+        return failed(
+            _lineage._error(
+                _lineage.DECISION_ID_DUPLICATE,
+                f"decisions.yaml holds {decision_id} {len(matches)} times; give one of them "
+                "another id by hand before changing its lineage",
+            )
+        )
+    adr = matches[0]
+    with _yaml_transaction(pm_path, f"{_LINEAGE_LOCK_PREFIX}{decision_id}"):
+        try:
+            path = _lineage_write_target(pm_path, decision_id)
+            if path.is_symlink():
+                raise LineageWriteRefused(
+                    _lineage.LINEAGE_UNREADABLE,
+                    f"{decision_id}: the lineage file is a symbolic link; refusing to write "
+                    "through it",
+                )
+            doc = _read_lineage_for_write(pm_path, adr)
+        except LineageWriteRefused as refused:
+            return failed(_lineage._error(refused.code, str(refused)))
+        warnings: list[dict] = []
+        now = _lineage._utc_now()
+        if doc is None:
+            if when_missing == "refuse":
+                return failed(_lineage.fact_core_missing(decision_id))
+            doc = _lineage.started_doc(adr, now, via=via)
+            if doc is None:
+                return failed(
+                    _lineage._error(
+                        "decision_status_unknown",
+                        f"{decision_id}: its status is not one pmlens knows, so a lineage "
+                        "cannot be started from it; nothing was written.",
+                    )
+                )
+            warnings.append(
+                _lineage.notice(
+                    "info",
+                    _lineage.LINEAGE_STARTED,
+                    f"{decision_id} had no lineage; one was started from its status. When it "
+                    "was recorded and who decided it are not recorded.",
+                )
+            )
+        outcome = apply(doc, adr, now)
+        if outcome.error is not None:
+            return failed(outcome.error)
+        new_doc = outcome.doc
+        if new_doc is None:
+            raise PmServerError(f"{decision_id}: the lineage writer built no document")
+        try:
+            text = _dump_lineage_capped(new_doc, decision_id, _lineage.MAX_LINEAGE_BYTES)
+        except (RecursionError, yaml.YAMLError) as exc:
+            # The type alone is reported, as change_decision_lineage does.
+            return failed(
+                _lineage._error(
+                    _lineage.LINEAGE_UNREADABLE,
+                    f"{decision_id}: the lineage cannot be written back "
+                    f"({_lineage.error_summary(exc)}); nothing was written. Fix the file or "
+                    f"move it out of .pm/{_lineage.LINEAGE_DIR} by hand.",
+                )
+            )
+        too_large = _lineage.size_refusal(
+            decision_id,
+            None if text is None else written_size(text),
+            appends=True,
+            section=section,
+        )
+        if too_large is not None:
+            return failed(too_large)
+        try:
+            _save_yaml(path, new_doc, _lineage.lineage_header_name(decision_id), root=pm_path)
+        except LedgerWriteRefused as exc:
+            raise LineageWriteRefused(_lineage.LINEAGE_UNREADABLE, str(exc)) from None
+    return LineageAppendResult(
+        status="recorded",
+        decision_id=decision_id,
+        fields=dict(outcome.fields),
+        warnings=warnings + list(outcome.notices),
+    )
+
+
+def record_lineage_explanation(
+    pm_path: Path,
+    decision_id: str,
+    *,
+    fact_core_version: object,
+    paragraphs: object,
+    question: object = None,
+) -> LineageAppendResult:
+    """Save an explanation of an ADR written from its current fact core (S2 spec §3.2).
+
+    The arguments are checked by their shape first, before any file is read
+    (step 1): the id, a version of 1 or more and the paragraphs' and
+    question's shapes. Then :func:`_append_to_lineage` takes the ADR's
+    lineage lock alone and :func:`lineage.add_explanation_doc` checks the
+    version and the coverage (D4) against the lineage as it is under the lock.
+    The lifecycle, the status and decisions.yaml never change.
+
+    Args:
+        pm_path: The project's ``.pm`` directory.
+        decision_id: The ADR id.
+        fact_core_version: The fact core version the explanation was written from.
+        paragraphs: ``[{fact_ids, text}]``.
+        question: ``{question_kind, fact_ids, text}``, or ``None``.
+
+    Returns:
+        The result; ``fields`` holds the explanation's id, its version,
+        ``fact_ids_present``, ``accuracy`` (always unconfirmed) and the
+        number of paragraphs.
+    """
+    problem = _lineage.explanation_call_error(decision_id, fact_core_version, paragraphs, question)
+    if problem is not None:
+        if not _lineage.is_decision_id(decision_id):
+            decision_id = _lineage.scrub_label(decision_id)
+        return LineageAppendResult(status="error", decision_id=decision_id, error=problem)
+
+    def apply(doc: dict, adr: Decision, now: str) -> _lineage.AppendOutcome:
+        return _lineage.add_explanation_doc(
+            doc,
+            adr,
+            now,
+            fact_core_version=fact_core_version,
+            paragraphs=paragraphs,
+            question=question,
+        )
+
+    return _append_to_lineage(
+        pm_path,
+        decision_id,
+        apply,
+        when_missing="refuse",
+        via=_lineage.EXPLANATION_VIA,
+        section="explanations",
+    )
+
+
+def record_lineage_feedback(
+    pm_path: Path,
+    decision_id: str,
+    *,
+    feedback_kind: object,
+    text: object,
+    explanation_id: object = None,
+    fact_ids: object = None,
+    respondent_scope: object = "unknown",
+) -> LineageAppendResult:
+    """Record what the user said about an ADR (S2 spec §3.4).
+
+    The arguments are checked by their shape first, before any file is read
+    (:func:`lineage.feedback_call_error`, the check the tool also runs before
+    the project is resolved). Then :func:`_append_to_lineage` takes the ADR's
+    lineage lock alone, starts a lineage from the ADR's status when it has
+    none (``decision_lineage_started``), and :func:`lineage.add_feedback_doc`
+    checks the reply against the lineage as it is under the lock and numbers
+    it. The lifecycle, the status and decisions.yaml never change, approve
+    and reject included.
+
+    Args:
+        pm_path: The project's ``.pm`` directory.
+        decision_id: The ADR id.
+        feedback_kind: One of the eight feedback kinds.
+        text: The user's words.
+        explanation_id: The explanation replied to (required for check_answer).
+        fact_ids: Facts of the current version the reply is about.
+        respondent_scope: can_judge, cannot_judge or unknown, as declared.
+
+    Returns:
+        The result; ``fields`` holds the feedback id, its kind, the fact core
+        version it was recorded against, the declared scope, the review label
+        derived from it and the ``next`` step.
+    """
+    problem = _lineage.feedback_call_error(
+        decision_id, feedback_kind, text, explanation_id, fact_ids, respondent_scope
+    )
+    if problem is not None:
+        if not _lineage.is_decision_id(decision_id):
+            decision_id = _lineage.scrub_label(decision_id)
+        return LineageAppendResult(status="error", decision_id=decision_id, error=problem)
+
+    def apply(doc: dict, adr: Decision, now: str) -> _lineage.AppendOutcome:
+        return _lineage.add_feedback_doc(
+            doc,
+            adr,
+            now,
+            feedback_kind=feedback_kind,
+            text=text,
+            explanation_id=explanation_id,
+            fact_ids=fact_ids,
+            respondent_scope=respondent_scope,
+        )
+
+    return _append_to_lineage(
+        pm_path,
+        decision_id,
+        apply,
+        when_missing="start",
+        via=_lineage.FEEDBACK_VIA,
+        section="feedback",
+    )
+
+
+# ─── Decision posture (S2 spec §2.10, §3.8) ──────────
+
+
+@dataclass
+class PostureChangeResult:
+    """Result of :func:`change_decision_posture`.
+
+    Attributes:
+        status: ``updated`` (the posture changed and the history gained an
+            entry), ``unchanged`` (it already had that value), ``not_changed``
+            (``only_if_unset`` and a posture other than unset is set) or
+            ``error``.
+        decision_posture: The posture afterwards: the value set, or the
+            stored one for ``unchanged`` / ``not_changed``, labelled as
+            :func:`policy.posture_label` does (redacted when it is not a known
+            value, ``None`` when it is not a string).
+        previous: For ``updated``, the posture before, labelled the same way
+            (what the history entry records as ``from``); otherwise ``None``.
+        history_total: The history entries afterwards, counted as pm_status
+            counts them.
+        warnings: Notices (``_build_warning`` shape): ``decision_posture_changed``
+            for an update, ``decision_policy_secrets_redacted`` when the
+            saved text needed redaction.
+        error: For ``error``, the error dict; nothing was written.
+    """
+
+    status: str
+    decision_posture: str | None = None
+    previous: str | None = None
+    history_total: int = 0
+    warnings: list[dict] = field(default_factory=list)
+    error: dict | None = None
+
+
+def _is_global_pm_dir(pm_path: Path) -> bool:
+    """Whether ``pm_path`` is the global ``~/.pm`` (registry, memory), not a project's.
+
+    An explicit ``project_path`` or ``PM_PROJECT_PATH`` of the home directory
+    resolves to it, since the resolver only asks for a ``.pm`` directory there.
+    Both the module's ``GLOBAL_PM_DIR`` and the current ``$HOME`` are checked.
+    Comparing resolved paths alone misses another spelling of the same
+    directory (a case variant on a case-insensitive file system keeps its
+    case through ``resolve()``), so existing paths are also compared as files
+    (``os.path.samefile``: device and inode).
+    """
+    try:
+        target = pm_path.resolve()
+        candidates = {GLOBAL_PM_DIR.resolve(), (Path.home() / PM_DIR).resolve()}
+    except (OSError, RuntimeError):
+        return False
+    if target in candidates:
+        return True
+    for candidate in candidates:
+        try:
+            if os.path.samefile(target, candidate):
+                return True
+        except OSError:
+            # A path that does not exist is no other name for the global .pm.
+            continue
+    return False
+
+
+def change_decision_posture(
+    pm_path: Path, to: str, reason: str, via: str, *, only_if_unset: bool = False
+) -> PostureChangeResult:
+    """Change the project's decision posture (S2 spec §3.8, §5.3).
+
+    Takes the ``decision_policy`` lock and no other, and does everything
+    inside it: the bounded read of decision_policy.yaml
+    (:func:`policy.read_policy_raw`), the writer's refusals (unreadable file,
+    a history that is not a list, unknown schema), ``unchanged`` when the
+    posture already has the value (no history entry), ``not_changed`` for
+    ``only_if_unset`` when a posture other than unset is set (pm_init sets a
+    new project's posture only then; deciding on a value read outside the
+    lock could overwrite one set meanwhile), the refusal of a value safe_dump
+    would change (:func:`policy.unwritable_value_refusal`), then the reason's redaction, the
+    appended history entry, the serialisation under MAX_POLICY_BYTES counted
+    in bytes as written (:func:`written_size`) and the atomic write. Every
+    key the file holds besides the posture and the history is written back
+    as loaded; the loaded document is not modified.
+
+    ``reason`` is not checked here: the change tool requires one before
+    calling, and pm_init passes an empty one (the server must not invent a
+    reason).
+
+    Args:
+        pm_path: The project's ``.pm`` directory.
+        to: bold, cautious or unset.
+        reason: The user's reason, saved after redaction.
+        via: The tool that asked for the change (``pm_init`` or
+            ``pm_update_decision_posture``).
+        only_if_unset: Change only a posture that is unset (no file included).
+
+    Returns:
+        The result; an expected failure is ``status="error"`` with nothing
+        written.
+
+    Raises:
+        ProjectNotFoundError: ``pm_path`` is the global ``~/.pm``, not a
+            project's; nothing is written and no lock is taken (S2 spec §6.3:
+            decision_policy.yaml is written only to a project's ``.pm``).
+        PmServerError: The lock timed out.
+        LedgerWriteRefused: ``.pm/.locks`` or decision_policy.yaml is a link
+            (or not what it should be). Nothing is written.
+    """
+    if _is_global_pm_dir(pm_path):
+        # The resolver takes any directory holding a .pm for an explicit
+        # project_path or PM_PROJECT_PATH, so $HOME reaches here; pm_cleanup
+        # does not look for this file in ~/.pm (S2 spec §6.3).
+        raise ProjectNotFoundError(
+            "The home directory's .pm holds pmlens's global data, not a project; the "
+            "decision posture was not changed. Pass the project's directory as "
+            "project_path."
+        )
+    if to not in _policy.POSTURES:
+        return PostureChangeResult(
+            status="error",
+            error=_lineage._error(
+                _policy.INVALID_POSTURE,
+                f"decision_posture must be one of {', '.join(_policy.POSTURES)}",
+            ),
+        )
+    with _yaml_transaction(pm_path, _policy.POLICY_FILE):
+        raw = _policy.read_policy_raw(pm_path)
+        refusal = _policy.posture_write_refusal(raw)
+        if refusal is not None:
+            return PostureChangeResult(status="error", error=refusal)
+        doc = raw.data
+        stored = _policy.stored_posture(doc)
+        if isinstance(stored, str) and stored == to:
+            return PostureChangeResult(
+                status="unchanged", decision_posture=to, history_total=_policy.history_count(doc)
+            )
+        previous, label_hits = _policy.posture_label(stored)
+        if only_if_unset and not (isinstance(stored, str) and stored == _policy.UNSET):
+            return PostureChangeResult(
+                status="not_changed",
+                decision_posture=previous,
+                history_total=_policy.history_count(doc),
+            )
+        unwritable = _policy.unwritable_value_refusal(doc)
+        if unwritable is not None:
+            return PostureChangeResult(status="error", error=unwritable)
+        scrubbed, reason_hits = _lineage.scrub_text(reason)
+        entry = _policy.history_entry(_lineage._utc_now(), previous, to, scrubbed, via)
+        new_doc = _policy.posture_changed_doc(doc, to, entry)
+        try:
+            text = _dump_yaml_capped(new_doc, _policy.POLICY_FILE, _policy.MAX_POLICY_BYTES)
+        except (RecursionError, yaml.YAMLError) as exc:
+            # The reader's depth check keeps deep files out; the type alone
+            # is reported, never the text.
+            return PostureChangeResult(
+                status="error",
+                error=_lineage._error(
+                    _policy.POLICY_UNREADABLE,
+                    "decision_policy.yaml cannot be written back "
+                    f"({_lineage.error_summary(exc)}); nothing was written. Fix it by hand or "
+                    "move it out of .pm, then try again.",
+                ),
+            )
+        if text is None:
+            return PostureChangeResult(
+                status="error",
+                error=_lineage._error(
+                    _policy.POLICY_TOO_LARGE,
+                    f"decision_policy.yaml would exceed {_policy.MAX_POLICY_BYTES} bytes; "
+                    "nothing was written.",
+                    remediation=(
+                        "Shorten the reason. If the history is full, move older entries out of "
+                        ".pm/decision_policy.yaml by hand (keep the latest one); pmlens never "
+                        "drops them itself. A value the file repeats through YAML aliases "
+                        "(&name, *name) is written out in full at every repeat; replace such "
+                        "repeats by hand."
+                    ),
+                ),
+            )
+        _save_yaml(pm_path / _policy.POLICY_FILE, new_doc, _policy.POLICY_FILE, root=pm_path)
+    warnings = [_policy.posture_changed_notice(previous, to)]
+    if label_hits + reason_hits:
+        warnings.append(_policy.secrets_notice(label_hits + reason_hits))
+    return PostureChangeResult(
+        status="updated",
+        decision_posture=to,
+        previous=previous,
+        history_total=_policy.history_count(new_doc),
+        warnings=warnings,
+    )
 
 
 # ─── Milestones ──────────────────────────────────────

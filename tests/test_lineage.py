@@ -490,15 +490,23 @@ class TestLineageView:
         for i in range(60):
             doc[f"extra{i}"] = i
         view = lineage_view(adr, _raw(adr, doc))
-        assert view.unknown_keys[:4] == [
-            "fact_core",
-            "feedback",
+        # fact_core, explanations and feedback are known sections since S2 (S2
+        # spec §2.6), so they are not listed as unknown keys.
+        assert view.unknown_keys[:3] == [
             "key-<REDACTED:secret>",
             "7",
+            "k" * lineage.MAX_LABEL_CHARS,
         ]
-        assert view.unknown_keys[4] == "k" * lineage.MAX_LABEL_CHARS
+        assert view.unknown_keys[3] == "extra0"
         assert len(view.unknown_keys) == lineage.MAX_UNKNOWN_KEYS
         assert SECRET not in json.dumps(view.as_dict())
+        # A fact_core and a feedback of the wrong shape are skipped and noted
+        # (one each), their values never shown.
+        s2 = lineage_view(adr, _raw(adr, doc), include_s2=True)
+        assert s2.fact_core is None
+        assert s2.feedback == {"items": [], "feedback_total": 0}
+        assert _note_count(s2, "decision_lineage_items_skipped") == 2
+        assert SECRET not in json.dumps(s2.as_dict())
 
     def test_events_follow_the_per_kind_allow_list(self):
         adr = _adr()
@@ -518,6 +526,8 @@ class TestLineageView:
         ]
         view = lineage_view(adr, _raw(adr, _doc(adr, events=events)))
         evaluation, transition, future, note = view.events
+        # caused_by is an evaluation field since S2 (S2 spec §2.5): a value that
+        # is not a list of feedback ids is skipped and counted, never shown.
         assert evaluation == {
             "at": NOW,
             "kind": "evaluation",
@@ -525,7 +535,7 @@ class TestLineageView:
             "evaluation_kind": "ai_review",
             "text": "looks fine",
             "recorded_as": "assistant_recorded_unverified",
-            "unknown_fields": ["caused_by", "<REDACTED:secret>"],
+            "unknown_fields": ["<REDACTED:secret>"],
         }
         assert transition == {"at": NOW, "kind": "lifecycle", "from": "proposed", "to": "adopted"}
         assert future == {
@@ -535,7 +545,8 @@ class TestLineageView:
             "unknown_fields": ["payload", "text"],
         }
         assert len(note["text"]) == lineage.MAX_TEXT_CHARS and note["truncated"] is True
-        assert _note_count(view, "decision_lineage_items_skipped") == 1  # the dict reason
+        # The bytes caused_by and the dict reason.
+        assert _note_count(view, "decision_lineage_items_skipped") == 2
         json.dumps(view.as_dict())
 
     def test_only_the_last_twenty_events_are_shown(self):
@@ -1755,19 +1766,23 @@ class TestWriteRefusal:
         assert lineage.LINEAGE_RESERVE_BYTES > 12_500  # a 4,000-character 3-byte reason
         assert lineage.MAX_APPEND_BYTES == MAX_LINEAGE_BYTES - lineage.LINEAGE_RESERVE_BYTES
         for change in (note, evaluation, lifecycle):
-            assert lineage.size_refusal("ADR-001", lineage.MAX_APPEND_BYTES, change) is None
+            appends = lineage.appends(change)
+            assert (
+                lineage.size_refusal("ADR-001", lineage.MAX_APPEND_BYTES, appends=appends) is None
+            )
             for size in (None, MAX_LINEAGE_BYTES + 1):
-                error = lineage.size_refusal("ADR-001", size, change)
+                error = lineage.size_refusal("ADR-001", size, appends=appends)
                 assert error["code"] == "decision_lineage_too_large"
                 assert error["remediation"]
         for size in (lineage.MAX_APPEND_BYTES + 1, MAX_LINEAGE_BYTES):
-            assert lineage.size_refusal("ADR-001", size, note)["code"] == (
-                "decision_lineage_too_large"
-            )
-            assert lineage.size_refusal("ADR-001", size, evaluation) is not None
-            assert lineage.size_refusal("ADR-001", size, lifecycle) is None
+            refused = lineage.size_refusal("ADR-001", size, appends=lineage.appends(note))
+            assert refused["code"] == "decision_lineage_too_large"
+            evaluated = lineage.size_refusal("ADR-001", size, appends=lineage.appends(evaluation))
+            assert evaluated is not None
+            assert lineage.size_refusal("ADR-001", size, appends=lineage.appends(lifecycle)) is None
         blank = LineageChange(note="   ", lifecycle="adopted", reason="r")
-        assert lineage.size_refusal("ADR-001", MAX_LINEAGE_BYTES, blank) is None
+        assert lineage.appends(blank) is False
+        assert lineage.size_refusal("ADR-001", MAX_LINEAGE_BYTES, appends=False) is None
 
     def test_a_string_repeated_through_aliases_is_refused_without_expanding_it(
         self, tmp_pm_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -2161,6 +2176,53 @@ class TestOlderWriters:
         assert self._state(tmp_pm_path) == before
         assert before[1]["status"] is DecisionStatus.ACCEPTED
 
+    @staticmethod
+    def _section(pm_path: Path, key: str) -> bytes:
+        """The bytes of one top-level section of the lineage file, key line included."""
+        lines = _path(pm_path).read_bytes().splitlines(keepends=True)
+        start = lines.index(f"{key}:\n".encode())
+        end = next(
+            (n for n in range(start + 1, len(lines)) if lines[n][:1] not in (b" ", b"-")),
+            len(lines),
+        )
+        return b"".join(lines[start:end])
+
+    def test_an_s2_section_keeps_its_bytes_through_s1_writers_and_a_0_16_rewrite(
+        self, tmp_pm_path: Path
+    ):
+        # D3 for S2 sections (S2 spec §6.1, §5.4): the S1 writer paths and an
+        # older pmlens rewriting decisions.yaml leave fact_core byte for byte.
+        _created(tmp_pm_path)
+        facts = [
+            {"kind": "what", "text": "Send the mail inside the request"},
+            {"kind": "change", "text": "Before: a queue. After: inline"},
+            {"kind": "revert", "text": "Revert the setting", "reversibility": "unknown"},
+            {"kind": "weak", "text": "A slow mail server slows every booking"},
+            {"kind": "uncertain", "text": "Peak volume", "confidence": "medium"},
+            {"kind": "alt", "text": "Keep the queue"},
+        ]
+        for expected in (0, 1):
+            facts[3]["text"] += "."  # a second version fills previous_values
+            result = change_decision_lineage(
+                tmp_pm_path,
+                "ADR-001",
+                LineageChange(fact_core=facts, expected_fact_core_version=expected),
+            )
+            assert result.status == "updated"
+        section = self._section(tmp_pm_path, "fact_core")
+        assert b"previous_values:" in section and b"F-alt.1" in section
+        steps = [
+            LineageChange(note="a small follow-up"),
+            LineageChange(lifecycle="adopted", reason="the user approved"),
+            LineageChange(note="after the adoption"),
+            LineageChange(lifecycle="deprecated", reason="no longer used"),
+        ]
+        for change in steps:
+            assert change_decision_lineage(tmp_pm_path, "ADR-001", change).status == "updated"
+            assert self._section(tmp_pm_path, "fact_core") == section
+        _old_version_rewrite(tmp_pm_path)
+        assert self._section(tmp_pm_path, "fact_core") == section
+
 
 # ─── Lock order (design §5.1) ────────────────────────────────────────────
 
@@ -2345,6 +2407,16 @@ _LEDGER_ERRORS_TREE = ast.parse(
 _SAFE_YAML_TREE = ast.parse(
     (Path(pmlens.__file__).parent / "safe_yaml.py").read_text(encoding="utf-8")
 )
+# policy.py (S2 spec §6.3) reads .pm/decision_policy.yaml through lineage's
+# bounded reader, under lineage.py's rules plus the import of lineage itself.
+_POLICY_TREE = ast.parse((Path(pmlens.__file__).parent / "policy.py").read_text(encoding="utf-8"))
+_POLICY_IMPORTS = _ALLOWED_IMPORTS | {".lineage"}
+# decision_brief.py (S2 spec §3.5, §6.3) builds pm_decision_brief from values
+# already read: lineage.py's rules plus the imports of lineage and policy.
+_BRIEF_TREE = ast.parse(
+    (Path(pmlens.__file__).parent / "decision_brief.py").read_text(encoding="utf-8")
+)
+_BRIEF_IMPORTS = _ALLOWED_IMPORTS | {".lineage", ".policy"}
 _LEDGER_ERRORS_IMPORTS = frozenset(
     {
         "__future__",
@@ -2430,11 +2502,118 @@ def _enclosing_function(tree: ast.AST) -> dict[int, str]:
     return owner
 
 
+# getattr-like callables whose attribute name decides what is reached. They
+# may only be called directly with a literal name: passed along uncalled
+# (``map(getattr, [p], ["write_text"])``) the name escapes the check.
+_ATTRIBUTE_GETTERS = frozenset(
+    {
+        "getattr",
+        "getattr_static",
+        "__getattribute__",
+        "__getattr__",
+        "attrgetter",
+        "methodcaller",
+    }
+)
+# Getters whose attribute name is the second argument (``getattr(obj, name)``,
+# ``inspect.getattr_static(obj, name)``); the others take it first, except an
+# unbound ``object.__getattribute__(obj, name)``.
+_GETTERS_NAME_SECOND = frozenset({"getattr", "getattr_static"})
+# Attributes that walk the class graph, from which any loaded class is reached
+# (``type.__subclasses__(object)`` finds io.FileIO with builtins alone).
+_CLASS_WALKS = frozenset({"__subclasses__", "__bases__", "__base__", "__mro__", "mro"})
+# os attributes that may be read without calling them (the bounded reader's
+# O_ flags; os.path holds no writer).
+_OS_DATA_PREFIX = "O_"
+_OS_DATA_NAMES = frozenset({"path", "PathLike"})
+# Attributes that hop from one module to another: a module that imports os
+# exposes it as an attribute (``os.path.os``, ``dataclasses.inspect.os``,
+# ``tempfile._os``), and sys.modules or a namespace dict reaches any module.
+# Matched with leading and trailing underscores stripped (``_os``, ``_io``).
+_MODULE_HOPS = frozenset(
+    {
+        "os",
+        "posix",
+        "nt",
+        "io",
+        "sys",
+        "builtins",
+        "importlib",
+        "shutil",
+        "pathlib",
+        "tempfile",
+        "subprocess",
+        "posixpath",
+        "ntpath",
+        "genericpath",
+        "modules",
+        "dict",
+        "globals",
+        "loader",
+        "spec",
+    }
+)
+# Builtins that hand out a namespace, from which any imported module is reached.
+_NAMESPACE_BUILTINS = frozenset({"vars", "globals", "locals", "__builtins__", "__loader__"})
+
+
 def _write_violations(tree: ast.AST, allowed: frozenset[str] = _ALLOWED_IMPORTS) -> list[str]:
-    """Every way the source could write, open for writing or reach a writer."""
+    """Every way the source could write, open for writing or reach a writer.
+
+    Calls are matched by name, and so are references that are not called
+    (``_w = p.write_text``, ``_opener = os.open``), so a writer cannot be
+    reached under another name. ``os`` is reachable only as ``import os``
+    (no alias, no ``from os import``) and only as ``os.<allowed call>(...)``,
+    an ``os.O_*`` flag or ``getattr(os, "O_...")``; any other use of the
+    name ``os`` (binding it, passing it, rebinding it) is a violation. No
+    module is reached through another one (``os.path.os``,
+    ``dataclasses.inspect.os``, ``sys.modules``, ``vars(...)``, ``__dict__``),
+    no class through the class graph (``__subclasses__``, ``__mro__``), and a
+    getattr-like callable is only called directly with a literal name, never
+    passed along (``map(getattr, ...)``).
+    """
     found = [f"import {name}" for name in _import_names(tree) if name not in allowed]
     owner = _enclosing_function(tree)
+    called: set[int] = set()  # id of every node that is the func of a Call
+    os_ok: set[int] = set()  # id of every ``os`` Name in an allowed position
     for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.split(".")[0] == "os" and alias.asname is not None:
+                    found.append(f"import {alias.name} as {alias.asname}")
+        elif isinstance(node, ast.ImportFrom):
+            if node.level == 0 and (node.module or "").split(".")[0] == "os":
+                found.append(f"from {node.module} import ...")
+        elif isinstance(node, ast.Call):
+            called.add(id(node.func))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute):
+            attr = node.attr
+            if id(node) not in called and (attr in _BANNED_CALLS or attr == "open"):
+                found.append(f"reference to .{attr} without calling it")
+            if attr.strip("_") in _MODULE_HOPS:
+                found.append(f"reference to .{attr}, a way from one module to another")
+            if attr in _CLASS_WALKS:
+                found.append(f"reference to .{attr}, a walk of the class graph")
+            if attr in _ATTRIBUTE_GETTERS and id(node) not in called:
+                found.append(f"reference to .{attr} without calling it")
+            if isinstance(node.value, ast.Name) and node.value.id == "os":
+                if id(node) in called:
+                    os_ok.add(id(node.value))  # judged as a call below
+                elif attr.startswith(_OS_DATA_PREFIX) or attr in _OS_DATA_NAMES:
+                    os_ok.add(id(node.value))
+                else:
+                    found.append(f"reference to os.{attr} without calling it")
+        elif isinstance(node, ast.Name) and id(node) not in called:
+            if (
+                node.id in _BANNED_BUILTINS
+                or node.id in _BANNED_CALLS
+                or node.id in _ATTRIBUTE_GETTERS
+            ):
+                if isinstance(node.ctx, ast.Load):
+                    found.append(f"reference to {node.id} without calling it")
+        if isinstance(node, ast.Name) and node.id in _NAMESPACE_BUILTINS:
+            found.append(f"{node.id}, a namespace that reaches any module")
         if not isinstance(node, ast.Call):
             continue
         func = node.func
@@ -2453,25 +2632,61 @@ def _write_violations(tree: ast.AST, allowed: frozenset[str] = _ALLOWED_IMPORTS)
                 found.append("open() outside os.open in _read_bounded")
         if on_os and name not in _ALLOWED_OS_CALLS:
             found.append(f"os.{name}()")
-        if (
-            isinstance(func, ast.Name)
-            and name == "getattr"
-            and node.args
-            and isinstance(node.args[0], ast.Name)
-            and node.args[0].id == "os"
-        ):
-            attr = node.args[1] if len(node.args) > 1 else None
-            if not (
-                isinstance(attr, ast.Constant)
-                and isinstance(attr.value, str)
-                and attr.value.startswith("O_")
+        if name in _ATTRIBUTE_GETTERS:
+            # getattr(obj, name): the obj is node.args[0], the name the next
+            # argument; obj.__getattribute__(name): the name is the first.
+            on_os_getattr = (
+                isinstance(func, ast.Name)
+                and name == "getattr"
+                and node.args
+                and isinstance(node.args[0], ast.Name)
+                and node.args[0].id == "os"
+            )
+            second = name in _GETTERS_NAME_SECOND or (
+                name in {"__getattribute__", "__getattr__"} and len(node.args) > 1
+            )
+            index = 1 if second else 0
+            attr_node = node.args[index] if len(node.args) > index else None
+            literal = (
+                attr_node.value
+                if isinstance(attr_node, ast.Constant) and isinstance(attr_node.value, str)
+                else None
+            )
+            if on_os_getattr:
+                if literal is None or not literal.startswith(_OS_DATA_PREFIX):
+                    found.append("getattr(os, <not an O_ flag>)")
+                else:
+                    os_ok.add(id(node.args[0]))
+            elif literal is None:
+                found.append(f"{name}() with a computed attribute name")
+            elif (
+                literal in _BANNED_CALLS
+                or literal == "open"
+                or literal.strip("_") in _MODULE_HOPS
+                or literal in _CLASS_WALKS
             ):
-                found.append("getattr(os, <not an O_ flag>)")
+                found.append(f"{name}(..., {literal!r})")
         if name in _YAML_DUMPS and (
             len(node.args) != 1 or any(kw.arg == "stream" for kw in node.keywords)
         ):
             found.append(f"{name}() with a stream")
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id == "os" and id(node) not in os_ok:
+            found.append("the name os used other than as os.<allowed>")
     return found
+
+
+def _imported_modules(tree: ast.AST) -> set[str]:
+    """Every module part and imported name, to look for one module by name."""
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            names.update((node.module or "").split("."))
+            names.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                names.update(alias.name.split("."))
+    return names
 
 
 class TestModuleBoundary:
@@ -2489,6 +2704,45 @@ class TestModuleBoundary:
     def test_lineage_makes_no_write_calls(self):
         assert _write_violations(_LINEAGE_TREE) == []
 
+    def test_policy_does_not_import_storage_and_lineage_does_not_import_policy(self):
+        assert "storage" not in _imported_modules(_POLICY_TREE)
+        assert "policy" not in _imported_modules(_LINEAGE_TREE)
+        assert ".lineage" in _import_names(_POLICY_TREE)  # the allowance is used
+
+    def test_policy_makes_no_write_calls_and_opens_nothing_itself(self):
+        assert _write_violations(_POLICY_TREE, _POLICY_IMPORTS) == []
+        opens = [
+            node
+            for node in ast.walk(_POLICY_TREE)
+            if isinstance(node, ast.Call) and _call_name(node) in {"open", "_read_bounded"}
+        ]
+        assert opens == []  # it reads through lineage.read_bounded_yaml only
+
+    def test_brief_imports_neither_storage_nor_is_imported_by_lineage_or_policy(self):
+        assert "storage" not in _imported_modules(_BRIEF_TREE)
+        assert "decision_brief" not in _imported_modules(_LINEAGE_TREE)
+        assert "decision_brief" not in _imported_modules(_POLICY_TREE)
+        assert {".lineage", ".policy"} <= set(_import_names(_BRIEF_TREE))  # both used
+
+    def test_brief_makes_no_write_calls_and_reads_nothing(self):
+        assert _write_violations(_BRIEF_TREE, _BRIEF_IMPORTS) == []
+        reads = [
+            _call_name(node)
+            for node in ast.walk(_BRIEF_TREE)
+            if isinstance(node, ast.Call)
+            and _call_name(node)
+            in {
+                "open",
+                "_read_bounded",
+                "read_bounded_yaml",
+                "read_lineage_raw",
+                "read_decision_policy",
+                "read_policy_raw",
+            }
+        ]
+        assert reads == []  # every input is read by the caller
+        assert "os" not in _import_names(_BRIEF_TREE)
+
     def test_ledger_errors_makes_no_write_calls(self):
         # lineage.py imports it, so it is held to the same rules, with no os.
         assert _write_violations(_LEDGER_ERRORS_TREE, _LEDGER_ERRORS_IMPORTS) == []
@@ -2499,20 +2753,19 @@ class TestModuleBoundary:
         assert _write_violations(_SAFE_YAML_TREE, allowed) == []
 
     def test_os_open_is_one_read_only_call_in_the_bounded_reader(self):
-        opens = []
-        for fn in ast.walk(_LINEAGE_TREE):
-            if not isinstance(fn, ast.FunctionDef):
-                continue
-            for node in ast.walk(fn):
-                if (
-                    isinstance(node, ast.Call)
-                    and isinstance(node.func, ast.Attribute)
-                    and node.func.attr == "open"
-                    and isinstance(node.func.value, ast.Name)
-                    and node.func.value.id == "os"
-                ):
-                    opens.append(fn.name)
-        assert opens == ["_read_bounded"]
+        # Every reference to os.open, called or not, at any level (a module-
+        # level ``_opener = os.open`` has no enclosing function).
+        owner = _enclosing_function(_LINEAGE_TREE)
+        calls = {id(node.func) for node in ast.walk(_LINEAGE_TREE) if isinstance(node, ast.Call)}
+        opens = [
+            (owner.get(id(node)), id(node) in calls)
+            for node in ast.walk(_LINEAGE_TREE)
+            if isinstance(node, ast.Attribute)
+            and node.attr == "open"
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "os"
+        ]
+        assert opens == [("_read_bounded", True)]
         reader = next(
             fn
             for fn in ast.walk(_LINEAGE_TREE)
@@ -2545,6 +2798,47 @@ class TestModuleBoundary:
             "def f(a, b):\n    a.copy(b)\n",
             "import yaml\ndef f(d, s):\n    yaml.safe_dump(d, s)\n",
             "import yaml\ndef f(d, s):\n    yaml.safe_dump(d, stream=s)\n",
+            # Aliased and indirect forms (adversarial review, round 1).
+            "import os as _os\ndef f(a, b):\n    _os.renames(a, b)\n",
+            "import os as _os\ndef f(p):\n    _os.mkfifo(p)\n",
+            "import os as _os\ndef f(p):\n    _os.removedirs(p)\n",
+            "from os import replace as _swap\ndef f(a, b):\n    _swap(a, b)\n",
+            "from os import open as _o\ndef _read_bounded(p):\n    _o(p, 0)\n",
+            "import os\n_opener = os.open\ndef f(p):\n    _opener(p, os.O_WRONLY | os.O_CREAT)\n",
+            "import os\ndef f(a, b):\n    _r = os.renames\n    _r(a, b)\n",
+            "import os\n_o = os\ndef f(a, b):\n    _o.renames(a, b)\n",
+            "import os\ndef f(g, a, b):\n    g(os).renames(a, b)\n",
+            "def f(p):\n    _w = p.write_text\n    _w('x')\n",
+            "def f(p):\n    _o = open\n    _o(p, 'w')\n",
+            "def f(p):\n    getattr(p, 'write_' + 'text')('x')\n",
+            "def f(p):\n    getattr(p, 'write_text')('x')\n",
+            "def f(p):\n    p.__getattribute__('write_text')('x')\n",
+            "import os\ndef f():\n    getattr(os, 'O_' + 'X')\n",
+            # A module reached through another module's attributes.
+            "import os\ndef f(a, b):\n    os.path.os.renames(a, b)\n",
+            "import os\ndef f(p):\n    os.path.os.mkfifo(p)\n",
+            "import os\ndef f(c):\n    os.path.os.system(c)\n",
+            "import os\ndef f(p):\n    os.path.sys.modules['os'].removedirs(p)\n",
+            "import dataclasses\ndef f(p):\n    dataclasses.inspect.os.mkfifo(p)\n",
+            "import pathlib\ndef f(p):\n    pathlib._local.os.mkfifo(p)\n",
+            "import dataclasses\ndef f(p):\n    getattr(dataclasses.inspect, 'os').mkfifo(p)\n",
+            "import os\ndef f(p):\n    vars(os.path)['os'].mkfifo(p)\n",
+            "import os\ndef f(p):\n    os.path.__dict__['os'].mkfifo(p)\n",
+            # A getter passed along uncalled, another getter, or a walk of the
+            # class graph (adversarial review, round 3).
+            "import os\ndef f(p):\n    next(map(getattr, [os.path], ['os'])).mkfifo(p)\n",
+            "def f(p):\n    next(map(getattr, [p], ['write_text']))('x')\n",
+            "def f(p):\n    next(map(p.__getattribute__, ['write_text']))('x')\n",
+            "import dataclasses\ndef f(p):\n"
+            "    dataclasses.inspect.getattr_static(dataclasses.inspect, 'os').mkfifo(p)\n",
+            "def f(p):\n    object.__getattribute__(p, 'write_text')('x')\n",
+            "def f(p, g):\n    g.attrgetter('write_text')(p)('x')\n",
+            "def f(p, g):\n    g.methodcaller('write_text', 'x')(p)\n",
+            "def f(p):\n    todo = [object]\n    while todo:\n        c = todo.pop()\n"
+            "        if c.__name__ == 'FileIO':\n            c(p, 'w')\n            return\n"
+            "        todo.extend(type.__subclasses__(c))\n",
+            "def f(p):\n    [c for c in ().__class__.__base__.__subclasses__()][0](p, 'w')\n",
+            "def f(p):\n    getattr(object, '__subclasses__')()[0](p, 'w')\n",
         ],
     )
     def test_the_checks_have_teeth(self, source: str):

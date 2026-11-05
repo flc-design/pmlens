@@ -151,6 +151,69 @@ class EvaluationKind(StrEnum):
     OTHER = "other"
 
 
+class FactSource(StrEnum):
+    """Where a fact of an ADR's fact core came from. pmlens writes only proposal."""
+
+    PROPOSAL = "proposal"
+    OBSERVED = "observed"  # reserved for facts checked against commits and tests
+
+
+class Reversibility(StrEnum):
+    """How the decision can be undone, as its F-revert fact states it.
+
+    Only code_revertable lets a person who cannot judge the decision skip the
+    check before an irreversible effect; unknown is treated like
+    external_irreversible.
+    """
+
+    CODE_REVERTABLE = "code_revertable"
+    EXTERNAL_IRREVERSIBLE = "external_irreversible"
+    UNKNOWN = "unknown"
+
+
+class FeedbackKind(StrEnum):
+    """What a recorded reply about an ADR says. Replies are recorded, never scored.
+
+    approve and reject change neither the lifecycle nor the status; check_answer
+    is the reply to the question asked after an explanation.
+    """
+
+    PREMISE_MISMATCH = "premise_mismatch"
+    WHAT_IF = "what_if"
+    UNACCEPTABLE = "unacceptable"
+    TRY_ALTERNATIVE = "try_alternative"
+    APPROVE = "approve"
+    REJECT = "reject"
+    COMMENT = "comment"
+    CHECK_ANSWER = "check_answer"
+
+
+class RespondentScope(StrEnum):
+    """Whether the person who replied can judge this kind of decision, as declared.
+
+    A declaration made when the reply is recorded; pmlens never checks it, and
+    it is shown as declared, never as a review that took place.
+    """
+
+    CAN_JUDGE = "can_judge"
+    CANNOT_JUDGE = "cannot_judge"
+    UNKNOWN = "unknown"
+
+
+class DecisionPosture(StrEnum):
+    """How to lean when the user cannot judge a kind of decision (the project's posture).
+
+    Kept in .pm/decision_policy.yaml, not in project.yaml, so an older pmlens
+    that rewrites project.yaml cannot drop it. bold suits new or exploratory
+    work, cautious maintenance and fixes; unset (not chosen yet, or no file)
+    acts as cautious.
+    """
+
+    BOLD = "bold"
+    CAUTIOUS = "cautious"
+    UNSET = "unset"
+
+
 class LogCategory(StrEnum):
     """Daily log entry category."""
 
