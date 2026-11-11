@@ -99,6 +99,15 @@ def test_lowest_bounds_job_installs_the_floors_on_the_oldest_python() -> None:
     )
 
 
+def test_ci_token_can_only_read_the_repository() -> None:
+    """No job in ci.yml publishes or writes, so none gets a token that could."""
+    ci = _workflow("ci.yml")
+
+    assert ci["permissions"] == {"contents": "read"}
+    widened = {name: job["permissions"] for name, job in ci["jobs"].items() if "permissions" in job}
+    assert not widened, f"jobs that set their own permissions: {widened}"
+
+
 def test_jobs_that_existed_keep_their_names() -> None:
     # Branch protection refers to jobs by name; a new job is added, not renamed.
     jobs = _workflow("ci.yml")["jobs"]

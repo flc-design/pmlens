@@ -12,6 +12,11 @@ on:
     - cron: "0 3 * * 1"
   workflow_dispatch:
 
+# Every job here only checks out the repository and runs tests or checks on
+# it. The token gets no more than that, also on the scheduled run.
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest

@@ -113,7 +113,8 @@
   release of an unpinned dependency is tested without waiting for a push; the
   test matrix and the classifiers gain Python 3.14; and a `test-lowest` job on
   Python 3.11 installs the runtime dependencies with uv's
-  `--resolution lowest-direct` and runs the suite.
+  `--resolution lowest-direct` and runs the suite. The workflow's token is
+  limited to reading the repository (`permissions: contents: read`).
 
 
 ## [0.18.0] - 2026-11-05

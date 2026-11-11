@@ -1070,7 +1070,10 @@ def test_request_sink_sees_a_request_made_by_a_child() -> None:
             capture_output=True,
             timeout=60,
         )
-    assert sink.requests and "pypi.org" in sink.requests[0]
+    # What a proxy receives for an HTTPS URL: "CONNECT host:port HTTP/1.1".
+    assert sink.requests, "the sink saw no request"
+    method, authority = sink.requests[0].split()[:2]
+    assert (method, authority) == ("CONNECT", "pypi.org:443")
 
 
 @pytest.mark.smoke
