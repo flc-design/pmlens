@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.18.1] - 2026-11-11
+
 ### Fixed
 
 - **The hook install no longer replaces a `~/.claude/settings.json` it cannot

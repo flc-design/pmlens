@@ -1,7 +1,7 @@
 # PM Lens チートシート
 
 > Claude Code / Codex CLI / Cursor / Grok Build 用プロジェクト管理 MCP Server — **50 ツール + 互換名2個**
-> Version 0.18.0 | Python 3.11+ | PyPI: `pmlens`
+> Version 0.18.1 | Python 3.11+ | PyPI: `pmlens`
 
 ---
 
