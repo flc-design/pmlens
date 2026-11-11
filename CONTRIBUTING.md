@@ -95,6 +95,18 @@ branch is checked out:
   an explicit `project_path` argument wins over it, and a path without a
   `.pm/` directory is silently skipped in favour of the normal lookup. Confirm
   with `pm_status` which project the session actually resolved before writing.
+  Only ever point it at a copy: a shell the host starts inherits the variable,
+  and anything run from that shell without a `project_path` acts on that
+  project.
+
+The test suite does not follow it. `tests/conftest.py` removes `PM_PROJECT_PATH`,
+`PM_LENS`, `PM_DESKTOP_WRITE` and the other variables pmlens reads before
+pmlens is imported and again before each test, so `pytest` run from such a
+session stays in its temporary directories. Before 0.18.1 it did not, and a
+run with `PM_PROJECT_PATH` exported deleted memories from that project. A new
+environment variable read in `src/pmlens` must be added to
+`PMLENS_ENV_CLEARED` (or, with a reason, `PMLENS_ENV_KEPT`) there;
+`tests/test_env_isolation.py` fails until it is.
 
 ## Exercising global side-effects (install / migrate / hooks)
 

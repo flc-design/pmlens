@@ -46,7 +46,7 @@
 - **自然言語で操作** — 「進捗は？」「次にやること」と言うだけ
 - **ゼロ設定** — `pip install` + `pmlens install` で完了。あとは「PM初期化して」と言うだけ
 - **マルチプロジェクト** — グローバルレジストリで全プロジェクトを横断管理
-- **Git フレンドリー** — `.pm/` ディレクトリにプレーン YAML で保存、`git diff` で追跡可能
+- **Git フレンドリー** — `.pm/` ディレクトリにプレーン YAML で保存、`git diff` で追跡可能。`pm_init` が `.pm/.gitignore` を書き、そこにある SQLite データベース（記憶と、redact 前の下書き）は git に入らない
 - **非侵入的** — プロジェクトに `.pm/` を追加するだけ。`rm -rf .pm/` で完全除去
 
 ---
@@ -685,6 +685,7 @@ ambiguity window 内の要約が削除対象に入る場合は、並行実行中
 ```
 your-project/
 └── .pm/
+    ├── .gitignore          # pm_init が一度だけ書く。下のデータベースを git から外す
     ├── project.yaml        # プロジェクトメタ情報
     ├── tasks.yaml          # タスク（ステータス・優先度・依存関係）
     ├── decisions.yaml      # ADR (Architecture Decision Records)
@@ -706,6 +707,21 @@ your-project/
 ```
 
 YAML ファイルは人間が読め、手動編集しても壊れません。メモリ DB はセッションデータの正本で、`~/.pm/memory.db` が横断検索を可能にします。
+
+**何をコミットするか。** YAML ファイルと `decision_lineage/` は git で追跡する前提です。SQLite のファイルは違います。`pm_init` は次の行を持つ `.pm/.gitignore` を書きます（既にある `.gitignore` は書き換えません）。
+
+```
+drafts.db*
+x_drafts.db*
+memory.db*
+*.db-wal
+*.db-shm
+.locks/
+```
+
+- `drafts.db`（古いプロジェクトでは `x_drafts.db`）は **redact 前**の下書き本文を持ちます。無視したままにしてください。
+- `memory.db` は既定で無視します（バイナリで、私的なメモを含みうるため）。追跡したい場合は `memory.db*` の行を削除します。`-wal` / `-shm` は無視されたままなので、追跡したコピーに最新の行が入っていないことがあります。
+- 0.18.1 より前に作ったプロジェクトには `.pm/.gitignore` がありません。`.pm` にデータベースがあると `pm_status` が `pm_gitignore_missing` の通知を返します。`pm_init` をもう一度実行するか、上の行でファイルを作ってください。git の管理外のプロジェクトと、プロジェクト直下の `.gitignore` が `.pm/` を丸ごと無視しているプロジェクトには、この通知は出ません。それ以外の方法（グローバルの除外設定や、親ディレクトリの `.gitignore`）で `.pm/` を無視している場合は、この通知を無視して構いません。git が既に追跡しているファイルは追跡されたままです（無視ルールは追跡を外しません。`git rm --cached` を使います）。
 
 ---
 
@@ -778,6 +794,8 @@ PM Lens は初回セッション開始時（`pm_status`）に Claude Code の ho
 
 - Hook は `~/.claude/settings.json` にグローバルにインストール
 - 既存のユーザー hook は保全（PM Lens の hook は追記、上書きしない）
+- `settings.json` が存在するのに読めない、または JSON オブジェクトとして解釈できない場合は一切書き込まない。`pm_status` が `hooks_settings_unreadable` の警告を返し、`pmlens install-hooks` / `pmlens uninstall-hooks` は非ゼロで終了する（ファイルを手で直すまで）。書き込む時は一時ファイルからの置き換えで行い、ファイルのモードは保つ（ファイルを直接書き換えることはしない）
+- 読み取り専用の `settings.json`、書き込めないディレクトリにある `settings.json`、存在しないディレクトリを指すリンクになっている `settings.json`、UTF-8 として書き戻せない文字列（`"\ud83d"` のようなサロゲートペアの片方だけ）を含む `settings.json` には書き込まない。`pm_status` は `hooks_settings_not_writable` の警告を返し、上の2つのコマンドは非ゼロで終了する
 - 手動操作不要 — アップグレード時も自動インストール
 - 手動管理: `pmlens install-hooks` / `pmlens uninstall-hooks`
 

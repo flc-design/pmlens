@@ -79,6 +79,7 @@ from .prompt_pack import run_prompt_pack, validate_prompt_pack_args
 from .redaction import load_redaction_config, redact
 from .storage import (
     GLOBAL_PM_DIR,
+    PM_GITIGNORE,
     _next_task_number_from_list,
     _save_project,
     _save_registry,
@@ -90,6 +91,7 @@ from .storage import (
     add_task_with_next_id,
     change_decision_lineage,
     change_decision_posture,
+    ensure_pm_gitignore,
     get_builtin_templates_dir_status,
     init_pm_directory,
     list_workflow_templates,
@@ -101,6 +103,8 @@ from .storage import (
     load_tasks,
     load_tracks,
     load_workflows,
+    pm_gitignore_missing_warning,
+    pm_gitignore_not_created_warning,
     record_lineage_explanation,
     record_lineage_feedback,
     register_project,
@@ -109,6 +113,7 @@ from .storage import (
     update_task,
 )
 from .utils import (
+    FileRefusedError,
     aggregate_task_status,
     calculate_phase_progress,
     generate_decision_id,
@@ -765,6 +770,8 @@ def pm_init(
     """Initialize PM for a project.
 
     Creates .pm/ directory, auto-detects project info, and registers in global registry.
+    Also writes .pm/.gitignore, which keeps pmlens's databases out of git, unless
+    one exists (it is never changed); run it again on an older project to add it.
     project_path defaults to current directory.
     project_name defaults to directory name or detected from config files.
     decision_posture: bold or cautious, only when the user chose it. It is set
@@ -793,6 +800,17 @@ def pm_init(
 
     guard_not_home_root(root)
     pm_path = init_pm_directory(root)
+    # Seeded for a new project, and added to an existing one that has none.
+    # Create-only: a .gitignore that is already there is the user's.
+    gitignore_warning: dict | None = None
+    try:
+        if ensure_pm_gitignore(pm_path):
+            gitignore_result = "created .pm/.gitignore"
+        else:
+            gitignore_result = ".pm/.gitignore already exists (not changed)"
+    except (OSError, FileRefusedError):
+        gitignore_result = "could not create .pm/.gitignore"
+        gitignore_warning = pm_gitignore_not_created_warning()
 
     # Detect project info
     info = detect_project_info(root)
@@ -836,9 +854,12 @@ def pm_init(
         "path": str(root),
         "project": project.model_dump(mode="json"),
         "claudemd": claudemd_result,
+        "gitignore": gitignore_result,
         "decision_posture": view.as_dict(),
     }
     warnings: list[dict] = []
+    if gitignore_warning is not None:
+        warnings.append(gitignore_warning)
     linked = _pm_symlink_warning(pm_path)
     if linked is not None:
         warnings.append(linked)
@@ -1008,6 +1029,7 @@ def _posture_unset_notice() -> dict:
 # Entries in .pm pmlens writes; a symlink at any of them is refused on write
 # (PMSERV-277). The names are fixed, so listing them quotes nothing.
 _PM_WRITE_ENTRIES = (
+    PM_GITIGNORE,
     ".locks",
     "daily",
     "decision_lineage",
@@ -1088,7 +1110,13 @@ def pm_status(project_path: str | None = None) -> dict:
     root = resolve_project_path(project_path)
 
     # Hooks status — auto-install if missing (Claude Code host only).
-    from .hooks import get_hooks_status, install_hooks
+    from .hooks import (
+        SettingsNotWritableError,
+        SettingsUnreadableError,
+        get_hooks_status,
+        hooks_settings_write_failed_warning,
+        install_hooks,
+    )
 
     hooks_status = get_hooks_status()
     # PMSERV-144 (ADR-039 RO invariant): a Lens host must never auto-install.
@@ -1097,8 +1125,24 @@ def pm_status(project_path: str | None = None) -> dict:
     # that sits OUTSIDE the .pm trees the T6 invariant sweep snapshots, which
     # is exactly why it slipped past. A Lens viewer reports hook status
     # read-only; PM_LENS=0 (Claude Code) keeps the auto-install convenience.
-    if not PM_LENS_ENABLED and not hooks_status["installed"]:
-        install_hooks()
+    # A settings file that exists but cannot be read is never written to:
+    # "no hook found" there means "unknown", and installing used to replace
+    # the user's whole file with the hook alone. The warning below reports it.
+    hooks_write_warning: dict | None = None
+    if not PM_LENS_ENABLED and hooks_status.get("readable", True) and not hooks_status["installed"]:
+        try:
+            install_hooks()
+        except SettingsUnreadableError:
+            # The file changed between the two reads; the status read below
+            # reports it and nothing was written.
+            pass
+        except SettingsNotWritableError as exc:
+            # Read-only, or a link to nowhere: left as it is and reported.
+            hooks_write_warning = exc.warning
+        except OSError:
+            # The install is a convenience. A status read does not fail
+            # because it could not write the host's settings file.
+            hooks_write_warning = hooks_settings_write_failed_warning()
         hooks_status = get_hooks_status()
 
     # Next PM actions — contextual reminders for the LLM
@@ -1223,11 +1267,16 @@ def pm_status(project_path: str | None = None) -> dict:
 
     # ADR-053: report — never auto-repair — PM Lens hook entries whose binary
     # is gone or which are registered twice. `pmlens install-hooks` repairs.
-    from .hooks import stale_pm_hook_warning
+    from .hooks import hooks_settings_unreadable_warning, stale_pm_hook_warning
 
     hook_warning = stale_pm_hook_warning(hooks_status)
     if hook_warning is not None:
         status_warnings.append(hook_warning)
+    unreadable_settings = hooks_settings_unreadable_warning(hooks_status)
+    if unreadable_settings is not None:
+        status_warnings.append(unreadable_settings)
+    if hooks_write_warning is not None:
+        status_warnings.append(hooks_write_warning)
 
     status_warnings.extend(_decision_ledger_warnings(pm_path))
     # The decision posture (S2 spec §3.9): read without a lock and without
@@ -1239,6 +1288,9 @@ def pm_status(project_path: str | None = None) -> dict:
     linked = _pm_symlink_warning(pm_path)
     if linked is not None:
         status_warnings.append(linked)
+    unignored = pm_gitignore_missing_warning(pm_path)
+    if unignored is not None:
+        status_warnings.append(unignored)
 
     return {
         "project": {
@@ -3948,15 +4000,21 @@ def pm_drafts_pending(
             "message": "limit and offset must be non-negative",
         }
     try:
-        store = _get_draft_store(project_path)
+        pm_path = _get_pm_path(project_path)
+        draft_db = default_draft_db_path(pm_path)
     except DraftStoreConflictError as exc:
         return {"status": "error", "code": "draft_store_conflict", "message": str(exc)}
+    if not os.path.lexists(draft_db):
+        # A listing creates nothing: opening the store would create the
+        # database (and its sidecars) in a project that never staged a draft.
+        # The first draft creates it. Same shape as an empty page.
+        return {"status": "ok", "items": [], "total": 0, "has_more": False, "next_offset": offset}
+    store = get_draft_store(draft_db)
     page = store.pending(filter_status=filter_status, limit=limit, offset=offset)
     result: dict = {"status": "ok", **page}
     # Judged now, not when the draft was staged, so an ADR rejected since then
     # is reported here. A rejected draft will not be published and is not
     # checked; a posted one is, since its post may present the ADR as settled.
-    pm_path = _get_pm_path(project_path)
     index = _DraftDecisionIndex(pm_path)
     warnings: list[dict] = []
     for item in page["items"]:

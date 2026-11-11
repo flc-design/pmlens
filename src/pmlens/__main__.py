@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import inspect
+from collections.abc import Callable
+from typing import NoReturn
+
 import click
 
 from . import __version__
@@ -122,12 +126,51 @@ def uninstall(target: str, dry_run: bool):
         raise click.exceptions.Exit(1)
 
 
+def _silence_fastmcp_startup() -> None:
+    """Switch off FastMCP's start-up banner and its update check.
+
+    Every host starts ``pmlens serve`` for every session. FastMCP's default
+    start prints a banner with links to its own products on stderr and, to say
+    whether a newer FastMCP exists, asks pypi.org and caches the answer under
+    the user's home directory. That happened in Lens mode too, which promises
+    to write nothing, and a user of pmlens asked for neither.
+
+    Both switches are FastMCP settings that not every release in the supported
+    range is known to have, so one that is missing or refuses the value is
+    skipped: ``show_banner=False`` on ``run()`` (see :func:`serve`) already
+    keeps the banner, and the check that only runs inside it, from happening.
+    """
+    import fastmcp
+
+    settings = getattr(fastmcp, "settings", None)
+    for name, value in (("check_for_updates", "off"), ("show_server_banner", False)):
+        if settings is None or not hasattr(settings, name):
+            continue
+        try:
+            setattr(settings, name, value)
+        except (AttributeError, TypeError, ValueError):
+            continue
+
+
+def _accepts_show_banner(run: Callable[..., object]) -> bool:
+    """Whether this FastMCP's ``run`` takes ``show_banner`` by name."""
+    try:
+        return "show_banner" in inspect.signature(run).parameters
+    except (TypeError, ValueError):
+        return False
+
+
 @cli.command()
 def serve():
     """Start the MCP server (called by Claude Code via stdio)."""
     from .server import mcp
 
-    mcp.run(transport="stdio")
+    _silence_fastmcp_startup()
+    if _accepts_show_banner(mcp.run):
+        mcp.run(transport="stdio", show_banner=False)
+    else:
+        # The setting switched off above is what this release reads instead.
+        mcp.run(transport="stdio")
 
 
 @cli.command()
@@ -379,12 +422,28 @@ def hook_post_tool_use():
     handle_post_tool_use()
 
 
+def _exit_on_failed_settings_write() -> NoReturn:
+    """Print why the settings file was not written and exit 1 (no traceback)."""
+    from .hooks import hooks_settings_write_failed_warning
+
+    warning = hooks_settings_write_failed_warning()
+    click.echo(f"✗ {warning['message']} {warning['remediation']}", err=True)
+    raise SystemExit(1) from None
+
+
 @cli.command("install-hooks")
 def install_hooks_cmd():
     """Install PM Lens hooks into Claude Code settings."""
-    from .hooks import install_hooks
+    from .hooks import SettingsNotWritableError, SettingsUnreadableError, install_hooks
 
-    msg = install_hooks()
+    try:
+        msg = install_hooks()
+    except (SettingsUnreadableError, SettingsNotWritableError) as exc:
+        # The file does not parse, or is read-only: nothing was written.
+        click.echo(f"✗ {exc}", err=True)
+        raise SystemExit(1) from None
+    except OSError:
+        _exit_on_failed_settings_write()
     prefix = "✓" if "installed" in msg or "skipped" in msg else "✗"
     click.echo(f"{prefix} {msg}")
 
@@ -392,9 +451,15 @@ def install_hooks_cmd():
 @cli.command("uninstall-hooks")
 def uninstall_hooks_cmd():
     """Remove PM Lens hooks from Claude Code settings."""
-    from .hooks import uninstall_hooks
+    from .hooks import SettingsNotWritableError, SettingsUnreadableError, uninstall_hooks
 
-    msg = uninstall_hooks()
+    try:
+        msg = uninstall_hooks()
+    except (SettingsUnreadableError, SettingsNotWritableError) as exc:
+        click.echo(f"✗ {exc}", err=True)
+        raise SystemExit(1) from None
+    except OSError:
+        _exit_on_failed_settings_write()
     prefix = "✓" if "removed" in msg or "skipped" in msg else "✗"
     click.echo(f"{prefix} {msg}")
 

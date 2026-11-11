@@ -46,7 +46,7 @@ Track tasks, visualize progress, record decisions — through natural language i
 - **Natural language** — say "進捗は？" or "what's next?" instead of memorizing commands
 - **Zero configuration** — `pip install` + `pmlens install`, then just say "PM初期化して"
 - **Multi-project** — manage all your projects from a global registry with cross-project dashboards
-- **Git-friendly** — plain YAML files in `.pm/` directory, trackable with `git diff`
+- **Git-friendly** — plain YAML files in `.pm/` directory, trackable with `git diff`; `pm_init` writes a `.pm/.gitignore` that keeps the SQLite databases there (memories, and drafts before redaction) out of git
 - **Non-invasive** — adds only a `.pm/` directory to your project. `rm -rf .pm/` to remove completely
 
 ---
@@ -710,6 +710,7 @@ PM Lens stores task data as plain YAML and memories in SQLite:
 ```
 your-project/
 └── .pm/
+    ├── .gitignore          # Written once by pm_init: keeps the databases below out of git
     ├── project.yaml        # Project metadata
     ├── tasks.yaml          # Tasks with status, priority, dependencies
     ├── decisions.yaml      # Architecture Decision Records (ADR)
@@ -730,6 +731,21 @@ your-project/
 ```
 
 YAML files are human-readable and hand-editable. Memory DB is the source of truth for session data; the global index at `~/.pm/memory.db` enables cross-project search.
+
+**What to commit.** The YAML files and `decision_lineage/` are meant to be tracked in git. The SQLite files are not: `pm_init` writes `.pm/.gitignore` with these lines, and never rewrites a `.gitignore` that already exists.
+
+```
+drafts.db*
+x_drafts.db*
+memory.db*
+*.db-wal
+*.db-shm
+.locks/
+```
+
+- `drafts.db` (`x_drafts.db` in older projects) holds draft text **before redaction**. Keep it ignored.
+- `memory.db` is ignored by default: it is binary and may hold private notes. Remove the `memory.db*` line to track it; its `-wal` / `-shm` sidecars stay ignored, so a tracked copy can lack its newest rows.
+- A project created before 0.18.1 has no `.pm/.gitignore`. `pm_status` says so with a `pm_gitignore_missing` notice once `.pm` holds a database; run `pm_init` again or create the file with the lines above. The notice is not shown for a project outside git, or one whose own `.gitignore` ignores all of `.pm/`; a repository that ignores `.pm/` some other way (a global exclude, a `.gitignore` in a parent directory) can disregard it. Files git already tracks stay tracked: an ignore rule does not untrack them (`git rm --cached`).
 
 ---
 
@@ -801,6 +817,15 @@ PM Lens automatically installs Claude Code hooks at first session start (`pm_sta
 
 - Hooks are installed globally in `~/.claude/settings.json`
 - Existing user hooks are preserved (PM Lens hooks are appended, not replaced)
+- A `settings.json` that exists but cannot be read or parsed as a JSON object
+  is never written to: `pm_status` returns a `hooks_settings_unreadable`
+  warning, and `pmlens install-hooks` / `pmlens uninstall-hooks` exit non-zero,
+  until you fix the file by hand. When PM Lens does write the file it replaces
+  it atomically and keeps its mode; it never writes the file in place
+- A read-only `settings.json`, one in a directory that is not writable, one
+  that is a link to a directory that does not exist, or one holding text that cannot be written back as UTF-8 (half of
+  a surrogate pair, such as `"\ud83d"`) is left as it is: `pm_status` returns a
+  `hooks_settings_not_writable` warning and the two commands exit non-zero
 - No manual setup needed — hooks are auto-installed on upgrade
 - To manage manually: `pmlens install-hooks` / `pmlens uninstall-hooks`
 - Health check (ADR-053): `pm_status` reports `hooks.stale` (entries whose

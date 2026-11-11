@@ -1,5 +1,58 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- **The hook install no longer replaces a `~/.claude/settings.json` it cannot
+  read (PMSERV-290)**: a file that exists but cannot be read, is not valid
+  JSON, or is not a JSON object is never written to. `pm_status` returns a
+  `hooks_settings_unreadable` warning and `pmlens install-hooks` / `pmlens
+  uninstall-hooks` exit non-zero until the file is fixed by hand; before, one
+  trailing comma made `pm_status` replace the whole file (deny rules, env,
+  other hooks) with the pmlens hook alone. When pmlens does write the file it
+  replaces it atomically, keeps its mode and keeps a symlink a symlink. A
+  read-only `settings.json`, one in a directory that is not writable, and one
+  that is a link to a directory that does not exist are left as they are:
+  `pm_status` returns a `hooks_settings_not_writable` warning instead of
+  raising, as it does for any other failed write of that file, and the two
+  commands exit non-zero without a traceback. The file is never written in
+  place, so in a directory that is not writable the hook is no longer installed
+  automatically (0.18.0 wrote the file there). Settings that parse but cannot
+  be written back as UTF-8 (a string holding half of a surrogate pair, such as
+  `"\ud83d"`) get the same warning and exit code, and the file is not opened
+  for writing.
+- **Listing drafts no longer creates a draft database (PMSERV-294)**:
+  `pm_drafts_pending` and `pm_x_drafts_pending` return an empty page on a
+  project that never staged a draft, instead of creating `.pm/drafts.db` and
+  its sidecars.
+
+### Changed
+
+- **`pmlens serve` starts without FastMCP's banner or update check
+  (PMSERV-292)**: no banner on stderr, no request to pypi.org and no cache file
+  under the home directory at start, in full mode and in Lens.
+
+### Security
+
+- **`pm_init` writes `.pm/.gitignore` (PMSERV-294)**: `git add` in a user's
+  repository no longer stages the draft databases (text before redaction), the
+  memory database, the SQLite `-wal` / `-shm` sidecars or `.locks/`. An
+  existing `.gitignore` is never changed; running `pm_init` again adds the file
+  to an older project, and `pm_status` returns a `pm_gitignore_missing` notice
+  for a `.pm` that holds a database and no `.gitignore`, unless the project is
+  outside git or its own `.gitignore` ignores all of `.pm`. Remove the
+  `memory.db*` line to track the memory database.
+
+### Tests
+
+- **The test suite can no longer act on a real project (PMSERV-291)**:
+  `tests/conftest.py` clears `PM_PROJECT_PATH`, `PM_LENS`, `PM_DESKTOP_WRITE`
+  and the other variables pmlens reads, before pmlens is imported and before
+  each test. With `PM_PROJECT_PATH` exported, `pytest` used to run its
+  memory-cleanup tests against that project and delete its memories.
+
+
 ## [0.18.0] - 2026-11-05
 
 Decision Lineage v1, second half (ADR-056 / ADR-058): one decision can now go

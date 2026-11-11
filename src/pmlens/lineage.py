@@ -865,6 +865,27 @@ class BoundedYaml:
     size: int = 0
 
 
+def read_bounded_text(path: Path, limit: int) -> str | None:
+    """Read one small UTF-8 text file without following links or raising.
+
+    For a hint taken from a file that is not pmlens's own (a project's
+    ``.gitignore``). A FIFO does not block the open.
+
+    Args:
+        path: The file.
+        limit: The largest size accepted, in bytes.
+
+    Returns:
+        The text, or None when nothing is there or it cannot be used: a
+        symlink, anything but a regular file, a file over ``limit`` bytes, an
+        OS error, or bytes that are not UTF-8.
+    """
+    try:
+        return _read_bounded(path, limit).decode("utf-8")
+    except (OSError, _NotRegularOrTooLargeError, UnicodeDecodeError):
+        return None
+
+
 def read_bounded_yaml(path: Path, limit: int) -> BoundedYaml:
     """Read and parse one YAML file without locking, creating, following links or raising.
 

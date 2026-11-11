@@ -92,6 +92,7 @@ from .utils import (
     open_dir_below,
     read_file_in_dir,
     replace_file_in_dir,
+    write_file_below,
 )
 
 PM_DIR = ".pm"
@@ -104,6 +105,36 @@ DEFAULT_LOCK_TIMEOUT_S = 5.0
 _LOCK_TIMEOUT_ENV = "PM_LOCK_TIMEOUT_S"
 _LOCKS_DIR = ".locks"
 _LOCKS_GITIGNORE = "*\n!.gitignore\n"
+
+# ``.pm/.gitignore``: what pm_init seeds so that ``git add .`` in a user's
+# repository does not stage pmlens's databases. The draft databases hold
+# ``raw_content``, the text before redaction. The memory database is ignored by
+# default as well: it is binary, it can hold private notes, and tracking it
+# while its ``-wal`` sidecar is ignored commits a file that can lack its
+# newest rows.
+PM_GITIGNORE = ".gitignore"
+PM_GITIGNORE_ENTRIES: tuple[str, ...] = (
+    "drafts.db*",
+    "x_drafts.db*",
+    "memory.db*",
+    "*.db-wal",
+    "*.db-shm",
+    ".locks/",
+)
+_PM_GITIGNORE_TEXT = """\
+# Created by pmlens (pm_init). pmlens never rewrites this file: edit it freely.
+#
+# Draft databases hold text before redaction. Keep them ignored.
+drafts.db*
+x_drafts.db*
+# The memory database. Remove the next line to track memory.db in git; the
+# sidecar rules below still apply, so a tracked copy can lack its newest rows.
+memory.db*
+# SQLite sidecars of any database here, and pmlens's lock files.
+*.db-wal
+*.db-shm
+.locks/
+"""
 
 
 # ─── Internal helpers ────────────────────────────────
@@ -2022,6 +2053,120 @@ def init_pm_directory(project_path: Path) -> Path:
     pm_path.mkdir(exist_ok=True)
     (pm_path / "daily").mkdir(exist_ok=True)
     return pm_path
+
+
+def ensure_pm_gitignore(pm_path: Path) -> bool:
+    """Create ``.pm/.gitignore`` unless an entry of that name exists.
+
+    Create-only, like the ``.gitignore`` in ``.locks``: an existing file is
+    the user's and is never rewritten, and a symlink at the name (a repository
+    can ship one, dangling or not) is not written through.
+
+    Returns:
+        True if the file was created, False if the name was already taken.
+
+    Raises:
+        FileRefusedError: ``pm_path`` could not be opened as a directory.
+        OSError: The file could not be created.
+    """
+    data = _PM_GITIGNORE_TEXT.encode("utf-8")
+    if _no_dir_fd():  # pragma: no cover - Windows: lstat check, not atomic
+        if os.path.lexists(pm_path / PM_GITIGNORE):
+            return False
+        write_file_below(pm_path, (PM_GITIGNORE,), data, refuse_link=True)
+        return True
+    fd = open_dir_below(pm_path, ())
+    try:
+        return create_file_in_dir(fd, PM_GITIGNORE, data)
+    finally:
+        os.close(fd)
+
+
+# The databases pmlens keeps in .pm. One of them existing is what makes a
+# missing .pm/.gitignore worth reporting.
+_PM_DATABASES = ("memory.db", "drafts.db", "x_drafts.db")
+
+
+def _pm_gitignore_remediation() -> str:
+    """The lines to put in ``.pm/.gitignore``, for a reader who writes it by hand."""
+    return "Create .pm/.gitignore with these lines:\n" + "\n".join(PM_GITIGNORE_ENTRIES)
+
+
+# Lines of a project's own .gitignore that keep all of .pm out of git.
+_WHOLE_PM_IGNORES = frozenset(
+    {".pm", ".pm/", "/.pm", "/.pm/", ".pm/*", "/.pm/*", ".pm/**", "/.pm/**", "**/.pm", "**/.pm/"}
+)
+# A project's .gitignore is a few lines; a larger one is not read for a hint.
+_ROOT_GITIGNORE_LIMIT = 256 * 1024
+
+
+def _git_could_stage_pm(pm_path: Path) -> bool:
+    """Whether ``git add`` could stage files of this .pm, as far as lstat and one bounded read tell.
+
+    False when the project is in no git work tree (no ``.git`` entry at the
+    project root or above it) and when the project's own ``.gitignore`` ignores
+    all of ``.pm`` with no later line re-including part of it. The read path
+    runs no git, so nested ignore files, global excludes and ``GIT_DIR`` are
+    not seen: whatever cannot be told counts as True, and the notice is shown.
+    """
+    root = pm_path.parent
+    if not any(os.path.lexists(directory / ".git") for directory in (root, *root.parents)):
+        return False
+    text = _lineage.read_bounded_text(root / ".gitignore", _ROOT_GITIGNORE_LIMIT)
+    if text is None:
+        return True
+    ignored = False
+    for line in text.splitlines():
+        pattern = line.strip()
+        if pattern in _WHOLE_PM_IGNORES:
+            ignored = True
+        elif pattern.startswith("!") and ".pm" in pattern:
+            ignored = False
+    return not ignored
+
+
+def pm_gitignore_missing_warning(pm_path: Path) -> dict | None:
+    """A ``warnings[]`` info entry when git could stage a database of this .pm, or None.
+
+    Shown when .pm holds a database and no ``.gitignore`` of its own, unless
+    the project is outside git or its own ``.gitignore`` ignores all of .pm
+    (:func:`_git_could_stage_pm`): a notice that repeats on every status read
+    has to be one the reader can act on. It is also shown in Lens, which
+    cannot write, so the remediation gives the lines to put in the file and
+    names no tool.
+    """
+    if os.path.lexists(pm_path / PM_GITIGNORE):
+        return None
+    if not any(os.path.lexists(pm_path / name) for name in _PM_DATABASES):
+        return None
+    if not _git_could_stage_pm(pm_path):
+        return None
+    return {
+        "level": "info",
+        "code": "pm_gitignore_missing",
+        "message": (
+            ".pm has no .gitignore, so `git add` can stage pmlens's SQLite databases: "
+            "the memory database and, once drafts exist, the draft database, which holds "
+            "text before redaction. A repository that ignores .pm entirely can disregard this."
+        ),
+        "remediation": (
+            _pm_gitignore_remediation()
+            + "\nLeave out memory.db* to track the memory database in git."
+        ),
+    }
+
+
+def pm_gitignore_not_created_warning() -> dict:
+    """The ``warnings[]`` entry for an init that could not write ``.pm/.gitignore``."""
+    return {
+        "level": "warning",
+        "code": "pm_gitignore_not_created",
+        "message": (
+            "pmlens could not create .pm/.gitignore, so `git add` can stage its SQLite "
+            "databases, including the draft database, which holds text before redaction."
+        ),
+        "remediation": _pm_gitignore_remediation(),
+    }
 
 
 # ─── Workflows ──────────────────────────────────────

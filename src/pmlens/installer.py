@@ -1474,7 +1474,16 @@ def migrate_settings_perms(*, dry_run: bool = False) -> InstallResult:
     from . import hooks
 
     path = hooks._settings_path()
-    settings = hooks._load_settings(path)
+    try:
+        settings = hooks._load_settings(path)
+    except hooks.SettingsUnreadableError as exc:
+        # Not "nothing to migrate": the permissions in it are unknown.
+        return InstallResult(
+            target=_SETTINGS_TARGET,
+            status="failed",
+            message=str(exc),
+            is_dry_run=dry_run,
+        )
     perms = settings.get("permissions")
     if not isinstance(perms, dict):
         return InstallResult(
@@ -1524,7 +1533,17 @@ def migrate_settings_perms(*, dry_run: bool = False) -> InstallResult:
     backup = _timestamped_backup(path)
     for list_name, new_entries in additions.items():
         perms[list_name].extend(new_entries)
-    hooks._save_settings(path, settings)
+    try:
+        hooks._save_settings(path, settings)
+    except hooks.SettingsNotWritableError as exc:
+        # Read-only, or a link to nowhere: the file is left as it is.
+        return InstallResult(
+            target=_SETTINGS_TARGET,
+            status="failed",
+            message=str(exc),
+            backup_path=str(backup),
+            is_dry_run=dry_run,
+        )
 
     return InstallResult(
         target=_SETTINGS_TARGET,
