@@ -12,8 +12,10 @@
   trailing comma made `pm_status` replace the whole file (deny rules, env,
   other hooks) with the pmlens hook alone. When pmlens does write the file it
   replaces it atomically, keeps its mode and keeps a symlink a symlink. A
-  read-only `settings.json`, one in a directory that is not writable, and one
-  that is a link to a directory that does not exist are left as they are:
+  read-only `settings.json`, one in a directory that is not writable, one that
+  has a second hard link (replacing it would leave the other name with the old
+  content), and one that is a link to a directory that does not exist are left
+  as they are:
   `pm_status` returns a `hooks_settings_not_writable` warning instead of
   raising, as it does for any other failed write of that file, and the two
   commands exit non-zero without a traceback. The file is never written in
@@ -21,7 +23,10 @@
   automatically (0.18.0 wrote the file there). Settings that parse but cannot
   be written back as UTF-8 (a string holding half of a surrogate pair, such as
   `"\ud83d"`) get the same warning and exit code, and the file is not opened
-  for writing.
+  for writing. The temporary copy is written next to the file itself (for a
+  link: next to its target) and named after it, `.settings.json.pmlens-*.tmp`;
+  one that a killed write left behind is removed once it is an hour old, by
+  the next write or by `pm_status` outside Lens.
 - **Listing drafts no longer creates a draft database (PMSERV-294)**:
   `pm_drafts_pending` and `pm_x_drafts_pending` return an empty page on a
   project that never staged a draft, instead of creating `.pm/drafts.db` and
@@ -89,7 +94,11 @@
   existing `.gitignore` is never changed; running `pm_init` again adds the file
   to an older project, and `pm_status` returns a `pm_gitignore_missing` notice
   for a `.pm` that holds a database and no `.gitignore`, unless the project is
-  outside git or its own `.gitignore` ignores all of `.pm`. Remove the
+  outside git or its own `.gitignore` ignores all of `.pm`. That file is read
+  the way git reads it, and what pmlens can see but not judge keeps the
+  notice: a later `!` line, a `.pm` that is a link or a repository of its own,
+  `GIT_DIR` or `GIT_WORK_TREE` in the environment. A database git already
+  tracks stays tracked whatever is ignored (`git rm --cached`). Remove the
   `memory.db*` line to track the memory database.
 
 ### Tests

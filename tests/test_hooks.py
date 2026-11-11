@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import os
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -784,6 +785,234 @@ def _assert_no_codec_text(text: str) -> None:
     assert "codec" not in text
     assert "ud83d" not in text.lower()
     assert "Traceback" not in text
+
+
+class TestAHardLinkedSettingsFileIsLeftAlone:
+    """Replacing the file would leave its other name (a dotfiles checkout) with the old content."""
+
+    def test_install_refuses_and_both_names_keep_the_same_file(
+        self, home_settings: Path, tmp_path: Path
+    ):
+        home_settings.write_text('{"permissions": {"deny": ["Bash(rm:*)"]}}', encoding="utf-8")
+        twin = tmp_path / "dotfiles-settings.json"
+        os.link(home_settings, twin)
+        before = _fingerprint(home_settings)
+
+        with pytest.raises(SettingsNotWritableError) as excinfo:
+            install_hooks()
+
+        assert excinfo.value.__cause__ is None
+        assert "another hard link" in excinfo.value.warning["message"]
+        # Permissions are not the cause, so the advice must not be about them.
+        assert "symbolic link" in excinfo.value.warning["remediation"]
+        assert "writable" not in excinfo.value.warning["remediation"]
+        assert _fingerprint(home_settings) == before
+        assert home_settings.stat().st_ino == twin.stat().st_ino
+        assert home_settings.stat().st_nlink == 2
+        assert _listing(home_settings.parent) == ["settings.json"]
+
+    def test_pm_status_reports_it_and_changes_nothing(
+        self, home_settings: Path, pm_project: Path, tmp_path: Path, monkeypatch
+    ):
+        monkeypatch.setattr(pmlens.server, "PM_LENS_ENABLED", False)
+        home_settings.write_text("{}", encoding="utf-8")
+        twin = tmp_path / "dotfiles-settings.json"
+        os.link(home_settings, twin)
+        before = _fingerprint(home_settings)
+
+        result = pmlens.server.pm_status(project_path=str(pm_project))
+
+        assert result["hooks"]["installed"] is False
+        assert "another hard link" in _not_writable_warning(result)["message"]
+        assert _fingerprint(home_settings) == before
+        assert twin.read_text(encoding="utf-8") == "{}"
+
+    def test_a_file_with_one_name_is_still_written(self, home_settings: Path):
+        home_settings.write_text("{}", encoding="utf-8")
+
+        install_hooks()
+
+        assert "PostToolUse" in json.loads(home_settings.read_text(encoding="utf-8"))["hooks"]
+
+
+class TestTemporaryCopiesOfTheSettings:
+    """A killed write leaves a full copy of the settings; it must be pmlens's to find and remove."""
+
+    @staticmethod
+    def _aged(path: Path, hours: float) -> Path:
+        then = time.time() - hours * 3600
+        os.utime(path, (then, then), follow_symlinks=False)
+        return path
+
+    def test_the_temporary_file_carries_pmlens_own_prefix(self, home_settings: Path, monkeypatch):
+        home_settings.write_text("{}", encoding="utf-8")
+        replaced: list[str] = []
+        real_replace = os.replace
+
+        def spy(src, dst):
+            replaced.append(Path(src).name)
+            return real_replace(src, dst)
+
+        monkeypatch.setattr("pmlens.hooks.os.replace", spy)
+
+        install_hooks()
+
+        [name] = replaced
+        assert name.startswith(".settings.json.pmlens-")
+        assert name.endswith(".tmp")
+
+    def test_a_copy_left_by_a_killed_write_is_removed_by_the_next_write(self, home_settings: Path):
+        home_settings.write_text("{}", encoding="utf-8")
+        stale = home_settings.parent / ".settings.json.pmlens-k1lled.tmp"
+        stale.write_text('{"env": {"TOKEN": "old"}}', encoding="utf-8")
+        self._aged(stale, hours=2)
+
+        install_hooks()
+
+        assert _listing(home_settings.parent) == ["settings.json"]
+
+    def test_nothing_else_in_the_directory_is_removed(self, home_settings: Path, tmp_path: Path):
+        home_settings.write_text("{}", encoding="utf-8")
+        claude_dir = home_settings.parent
+        elsewhere = tmp_path / "elsewhere.json"
+        elsewhere.write_text("{}", encoding="utf-8")
+        # Another pmlens process may be between its write and its replace.
+        (claude_dir / ".settings.json.pmlens-fresh.tmp").write_text("{}", encoding="utf-8")
+        # Old, but not pmlens's: another tool's temporary file, a backup, the
+        # prefix of another settings file, and a name that only looks similar.
+        for name in (
+            "tmpabc123.tmp",
+            "settings.json.bak.20260101",
+            ".settings.local.json.pmlens-x.tmp",
+            ".settings.json.pmlens-x.tmp.keep",
+        ):
+            self._aged(_written(claude_dir / name), hours=48)
+        # Old and with the prefix, but not a regular file.
+        (claude_dir / ".settings.json.pmlens-dir.tmp").mkdir()
+        self._aged(claude_dir / ".settings.json.pmlens-dir.tmp", hours=48)
+        (claude_dir / ".settings.json.pmlens-link.tmp").symlink_to(elsewhere)
+        self._aged(claude_dir / ".settings.json.pmlens-link.tmp", hours=48)
+        self._aged(elsewhere, hours=48)
+
+        install_hooks()
+
+        assert _listing(claude_dir) == sorted(
+            [
+                "settings.json",
+                ".settings.json.pmlens-fresh.tmp",
+                "tmpabc123.tmp",
+                "settings.json.bak.20260101",
+                ".settings.local.json.pmlens-x.tmp",
+                ".settings.json.pmlens-x.tmp.keep",
+                ".settings.json.pmlens-dir.tmp",
+                ".settings.json.pmlens-link.tmp",
+            ]
+        )
+        assert elsewhere.read_text(encoding="utf-8") == "{}"
+
+    def test_a_refused_write_removes_nothing(self, home_settings: Path, tmp_path: Path):
+        """The sweep belongs to a write that succeeded; a refusal touches nothing at all."""
+        home_settings.write_text("{}", encoding="utf-8")
+        os.link(home_settings, tmp_path / "dotfiles-settings.json")  # refused in _save_settings
+        stale = self._aged(
+            _written(home_settings.parent / ".settings.json.pmlens-k1lled.tmp"), hours=2
+        )
+
+        with pytest.raises(SettingsNotWritableError):
+            install_hooks()
+
+        assert stale.exists()
+
+    def test_a_failed_write_removes_nothing(self, home_settings: Path, monkeypatch):
+        home_settings.write_text("{}", encoding="utf-8")
+        stale = self._aged(
+            _written(home_settings.parent / ".settings.json.pmlens-k1lled.tmp"), hours=2
+        )
+
+        def refuse(src, dst):
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr("pmlens.hooks.os.replace", refuse)
+
+        with pytest.raises(OSError, match="No space left"):
+            install_hooks()
+
+        assert _listing(home_settings.parent) == [
+            ".settings.json.pmlens-k1lled.tmp",
+            "settings.json",
+        ]
+        assert stale.exists()
+
+    def test_a_status_read_removes_the_copy_once_the_hook_is_installed(
+        self, home_settings: Path, pm_project: Path, monkeypatch
+    ):
+        """After the retry that succeeds nothing writes the file again, so the read sweeps."""
+        monkeypatch.setattr(pmlens.server, "PM_LENS_ENABLED", False)
+        install_hooks()
+        installed = _fingerprint(home_settings)
+        leftover = _written(home_settings.parent / ".settings.json.pmlens-k1lled.tmp")
+
+        pmlens.server.pm_status(project_path=str(pm_project))
+        assert leftover.exists()  # younger than an hour: could be another process's
+
+        self._aged(leftover, hours=2)
+        result = pmlens.server.pm_status(project_path=str(pm_project))
+
+        assert _listing(home_settings.parent) == ["settings.json"]
+        assert _fingerprint(home_settings) == installed
+        assert result["hooks"]["installed"] is True
+
+    def test_a_status_read_in_lens_removes_nothing(
+        self, home_settings: Path, pm_project: Path, monkeypatch
+    ):
+        monkeypatch.setattr(pmlens.server, "PM_LENS_ENABLED", True)
+        home_settings.write_text("{}", encoding="utf-8")
+        leftover = self._aged(
+            _written(home_settings.parent / ".settings.json.pmlens-k1lled.tmp"), hours=2
+        )
+
+        pmlens.server.pm_status(project_path=str(pm_project))
+
+        assert leftover.exists()
+
+    def test_a_copy_next_to_a_links_target_is_removed_too(
+        self, home_settings: Path, pm_project: Path, tmp_path: Path, monkeypatch
+    ):
+        monkeypatch.setattr(pmlens.server, "PM_LENS_ENABLED", False)
+        dotfiles = tmp_path / "dotfiles"
+        dotfiles.mkdir()
+        (dotfiles / "claude.json").write_text("{}", encoding="utf-8")
+        home_settings.symlink_to(dotfiles / "claude.json")
+        install_hooks()
+        by_target = self._aged(_written(dotfiles / ".claude.json.pmlens-k1lled.tmp"), hours=2)
+        # From before the file became a link.
+        by_link = self._aged(
+            _written(home_settings.parent / ".settings.json.pmlens-k1lled.tmp"), hours=2
+        )
+
+        pmlens.server.pm_status(project_path=str(pm_project))
+
+        assert not by_target.exists()
+        assert not by_link.exists()
+        assert home_settings.is_symlink()
+
+    def test_a_long_file_name_still_gets_a_temporary_file(
+        self, home_settings: Path, tmp_path: Path
+    ):
+        """The temporary name repeats only the start of the target's name."""
+        target = tmp_path / ("s" * 240 + ".json")
+        target.write_text("{}", encoding="utf-8")
+        home_settings.symlink_to(target)
+
+        install_hooks()
+
+        assert "PostToolUse" in json.loads(target.read_text(encoding="utf-8"))["hooks"]
+        assert not [e for e in tmp_path.iterdir() if e.name.endswith(".tmp")]
+
+
+def _written(path: Path) -> Path:
+    path.write_text("{}", encoding="utf-8")
+    return path
 
 
 class TestSettingsThatCannotBeEncodedAreLeftAlone:

@@ -2098,17 +2098,40 @@ _WHOLE_PM_IGNORES = frozenset(
 )
 # A project's .gitignore is a few lines; a larger one is not read for a hint.
 _ROOT_GITIGNORE_LIMIT = 256 * 1024
+# With either of these set, git works on a repository and a work tree that no
+# ``.git`` entry near the project shows.
+_GIT_DIR_ENV = "GIT_DIR"
+_GIT_WORK_TREE_ENV = "GIT_WORK_TREE"
 
 
 def _git_could_stage_pm(pm_path: Path) -> bool:
     """Whether ``git add`` could stage files of this .pm, as far as lstat and one bounded read tell.
 
-    False when the project is in no git work tree (no ``.git`` entry at the
-    project root or above it) and when the project's own ``.gitignore`` ignores
-    all of ``.pm`` with no later line re-including part of it. The read path
-    runs no git, so nested ignore files, global excludes and ``GIT_DIR`` are
-    not seen: whatever cannot be told counts as True, and the notice is shown.
+    False in two cases only: the project is in no git work tree (no ``.git``
+    entry at the project root or above it), or the project's own
+    ``.gitignore`` ignores all of ``.pm`` and no later line re-includes
+    anything. The lines are read the way git reads them: a line ends at LF,
+    one CR before it is dropped, only trailing spaces are trimmed, and any
+    later ``!`` line counts as a re-include, whatever it names.
+
+    The read path runs no git, so what it can see but not judge counts as
+    True and the notice is shown: a ``.pm`` that is a link (its files live in
+    another directory, possibly another repository), a ``.pm`` that is a
+    repository of its own (a ``.git`` entry inside it), ``GIT_DIR`` or
+    ``GIT_WORK_TREE`` in the environment (git then works on a repository and
+    a work tree no ``.git`` entry shows), an ignore file that cannot be read,
+    and patterns this function does not know.
+
+    Two cases cannot be seen at all. A repository elsewhere whose
+    ``core.worktree`` or ``--git-dir`` alias points here leaves no trace near
+    the project. And a database that was committed before ``.pm`` was ignored
+    stays tracked: ``git add`` keeps staging it whatever ``.gitignore`` says
+    (``git rm --cached`` ends that), with or without a ``.pm/.gitignore``.
     """
+    if pm_path.is_symlink() or os.path.lexists(pm_path / ".git"):
+        return True
+    if os.environ.get(_GIT_DIR_ENV) or os.environ.get(_GIT_WORK_TREE_ENV):
+        return True
     root = pm_path.parent
     if not any(os.path.lexists(directory / ".git") for directory in (root, *root.parents)):
         return False
@@ -2116,11 +2139,11 @@ def _git_could_stage_pm(pm_path: Path) -> bool:
     if text is None:
         return True
     ignored = False
-    for line in text.splitlines():
-        pattern = line.strip()
+    for line in text.split("\n"):
+        pattern = line.removesuffix("\r").rstrip(" ")
         if pattern in _WHOLE_PM_IGNORES:
             ignored = True
-        elif pattern.startswith("!") and ".pm" in pattern:
+        elif pattern.startswith("!"):
             ignored = False
     return not ignored
 

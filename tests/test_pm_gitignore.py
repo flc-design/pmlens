@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 import pmlens.server as srv
-from pmlens.storage import PM_GITIGNORE_ENTRIES, ensure_pm_gitignore
+from pmlens.storage import PM_GITIGNORE_ENTRIES, _git_could_stage_pm, ensure_pm_gitignore
 
 # Assembled at runtime so no secret-shaped literal is in the source (fake data).
 _FAKE_KEY = "sk-test-" + "EXAMPLE" + "0" * 12
@@ -58,8 +58,23 @@ def _codes(result: dict) -> list[str]:
 
 
 def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    """Run git in ``root`` with nothing outside the repository deciding the answer.
+
+    No global or system configuration, no global ignore file (git reads
+    ``$XDG_CONFIG_HOME/git/ignore`` even with the global configuration switched
+    off, so it is named here), and none of the ``GIT_*`` variables a hook
+    passes on, such as its index.
+    """
+    env = {name: value for name, value in os.environ.items() if not name.startswith("GIT_")}
+    env |= {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
     return subprocess.run(
-        ["git", *args], cwd=root, capture_output=True, text=True, timeout=30, check=False
+        ["git", "-c", f"core.excludesFile={os.devnull}", *args],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
     )
 
 
@@ -219,6 +234,12 @@ def _in_git(root: Path) -> Path:
     return root
 
 
+def _needs_a_place_outside_git(tmp_path: Path) -> None:
+    """Skip when pytest's own temporary directory is inside a git work tree (``--basetemp``)."""
+    if any(os.path.lexists(directory / ".git") for directory in (tmp_path, *tmp_path.parents)):
+        pytest.skip("tmp_path is inside a git work tree")
+
+
 def _old_project_with_memory(tmp_path: Path) -> Path:
     root = _in_git(_init(tmp_path, "old"))
     (root / ".pm" / ".gitignore").unlink()
@@ -282,6 +303,7 @@ def test_no_notice_without_a_database_or_with_any_gitignore(tmp_path: Path) -> N
 
 
 def test_no_notice_outside_a_git_work_tree(tmp_path: Path) -> None:
+    _needs_a_place_outside_git(tmp_path)
     root = _init(tmp_path, "old")
     (root / ".pm" / ".gitignore").unlink()
     srv.pm_remember(content="a memory", project_path=str(root))
@@ -305,10 +327,13 @@ def test_a_git_entry_above_the_project_counts(tmp_path: Path, as_file: bool) -> 
     assert "pm_gitignore_missing" in _codes(srv.pm_status(project_path=str(root)))
 
 
-@pytest.mark.parametrize("line", [".pm", ".pm/", "/.pm", "/.pm/", ".pm/*", "**/.pm/", "  .pm/  "])
+@pytest.mark.parametrize(
+    "line", [".pm", ".pm/", "/.pm", "/.pm/", ".pm/*", "**/.pm/", ".pm/  ", ".pm/\r"]
+)
 def test_no_notice_when_the_project_ignores_all_of_pm(tmp_path: Path, line: str) -> None:
+    # Trailing spaces and a CRLF line ending are not part of the pattern for git.
     root = _old_project_with_memory(tmp_path)
-    (root / ".gitignore").write_text(f"# build output\ndist/\n{line}\n", encoding="utf-8")
+    (root / ".gitignore").write_bytes(f"# build output\ndist/\n{line}\n".encode())
 
     assert "pm_gitignore_missing" not in _codes(srv.pm_status(project_path=str(root)))
 
@@ -321,14 +346,222 @@ def test_no_notice_when_the_project_ignores_all_of_pm(tmp_path: Path, line: str)
         ".pm/memory.db\n",  # one file is not all of .pm
         ".pmx/\n",  # another name
         ".pm/\n!.pm/tasks.yaml\n",  # re-included afterwards
+        ".pm/\n!*\n",  # a re-include need not name .pm
+        ".pm/*\n!*.db\n",  # the databases themselves, re-included
+        "  .pm/\n",  # leading spaces are part of the pattern
+        ".pm/\t\n",  # only trailing spaces are trimmed, not a tab
+        "dist/\r.pm/\rbuild/\n",  # a lone CR ends no line: one pattern
+        "x\x0c.pm/\n",  # nor does a form feed
     ],
-    ids=["unrelated", "comment", "one-file", "other-name", "re-included"],
+    ids=[
+        "unrelated",
+        "comment",
+        "one-file",
+        "other-name",
+        "re-included",
+        "re-included-by-any-pattern",
+        "databases-re-included",
+        "leading-spaces",
+        "trailing-tab",
+        "cr-only",
+        "form-feed",
+    ],
 )
 def test_the_notice_stays_when_part_of_pm_can_be_staged(tmp_path: Path, text: str) -> None:
     root = _old_project_with_memory(tmp_path)
-    (root / ".gitignore").write_text(text, encoding="utf-8")
+    (root / ".gitignore").write_bytes(text.encode())
 
     assert "pm_gitignore_missing" in _codes(srv.pm_status(project_path=str(root)))
+
+
+@pytest.mark.parametrize("in_git", [True, False], ids=["in-git", "outside-git"])
+def test_a_pm_that_is_a_link_keeps_the_notice(tmp_path: Path, in_git: bool) -> None:
+    # Its files live where the link points, which may be another repository:
+    # neither this project's .git nor its .gitignore says anything about them.
+    root = _init(tmp_path, "old")
+    (root / ".pm" / ".gitignore").unlink()
+    srv.pm_remember(content="a memory", project_path=str(root))
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    (root / ".pm").rename(notes / "old")
+    (root / ".pm").symlink_to(notes / "old")
+    if in_git:
+        _in_git(root)
+    (root / ".gitignore").write_text(".pm\n", encoding="utf-8")
+
+    assert _git_could_stage_pm(root / ".pm") is True
+    assert "pm_gitignore_missing" in _codes(srv.pm_status(project_path=str(root)))
+
+
+@pytest.mark.parametrize("as_file", [False, True], ids=["directory", "gitfile"])
+@pytest.mark.parametrize("root_in_git", [True, False], ids=["root-ignores-pm", "root-outside-git"])
+def test_a_pm_that_is_a_repository_of_its_own_keeps_the_notice(
+    tmp_path: Path, as_file: bool, root_in_git: bool
+) -> None:
+    # Ignored by the public repository and versioned privately: `git add` run
+    # inside .pm stages the databases, and the project's .gitignore has no say.
+    root = _init(tmp_path, "old")
+    (root / ".pm" / ".gitignore").unlink()
+    srv.pm_remember(content="a memory", project_path=str(root))
+    if root_in_git:
+        _in_git(root)
+        (root / ".gitignore").write_text(".pm/\n", encoding="utf-8")
+    if as_file:
+        (root / ".pm" / ".git").write_text("gitdir: elsewhere\n", encoding="utf-8")
+    else:
+        (root / ".pm" / ".git").mkdir()
+
+    assert _git_could_stage_pm(root / ".pm") is True
+    assert "pm_gitignore_missing" in _codes(srv.pm_status(project_path=str(root)))
+
+
+@pytest.mark.parametrize("variable", ["GIT_DIR", "GIT_WORK_TREE"])
+def test_a_git_location_from_the_environment_keeps_the_notice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, variable: str
+) -> None:
+    # No .git entry near the project, yet git works on it with these set.
+    _needs_a_place_outside_git(tmp_path)
+    root = _init(tmp_path, "old")
+    (root / ".pm" / ".gitignore").unlink()
+    srv.pm_remember(content="a memory", project_path=str(root))
+    assert "pm_gitignore_missing" not in _codes(srv.pm_status(project_path=str(root)))
+
+    monkeypatch.setenv(variable, str(tmp_path / "elsewhere"))
+
+    assert "pm_gitignore_missing" in _codes(srv.pm_status(project_path=str(root)))
+
+
+@pytest.mark.parametrize("variable", ["GIT_DIR", "GIT_WORK_TREE"])
+def test_a_git_location_from_the_environment_outweighs_the_projects_gitignore(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, variable: str
+) -> None:
+    # The work tree those variables name may be .pm itself, and then the
+    # project's .gitignore is not the file git reads.
+    root = _old_project_with_memory(tmp_path)
+    (root / ".gitignore").write_text(".pm/\n", encoding="utf-8")
+    assert "pm_gitignore_missing" not in _codes(srv.pm_status(project_path=str(root)))
+
+    monkeypatch.setenv(variable, str(tmp_path / "elsewhere"))
+
+    assert "pm_gitignore_missing" in _codes(srv.pm_status(project_path=str(root)))
+
+
+# What git reads from a project's .gitignore, against what the notice assumes.
+# Each text is written as the whole file.
+_GITIGNORE_TEXTS = [
+    "",
+    "dist/\n",
+    ".pm\n",
+    ".pm/\n",
+    "/.pm\n",
+    "/.pm/\n",
+    ".pm/*\n",
+    "/.pm/*\n",
+    ".pm/**\n",
+    "/.pm/**\n",
+    "**/.pm\n",
+    "**/.pm/\n",
+    ".pm/",  # no final newline
+    ".pm/  \n",
+    ".pm/\r\n",
+    "dist/\r\n.pm/\r\nbuild/\r\n",
+    ".pm/ # not a comment\n",
+    ".pm/\\ \n",  # an escaped trailing space
+    "  .pm/  \n",
+    " .pm/\n",
+    "\t.pm/\n",
+    ".pm/\t\n",
+    ".pm/\u3000\n",
+    ".pm/\u00a0\n",
+    ".pm/\x0c\n",
+    "dist/\r.pm/\rbuild/\n",
+    "x\x0b.pm\n",
+    "# s\x0c.pm/\n",
+    "x\u2028.pm/\n",
+    "x\u0085.pm/\n",
+    "x\x1c.pm/\n",
+    ".pm/\n!*\n",
+    ".pm/\n!.*\n",
+    ".pm\n!/.p*\n",
+    ".pm/\n!/*\n",
+    ".pm/\n!*/\n",
+    "**/.pm\n!**\n",
+    ".pm\n!.[p]m\n",
+    ".pm\n!.??\n",
+    ".pm/*\n!*.db\n",
+    ".pm/**\n!**/*.db\n",
+    ".pm/*\n!drafts.db\n",
+    ".pm/*\n!memory.db\n",
+    ".pm/*\n!/.p*/drafts.db\n",
+    "/.pm/*\n!*\n",
+    "!*\n.pm/\n",
+    ".pm\n!*\n.pm\n",
+    ".pm/\n!.pm/tasks.yaml\n",
+    "\ufeff.pm/\n",
+    ".PM/\n",
+    ".pm/memory.db\n",
+    "*.db\n",
+]
+
+
+def _pm_paths_git_would_stage(tmp_path: Path, text: str) -> tuple[Path, list[str]]:
+    """A repository with ``text`` as its .gitignore and two databases in .pm.
+
+    Returns its root and the paths under .pm that ``git add --all`` would stage.
+    """
+    root = tmp_path / "repo"
+    (root / ".pm").mkdir(parents=True)
+    init = _git(root, "init", "-q")
+    assert init.returncode == 0, init.stderr
+    for name in ("drafts.db", "memory.db"):
+        (root / ".pm" / name).write_bytes(b"sqlite")
+    (root / ".gitignore").write_bytes(text.encode())
+    listed = _git(root, "add", "--all", "--dry-run")
+    assert listed.returncode == 0, listed.stderr
+    staged = [
+        path
+        for path in re.findall(r"^add '(.+)'$", listed.stdout, flags=re.MULTILINE)
+        if path.startswith(".pm/")
+    ]
+    return root, sorted(staged)
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
+@pytest.mark.parametrize("text", _GITIGNORE_TEXTS, ids=[repr(t) for t in _GITIGNORE_TEXTS])
+def test_the_notice_is_never_withheld_where_git_would_stage_a_database(
+    tmp_path: Path, text: str
+) -> None:
+    """The unsafe direction only: "git cannot stage it" must be true whenever it is claimed.
+
+    The other direction (a notice git would not have needed) is allowed: what
+    this function cannot tell counts as "could be staged".
+    """
+    root, staged = _pm_paths_git_would_stage(tmp_path, text)
+
+    if not _git_could_stage_pm(root / ".pm"):
+        assert not staged, f"the notice is withheld, but git would stage {staged}"
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
+@pytest.mark.parametrize("text", ["", "dist/\n", "  .pm/\n", ".pm/\n!*\n"])
+def test_the_git_comparison_really_sees_git_stage_the_databases(tmp_path: Path, text: str) -> None:
+    # If something outside the repository ignored *.db, git would stage nothing
+    # for any text and the comparison above would pass whatever the function says.
+    _, staged = _pm_paths_git_would_stage(tmp_path, text)
+
+    assert staged == [".pm/drafts.db", ".pm/memory.db"]
+
+
+def test_the_git_comparison_covers_both_answers(tmp_path: Path) -> None:
+    # Or the test above could pass by the function always answering "could be staged".
+    answers = set()
+    for index, text in enumerate(_GITIGNORE_TEXTS):
+        root = tmp_path / f"repo{index}"
+        (root / ".pm").mkdir(parents=True)
+        (root / ".git").mkdir()
+        (root / ".gitignore").write_bytes(text.encode())
+        answers.add(_git_could_stage_pm(root / ".pm"))
+    assert answers == {True, False}
 
 
 def test_a_gitignore_that_cannot_be_read_keeps_the_notice(tmp_path: Path) -> None:

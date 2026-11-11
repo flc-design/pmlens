@@ -26,6 +26,11 @@ PMLENS_ENV_CLEARED: tuple[str, ...] = (
     "PM_DESKTOP_WRITE",  # outbox mode
     "PM_LOCK_TIMEOUT_S",  # how long a writer waits for a lock
     "PM_SERVER_RECALL_AMBIGUITY_WINDOW_MIN",  # which sessions count as concurrent
+    # Set by git while a hook runs. pmlens reads them to tell whether a project
+    # is in a work tree, and the suite's own git calls must not act on the
+    # repository the hook belongs to.
+    "GIT_DIR",
+    "GIT_WORK_TREE",
 )
 
 # Read by pmlens but left as the shell has it, each with the reason.

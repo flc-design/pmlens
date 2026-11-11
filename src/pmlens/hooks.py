@@ -12,8 +12,10 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 from .models import PmServerError
@@ -83,12 +85,24 @@ class SettingsUnreadableError(PmServerError):
 _PROBLEM_READ_ONLY = "the file is read-only"
 _PROBLEM_DANGLING_LINK = "it is a link to a location that does not exist"
 _PROBLEM_DIRECTORY = "its directory is not writable, so it cannot be replaced safely"
+_PROBLEM_HARD_LINK = (
+    "the file has another hard link, and replacing it would leave that other name with the old "
+    "content"
+)
 _PROBLEM_WRITE_FAILED = "writing it failed"
 _PROBLEM_NOT_UTF8 = "it holds text that cannot be written back as UTF-8"
 
 _REMEDY_NOT_WRITABLE = (
     "Make that file and its directory writable (for a link: create the "
     "directory it points into), then run the command again; `pmlens "
+    "install-hooks` installs the hook. pm_status tries the hook install "
+    "again on each call and reports this until it succeeds."
+)
+# Permissions are not the cause here either.
+_REMEDY_HARD_LINK = (
+    "pmlens replaces this file as a whole and never writes into it, so it did "
+    "not change it. Make the file a symbolic link instead of a hard link (or "
+    "remove the other name), then run the command again; `pmlens "
     "install-hooks` installs the hook. pm_status tries the hook install "
     "again on each call and reports this until it succeeds."
 )
@@ -105,7 +119,10 @@ _REMEDY_NOT_UTF8 = (
 
 def _settings_not_writable_warning(path: Path, problem: str) -> dict:
     """The ``warnings[]`` entry for a settings file pmlens could not write."""
-    remediation = _REMEDY_NOT_UTF8 if problem == _PROBLEM_NOT_UTF8 else _REMEDY_NOT_WRITABLE
+    remediation = {
+        _PROBLEM_NOT_UTF8: _REMEDY_NOT_UTF8,
+        _PROBLEM_HARD_LINK: _REMEDY_HARD_LINK,
+    }.get(problem, _REMEDY_NOT_WRITABLE)
     return {
         "level": "warning",
         "code": "hooks_settings_not_writable",
@@ -122,8 +139,9 @@ class SettingsNotWritableError(PmServerError):
     """pmlens will not, or could not, write the settings file.
 
     Raised by :func:`_save_settings` before anything is written when the file
-    is read-only or is a link to a location that does not exist: replacing a
-    file only needs a writable directory, so without this check a status read
+    is read-only, has another hard link, sits in a directory that is not
+    writable, or is a link to a location that does not exist: replacing a file
+    only needs a writable directory, so without these checks a status read
     would rewrite a file its owner had write-protected. Also raised, equally
     before anything is written, when the settings cannot be encoded as UTF-8.
 
@@ -214,11 +232,16 @@ def _save_settings(path: Path, settings: dict) -> None:
     refused: an in-place write that fails partway leaves the user's settings
     truncated, and the callers include a status read.
 
+    A file with a second hard link is refused as well: the replacement gives
+    this name a new inode, and the other name (a dotfiles checkout) would keep
+    the old content without anyone being told. Extended attributes of the old
+    file are not carried over.
+
     Raises:
-        SettingsNotWritableError: The file is read-only, its directory is not
-            writable, it is a link whose destination directory does not
-            exist, or the settings hold text that is not valid UTF-8. Nothing
-            is written.
+        SettingsNotWritableError: The file is read-only, has another hard
+            link, its directory is not writable, it is a link whose
+            destination directory does not exist, or the settings hold text
+            that is not valid UTF-8. Nothing is written.
         OSError: The write itself failed. The old file is still in place.
     """
     target = path.resolve()
@@ -232,6 +255,8 @@ def _save_settings(path: Path, settings: dict) -> None:
     # protection has to be checked here or it would be bypassed.
     if target.exists() and not os.access(target, os.W_OK):
         raise SettingsNotWritableError(path, _PROBLEM_READ_ONLY)
+    if target.exists() and os.stat(target).st_nlink > 1:
+        raise SettingsNotWritableError(path, _PROBLEM_HARD_LINK)
     text = json.dumps(settings, indent=2, ensure_ascii=False) + "\n"
     # Encoded before any file is opened. JSON may hold half of a surrogate
     # pair as an escape (a writer that cut a string in the middle of an emoji
@@ -242,7 +267,9 @@ def _save_settings(path: Path, settings: dict) -> None:
         # Not chained: the codec's message quotes the file's text.
         raise SettingsNotWritableError(path, _PROBLEM_NOT_UTF8) from None
     try:
-        fd, tmp_name = tempfile.mkstemp(dir=str(target.parent), suffix=".tmp")
+        fd, tmp_name = tempfile.mkstemp(
+            dir=str(target.parent), prefix=_temp_prefix(target), suffix=_TEMP_SUFFIX
+        )
     except PermissionError:
         raise SettingsNotWritableError(path, _PROBLEM_DIRECTORY) from None
     try:
@@ -262,6 +289,74 @@ def _save_settings(path: Path, settings: dict) -> None:
     except BaseException:
         Path(tmp_name).unlink(missing_ok=True)
         raise
+    _remove_stale_temp_files(target)
+
+
+_TEMP_SUFFIX = ".tmp"
+# A temporary copy older than this belongs to a write that was killed, not to
+# one that is still running in another process.
+_STALE_TEMP_SECONDS = 3600
+
+
+# How much of the target's name the temporary file's name repeats: enough to
+# tell whose copy it is, short enough that a long name still fits the file
+# system's limit for one name. That limit is in bytes (255 on most), and a
+# character can take four: 48 * 4, plus the 21 bytes pmlens adds, is 213.
+_TEMP_NAME_CHARS = 48
+
+
+def _temp_prefix(target: Path) -> str:
+    """The name prefix of the temporary copies pmlens writes next to ``target``."""
+    return f".{target.name[:_TEMP_NAME_CHARS]}.pmlens-"
+
+
+def _remove_stale_temp_files(target: Path) -> None:
+    """Remove temporary copies that a killed write left next to ``target``.
+
+    A process killed between writing its temporary file and the replace leaves
+    a full copy of the user's settings behind. Only regular files that carry
+    pmlens's own prefix and are older than _STALE_TEMP_SECONDS are removed, so
+    a write in progress in another process keeps its file. Best effort: a
+    failure here must not fail a write that has already succeeded, or a
+    status read.
+    """
+    prefix = _temp_prefix(target)
+    cutoff = time.time() - _STALE_TEMP_SECONDS
+    try:
+        names = os.listdir(target.parent)
+    except OSError:
+        return
+    for name in names:
+        if not (name.startswith(prefix) and name.endswith(_TEMP_SUFFIX)):
+            continue
+        candidate = target.parent / name
+        try:
+            info = os.lstat(candidate)
+            if stat.S_ISREG(info.st_mode) and info.st_mtime < cutoff:
+                os.unlink(candidate)
+        except OSError:
+            continue
+
+
+def remove_stale_settings_temp_files() -> None:
+    """Remove pmlens's own stale temporary copies of the Claude Code settings.
+
+    For the status read outside Lens. The sweep after a successful write is
+    not enough on its own: a killed write is usually followed, within the
+    hour, by one that succeeds, and after that nothing writes the file again,
+    so the copy would never be looked at once it is old enough to remove.
+
+    Both the settings path's own directory and, for a link, the directory of
+    its target are swept: a copy can be left in either, depending on what the
+    path was when the write was killed.
+    """
+    path = _settings_path()
+    try:
+        target = path.resolve()
+    except (OSError, RuntimeError):  # a link loop, on the Pythons that raise for one
+        target = path
+    for settings_file in {path, target}:
+        _remove_stale_temp_files(settings_file)
 
 
 def _pm_server_command() -> str:
@@ -536,8 +631,9 @@ def install_hooks() -> str:
     Raises:
         SettingsUnreadableError: The settings file exists but cannot be read
             as Claude Code settings. Nothing is written.
-        SettingsNotWritableError: The settings file is read-only, or is a link
-            to a location that does not exist. Nothing is written.
+        SettingsNotWritableError: The settings file cannot be replaced safely
+            (read-only, another hard link, a directory that is not writable,
+            a link to a location that does not exist). Nothing is written.
         OSError: Writing the file failed.
     """
     path = _settings_path()
@@ -583,8 +679,9 @@ def uninstall_hooks() -> str:
     Raises:
         SettingsUnreadableError: The settings file exists but cannot be read
             as Claude Code settings. Nothing is written.
-        SettingsNotWritableError: The settings file is read-only, or is a link
-            to a location that does not exist. Nothing is written.
+        SettingsNotWritableError: The settings file cannot be replaced safely
+            (read-only, another hard link, a directory that is not writable,
+            a link to a location that does not exist). Nothing is written.
         OSError: Writing the file failed.
     """
     path = _settings_path()

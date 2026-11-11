@@ -1310,6 +1310,7 @@ def pm_status(project_path: str | None = None) -> dict:
         get_hooks_status,
         hooks_settings_write_failed_warning,
         install_hooks,
+        remove_stale_settings_temp_files,
     )
 
     hooks_status = get_hooks_status()
@@ -1338,6 +1339,11 @@ def pm_status(project_path: str | None = None) -> dict:
             # because it could not write the host's settings file.
             hooks_write_warning = hooks_settings_write_failed_warning()
         hooks_status = get_hooks_status()
+    if not PM_LENS_ENABLED:
+        # A write that was killed leaves a copy of the settings next to the
+        # file. Outside Lens only: removing it is a write to the host's
+        # configuration directory, like the install above.
+        remove_stale_settings_temp_files()
 
     # Next PM actions — contextual reminders for the LLM
     next_actions = _build_next_actions(active_tasks, tasks)
