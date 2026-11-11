@@ -6,6 +6,7 @@ and functions to install/uninstall hooks in Claude Code settings.
 
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import os
 import re
@@ -836,20 +837,35 @@ def _build_commit_reminder(pm_path: Path, project_path: Path | None = None) -> s
     only the RO_ALLOWLIST tools, so suggesting ``pm_update_task`` / ``pm_log``
     would produce a confusing ``tool not found`` for the user. Switch to a
     read-only suggestion set when Lens is active.
+
+    Only in_progress tasks updated in the last ATTENTION_STALE_DAYS days are
+    named. A task left in_progress for months is almost never what a commit
+    completed, and naming the same forgotten ids after every commit teaches
+    the reader to skip the reminder; those are only counted, and pm_status
+    shows them with their age.
     """
     from .models import TaskStatus
     from .storage import load_tasks
+    from .velocity import ATTENTION_STALE_DAYS, is_stale
 
     lens_mode = os.environ.get("PM_LENS", "").lower() in {"1", "true", "yes", "on"}
 
     tasks = load_tasks(pm_path)
     active = [t for t in tasks if t.status == TaskStatus.IN_PROGRESS and _TASK_ID.match(t.id)]
-    task_ids = ", ".join(t.id for t in active)
+    today = _dt.date.today()
+    recent = [t for t in active if not is_stale(t, today)]
+    stale_count = len(active) - len(recent)
+    quiet_for = f"not updated for {ATTENTION_STALE_DAYS}+ days"
+    task_ids = ", ".join(t.id for t in recent)
+    if recent and stale_count:
+        task_ids += f" (and {stale_count} more {quiet_for})"
 
     if lens_mode:
         lines = ["[PM Lens] git commit recorded. (Read-only mode)"]
-        if active:
+        if recent:
             lines.append(f"In progress: {task_ids}.")
+        elif stale_count:
+            lines.append(f"{stale_count} in_progress task(s) {quiet_for}.")
         lines.append("pm_next, pm_status and pm_tasks show the current progress.")
         lines.append(
             "Recording task updates needs a full-mode pmlens host "
@@ -867,6 +883,13 @@ def _build_commit_reminder(pm_path: Path, project_path: Path | None = None) -> s
             # without a safe way to name it, say nothing.
             return ""
         where = f' These tasks belong to the project at "{project_path}"; pass it as project_path.'
+    if not recent:
+        # Nothing this commit is likely to have completed: one sentence, no ids.
+        of_project = f' of the project at "{project_path}"' if project_path is not None else ""
+        return (
+            f"[PM Lens] git commit recorded; {stale_count} in_progress task(s){of_project} "
+            f"{quiet_for} (pm_status lists them)."
+        )
     return (
         f"[PM Lens] git commit recorded. In progress: {task_ids}. "
         "If this commit completed one of them and it is not yet marked done, "

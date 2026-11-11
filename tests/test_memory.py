@@ -1760,13 +1760,195 @@ class TestServerToolIntegration:
             action="save",
             summary="Completed auth module implementation",
             goals="JWT auth working",
-            pending="Code review,Deploy",
+            pending=["Code review", "Deploy"],
         )
         assert save_result["status"] == "saved"
 
         get_result = pm_session_summary(action="get")
         assert get_result["summary"] == "Completed auth module implementation"
         assert get_result["pending"] == ["Code review", "Deploy"]
+
+    def _saved_pending(self, pending: list[str] | str | None) -> list[str]:
+        from pmlens.server import pm_session_summary
+
+        saved = pm_session_summary(action="save", summary="s", pending=pending)
+        assert saved["status"] == "saved"
+        return pm_session_summary(action="get")["pending"]
+
+    def test_pending_string_is_not_split_on_commas(self):
+        """A comma inside one item used to cut it into fragments."""
+        text = "Fix parser, which fails on tabs"
+
+        assert self._saved_pending(text) == [text]
+        assert self._saved_pending("認証の再設計、テスト追加") == ["認証の再設計、テスト追加"]
+
+    def test_pending_string_has_one_item_per_line(self):
+        text = "Fix parser, which fails on tabs\n\n  Write docs  \r\nShip\n"
+
+        assert self._saved_pending(text) == [
+            "Fix parser, which fails on tabs",
+            "Write docs",
+            "Ship",
+        ]
+
+    def test_pending_list_is_stored_item_by_item(self):
+        items = ["Fix parser, which fails on tabs", "  Write docs ", "", "two\nlines"]
+
+        assert self._saved_pending(items) == [
+            "Fix parser, which fails on tabs",
+            "Write docs",
+            "two\nlines",
+        ]
+
+    @pytest.mark.parametrize("nothing", [None, "", "  \n ", []])
+    def test_no_pending_is_an_empty_list(self, nothing):
+        assert self._saved_pending(nothing) == []
+
+    def test_pending_dropped_is_an_info_with_the_usual_keys(self):
+        from pmlens.server import pm_session_summary
+
+        pm_session_summary(action="save", summary="s", pending=["Write docs", "Ship, then tag"])
+        second = pm_session_summary(action="save", summary="s", pending=["Write docs"])
+
+        (warning,) = second["warnings"]
+        assert set(warning) == {"level", "code", "message", "remediation"}
+        assert warning["level"] == "info"
+        assert warning["code"] == "session_summary_pending_dropped"
+        assert "Ship, then tag" in warning["message"]
+        assert "Write docs" not in warning["message"]
+
+    def test_a_reworded_spacing_or_case_is_not_a_dropped_item(self):
+        from pmlens.server import pm_session_summary
+
+        pm_session_summary(action="save", summary="s", pending=["Write  the Docs", "ship"])
+        second = pm_session_summary(action="save", summary="s", pending="write the docs\nShip")
+
+        assert second["warnings"] == []
+
+    def test_fragments_of_an_old_comma_split_are_carried_by_the_whole_sentence(self):
+        """Summaries saved before stored the pieces; saving the sentence whole is no drop."""
+        import pmlens.server as srv
+        from pmlens.models import SessionSummary
+
+        srv._get_memory_store(None).save_session_summary(
+            SessionSummary(
+                session_id=srv._current_session_id,
+                summary="old",
+                pending=["Fix parser", "which fails on tabs", "Write docs"],
+                project="testproj",
+            )
+        )
+        # Reading is unchanged: the stored items come back as they are.
+        assert srv.pm_session_summary(action="get")["pending"] == [
+            "Fix parser",
+            "which fails on tabs",
+            "Write docs",
+        ]
+
+        whole = srv.pm_session_summary(
+            action="save", summary="new", pending="Fix parser, which fails on tabs\nWrite docs"
+        )
+        assert whole["warnings"] == []
+
+        fewer = srv.pm_session_summary(
+            action="save", summary="newer", pending=["Fix parser, which fails on tabs"]
+        )
+        (warning,) = fewer["warnings"]
+        assert warning["message"].endswith("does not: Write docs.")
+
+    @staticmethod
+    def _dropped_after(first: list[str] | str, second: list[str] | str) -> str | None:
+        """The items the second save reports as dropped ("a; b"), None without a warning."""
+        from pmlens.server import pm_session_summary
+
+        pm_session_summary(action="save", summary="s", pending=first)
+        warnings = pm_session_summary(action="save", summary="s", pending=second)["warnings"]
+        if not warnings:
+            return None
+        (warning,) = warnings
+        return warning["message"].split("does not: ")[1].removesuffix(".")
+
+    @pytest.mark.parametrize(
+        ("first", "second", "dropped"),
+        [
+            (["CI", "Write the specification"], ["Write the specification"], "CI"),
+            (["CI", "Write docs"], "Write docs for the specification", "CI; Write docs"),
+            (["Deploy", "Fix parser"], "Fix parser and redeploy docs", "Deploy; Fix parser"),
+            (["tests", "docs", "release v2"], ["add tests docs page"], "tests; docs; release v2"),
+            (["Docs", "Release"], ["Update release notes; undocumented API left"], "Docs; Release"),
+        ],
+    )
+    def test_an_item_whose_text_occurs_inside_a_new_item_is_still_dropped(
+        self, first, second, dropped
+    ):
+        """Whole items are compared: "CI" is not carried by "specification"."""
+        assert self._dropped_after(first, second) == dropped
+
+    @pytest.mark.parametrize(
+        ("first", "second"),
+        [
+            ("A, B", ["A", "B"]),
+            (
+                "Fix parser, which fails on tabs, Write docs",
+                "Fix parser, which fails on tabs\nWrite docs",
+            ),
+            (
+                "認証の再設計、テスト追加、README 更新",
+                ["認証の再設計", "テスト追加", "readme  更新"],
+            ),
+            (["A", "B"], "a, b"),
+            (["A, B", "C"], ["A", "B, C"]),
+        ],
+    )
+    def test_items_split_differently_at_commas_are_not_dropped(self, first, second):
+        """One string with commas, then the same items as a list or as lines (and back)."""
+        assert self._dropped_after(first, second) is None
+
+    @pytest.mark.parametrize(
+        ("first", "second", "dropped"),
+        [
+            ("A, B", ["A"], "A, B"),
+            (["A, B", "C"], ["A", "C"], "A, B"),
+            ([",", "A"], ["A"], ","),
+            (
+                "認証の再設計、テスト追加、README 更新",
+                "認証の再設計、テスト追加、README を更新",
+                "認証の再設計、テスト追加、README 更新",
+            ),
+        ],
+    )
+    def test_a_split_that_loses_a_part_or_a_rewording_is_listed(self, first, second, dropped):
+        """A reworded item cannot be told from a dropped one, so it is listed to confirm."""
+        assert self._dropped_after(first, second) == dropped
+
+    def test_pending_list_reaches_the_tool_through_fastmcp(self):
+        """The declared type must let both a list and a string through validation."""
+        import asyncio
+
+        from fastmcp import Client
+
+        import pmlens.server as srv
+
+        async def call(pending) -> tuple[bool, dict]:
+            async with Client(srv.mcp) as client:
+                result = await client.call_tool(
+                    "pm_session_summary",
+                    {"summary": "s", "pending": pending},
+                    raise_on_error=False,
+                )
+                tools = {t.name: t for t in await client.list_tools()}
+                tool = tools["pm_session_summary"]
+                # input_schema in MCP SDK 2 (fastmcp 4), inputSchema before.
+                schema = getattr(tool, "input_schema", None) or tool.inputSchema
+                return result.is_error, schema["properties"]["pending"]
+
+        for pending in (["Fix parser, which fails on tabs", "Ship"], "Fix parser, which fails"):
+            is_error, schema = asyncio.run(call(pending))
+            assert is_error is False
+            expected = [pending] if isinstance(pending, str) else pending
+            assert srv.pm_session_summary(action="get")["pending"] == expected
+        assert {"type": "array", "items": {"type": "string"}} in schema["anyOf"]
+        assert {"type": "string"} in schema["anyOf"]
 
     def test_session_summary_list(self):
         from pmlens.server import pm_session_summary

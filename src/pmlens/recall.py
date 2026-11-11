@@ -122,7 +122,9 @@ class ContextBuilder:
         if summary.goals:
             lines.append(f"**目標**: {summary.goals}")
         if summary.pending:
-            lines.append("**保留事項**: " + ", ".join(summary.pending))
+            # An item may hold a comma, so a comma cannot be what separates
+            # two items: the reader would count three where two were saved.
+            lines.append("**保留事項**: " + "; ".join(summary.pending))
 
         text = "\n".join(lines)
         return _truncate_to_tokens(text, budget)

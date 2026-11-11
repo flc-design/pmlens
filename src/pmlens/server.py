@@ -13,8 +13,9 @@ import stat
 import uuid
 from collections import Counter
 from collections.abc import Callable
+from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 import yaml
 from fastmcp import FastMCP
@@ -122,7 +123,12 @@ from .utils import (
     is_initialized_project,
     resolve_project_path,
 )
-from .velocity import calculate_velocity, detect_risks
+from .velocity import (
+    ATTENTION_STALE_DAYS,
+    calculate_velocity,
+    days_since_update,
+    detect_risks,
+)
 from .workflow import abandon_workflow, advance_step, start_workflow, workflow_status
 
 # ─── Lens Mode (PMSERV-079, WF-025) ──────────────────
@@ -259,6 +265,25 @@ OUTBOX_READ_ALLOWLIST: frozenset[str] = frozenset(
 
 REGISTERED_TOOLS: set[str] = set()
 
+# The header of a Google-style argument section, in a dedented docstring.
+_ARGS_SECTION_RE = re.compile(r"^Args:[ \t]*$", re.MULTILINE)
+
+
+def _whole_docstring_description(fn: Callable[..., Any]) -> str | None:
+    """The docstring to register as ``fn``'s description, or None to let fastmcp derive it.
+
+    fastmcp 4.1 parses a docstring for sections and keeps only the text before
+    the first one as the description. A line such as ``query: text`` followed
+    by an indented line counts as a section there, so the calling instructions
+    below it never reached the model. A docstring that has no ``Args:`` section
+    has nothing to move into the parameter descriptions and is sent whole;
+    one that has it is left to fastmcp.
+    """
+    doc = inspect.getdoc(fn)
+    if not doc or _ARGS_SECTION_RE.search(doc):
+        return None
+    return doc
+
 
 def _tool():
     """``@_tool()`` をラップして PM_LENS / PM_DESKTOP_WRITE モードを尊重する。
@@ -283,7 +308,7 @@ def _tool():
                 if not (PM_DESKTOP_WRITE_ENABLED and tool_name in OUTBOX_WRITE_ALLOWLIST):
                     return fn
         REGISTERED_TOOLS.add(tool_name)
-        mcp.tool()(_content_free_errors(fn))
+        mcp.tool(description=_whole_docstring_description(fn))(_content_free_errors(fn))
         return fn
 
     return decorator
@@ -354,8 +379,9 @@ def _content_free_errors(fn: Callable[..., Any]) -> Callable[..., Any]:
     without a traceback.
 
     Every other exception passes through unchanged. This is not a general
-    filter: tools report a bad argument with the ValueError of an enum lookup
-    (``'P9' is not a valid Priority``), and that text must reach the caller.
+    filter: tools report a bad argument with a ValueError that names it and
+    its valid values (``priority must be one of: P0, P1, P2, P3``, see
+    _enum_arg), and that text must reach the caller.
     Only the registered tool is wrapped; direct calls (tests, the CLI) still
     see the original exceptions.
     """
@@ -715,6 +741,46 @@ def _get_pm_path(project_path: str | None) -> Path:
     return root / ".pm"
 
 
+_E = TypeVar("_E", bound=StrEnum)
+
+
+def _enum_arg(
+    enum_cls: type[_E],
+    value: object,
+    arg_name: str,
+    error: type[Exception] = ValueError,
+) -> _E:
+    """Turn a tool's string argument into a member of ``enum_cls``.
+
+    The value is accepted as the enum spells it, and in the spellings a caller
+    most often sends instead: surrounding whitespace, another letter case, and
+    '-' or ' ' where the value has '_' ("In-Progress" is in_progress). Nothing
+    else is guessed: "doing" is not a status.
+
+    Any other value raises ``error`` with a message that names the argument and
+    lists the valid values, so the caller can correct the call in one step. The
+    value passed is not repeated in it. Read filters go through here as well:
+    an unknown filter value used to match nothing, and an empty result reads as
+    "there are none".
+
+    Args:
+        enum_cls: The enum the argument is parsed into.
+        value: What the caller passed.
+        arg_name: The argument's name, as the tool declares it.
+        error: The exception type to raise for an unknown value.
+
+    Returns:
+        The matching member.
+    """
+    if isinstance(value, str):
+        wanted = value.strip().lower().replace("-", "_").replace(" ", "_")
+        for member in enum_cls:
+            if member.value.lower() == wanted:
+                return member
+    valid = ", ".join(member.value for member in enum_cls)
+    raise error(f"{arg_name} must be one of: {valid}")
+
+
 def _task_summary(task: Task) -> dict:
     """Convert a Task to a concise dict for tool output."""
     result = {
@@ -756,6 +822,133 @@ def _build_next_actions(active_tasks: list[dict], all_tasks: list[Task]) -> list
     actions.append("Call pm_session_summary before ending the session")
 
     return actions
+
+
+# pm_status is read at the start of every session, so ``attention`` names only
+# a few tasks; the counts beside the lists are always complete.
+_ATTENTION_REVIEW_LIMIT = 5
+_ATTENTION_STALE_LIMIT = 3
+# Task ids one next_pm_actions line names before it only counts the rest.
+_ATTENTION_ID_LIMIT = 10
+
+
+def _is_open_defect(task: Task) -> bool:
+    """Whether ``task`` is a child issue that still holds its parent in review.
+
+    A child without a severity predates the field and is treated as a defect;
+    an enhancement is backlog and never holds the parent.
+    """
+    return (
+        task.parent_id is not None
+        and task.status != TaskStatus.DONE
+        and task.severity != IssueSeverity.ENHANCEMENT
+    )
+
+
+def _build_attention(tasks: list[Task], today: _dt.date) -> tuple[dict, list[str]]:
+    """Build pm_status's ``attention`` block and the next_pm_actions lines for it.
+
+    A task in review, or one nobody has touched for weeks, is otherwise only a
+    number in ``tasks``: pm_next lists todo tasks and ``active_tasks`` carries
+    no date, so such a task stays where it is and the record stops being true.
+    The block repeats in every pm_status until the tasks move, which is why it
+    is capped and adds at most two lines to next_pm_actions.
+
+    Args:
+        tasks: Every task of the project.
+        today: The local date ages are measured from.
+
+    Returns:
+        The ``attention`` dict and the lines to add to next_pm_actions.
+    """
+    from .hooks import _TASK_ID
+
+    open_defects: dict[str, int] = {}
+    for task in tasks:
+        if _is_open_defect(task):
+            open_defects[task.parent_id] = open_defects.get(task.parent_id, 0) + 1
+
+    def oldest_first(pair: tuple[Task, int | None]) -> tuple[bool, int]:
+        # A task without a usable date has no age to rank by: it goes last.
+        return (pair[1] is None, -(pair[1] or 0))
+
+    review = sorted(
+        ((t, days_since_update(t, today)) for t in tasks if t.status == TaskStatus.REVIEW),
+        key=oldest_first,
+    )
+    in_progress = [
+        (t, days_since_update(t, today)) for t in tasks if t.status == TaskStatus.IN_PROGRESS
+    ]
+
+    def stale(pairs: list[tuple[Task, int | None]]) -> list[tuple[Task, int | None]]:
+        return [(t, d) for t, d in pairs if d is not None and d >= ATTENTION_STALE_DAYS]
+
+    stale_in_progress = stale(in_progress)
+    stale_review = stale(review)
+    oldest = sorted(stale_in_progress + stale_review, key=oldest_first)
+
+    attention = {
+        "review": {
+            "total": len(review),
+            "tasks": [
+                {
+                    **_task_summary(t),
+                    "days_since_update": days,
+                    "open_defects": open_defects.get(t.id, 0),
+                }
+                for t, days in review[:_ATTENTION_REVIEW_LIMIT]
+            ],
+        },
+        "stale": {
+            "threshold_days": ATTENTION_STALE_DAYS,
+            "in_progress": len(stale_in_progress),
+            "review": len(stale_review),
+            "oldest": [
+                {
+                    "id": t.id,
+                    "title": t.title,
+                    "status": t.status.value,
+                    "days_since_update": days,
+                }
+                for t, days in oldest[:_ATTENTION_STALE_LIMIT]
+            ],
+        },
+    }
+
+    actions: list[str] = []
+    if review:
+        # A review task with no open defect child has nothing left to fix, so
+        # the only step that moves it is the user saying it is done.
+        closable = [t.id for t, _ in review if not open_defects.get(t.id)]
+        # These lines read as instructions and tasks.yaml is repository text,
+        # so only ids shaped like the ones pmlens numbers itself are named in
+        # them; any other is counted. ``attention`` carries every id as data.
+        named = [i for i in closable if _TASK_ID.match(i)][:_ATTENTION_ID_LIMIT]
+        if closable:
+            more = len(closable) - len(named)
+            if named:
+                ids = ", ".join(named) + (f" (+{more} more)" if more else "")
+                ready = f"No open defect issue under {ids}"
+            else:
+                ready = f"{more} have no open defect issue (attention.review)"
+            held = len(review) - len(closable)
+            rest = f"; {held} more wait on open defect issues" if held else ""
+            actions.append(
+                f"{len(review)} task(s) in review. {ready}: "
+                f"ask the user whether to mark them done{rest}"
+            )
+        else:
+            actions.append(
+                f"{len(review)} task(s) in review, each waiting on open defect issues "
+                "(pm_tasks parent_id=<id> lists them)"
+            )
+    if stale_in_progress or stale_review:
+        actions.append(
+            f"{len(stale_in_progress)} in_progress and {len(stale_review)} review task(s) not "
+            f"updated for {ATTENTION_STALE_DAYS}+ days (attention.stale): ask the user whether "
+            "each is done, still active or back to todo"
+        )
+    return attention, actions
 
 
 # ─── Project Management ─────────────────────────────
@@ -1080,7 +1273,8 @@ def pm_status(project_path: str | None = None) -> dict:
     """Get current project status.
 
     Returns phase progress, task counts, blockers, overdue items, velocity, and
-    the project's decision posture with its last change.
+    the project's decision posture with its last change. ``attention`` lists
+    tasks in review and work not updated for 30+ days.
     """
     pm_path = _get_pm_path(project_path)
     project = load_project(pm_path)
@@ -1147,6 +1341,11 @@ def pm_status(project_path: str | None = None) -> dict:
 
     # Next PM actions — contextual reminders for the LLM
     next_actions = _build_next_actions(active_tasks, tasks)
+
+    # Review tasks and long-untouched work, with their age. Ages use the local
+    # date, the same one pmlens writes into a task's ``updated``.
+    attention, attention_actions = _build_attention(tasks, _dt.date.today())
+    next_actions = [*next_actions, *attention_actions]
 
     # ADR-019 / WF-028 — Desktop outbox pending count, Claude Code mode only.
     # Hidden under PM_LENS=1 to avoid implying "you should merge" on a host
@@ -1306,6 +1505,7 @@ def pm_status(project_path: str | None = None) -> dict:
         "phases": phase_info,
         "blockers": blockers,
         "active_tasks": active_tasks,
+        "attention": attention,
         "decision_posture": posture.as_dict(),
         "health": project.health.model_dump(),
         "claudemd": get_claudemd_status(root),
@@ -1332,15 +1532,19 @@ def pm_tasks(
     phase ID, priority (P0-P3), tag, or parent_id.
     Use parent_id to list child issues of a specific task.
     """
+    # An unknown status or priority is an error, not a filter that matches
+    # nothing: an empty list would be reported as "no such tasks".
+    status_filter = _enum_arg(TaskStatus, status, "status") if status else None
+    priority_filter = _enum_arg(Priority, priority, "priority") if priority else None
     pm_path = _get_pm_path(project_path)
     tasks = load_tasks(pm_path)
 
-    if status:
-        tasks = [t for t in tasks if t.status.value == status]
+    if status_filter:
+        tasks = [t for t in tasks if t.status == status_filter]
     if phase:
         tasks = [t for t in tasks if t.phase == phase]
-    if priority:
-        tasks = [t for t in tasks if t.priority.value == priority]
+    if priority_filter:
+        tasks = [t for t in tasks if t.priority == priority_filter]
     if tag:
         tasks = [t for t in tasks if tag in t.tags]
     if parent_id:
@@ -1367,7 +1571,7 @@ def pm_add_task(
     """
     pm_path = _get_pm_path(project_path)
     project = load_project(pm_path)
-    priority_enum = Priority(priority)
+    priority_enum = _enum_arg(Priority, priority, "priority")
 
     # PMSERV-219: number inside the tasks.yaml lock, not before it.
     def build(number: int) -> Task:
@@ -1398,14 +1602,17 @@ def pm_update_task(
     blocked_by: list[str] | None = None,
     project_path: str | None = None,
 ) -> dict:
-    """Update a task's fields. task_id format: PREFIX-001."""
+    """Update a task's fields. task_id format: PREFIX-001.
+
+    status: todo | in_progress | review | done | blocked. priority: P0 | P1 | P2 | P3.
+    """
     pm_path = _get_pm_path(project_path)
 
     updates: dict = {}
     if status:
-        updates["status"] = TaskStatus(status)
+        updates["status"] = _enum_arg(TaskStatus, status, "status")
     if priority:
-        updates["priority"] = Priority(priority)
+        updates["priority"] = _enum_arg(Priority, priority, "priority")
     if actual_hours is not None:
         updates["actual_hours"] = actual_hours
     if notes is not None:
@@ -1416,17 +1623,38 @@ def pm_update_task(
     task = update_task(pm_path, task_id, **updates)
     result: dict = {"status": "updated", "task": _task_summary(task)}
 
-    # Check if all sibling issues are done → suggest closing parent
-    if status == "done" and task.parent_id:
+    # Suggest closing the parent once nothing holds it in review any more.
+    # Only defect children do: an enhancement is backlog, and waiting for one
+    # used to keep the parent in review with no tool ever pointing at it.
+    if updates.get("status") == TaskStatus.DONE and task.parent_id:
         all_tasks = load_tasks(pm_path)
         siblings = [t for t in all_tasks if t.parent_id == task.parent_id]
-        if siblings and all(s.status == TaskStatus.DONE for s in siblings):
+        open_enhancements = sum(
+            1
+            for s in siblings
+            if s.severity == IssueSeverity.ENHANCEMENT and s.status != TaskStatus.DONE
+        )
+        # Finishing an enhancement while others are open resolves nothing, so
+        # the hint is given for the last defect, or for the last child of all.
+        closed_a_defect = task.severity != IssueSeverity.ENHANCEMENT
+        if (
+            siblings
+            and not any(_is_open_defect(s) for s in siblings)
+            and (closed_a_defect or not open_enhancements)
+        ):
             result["all_issues_resolved"] = True
             result["parent_id"] = task.parent_id
-            result["message"] = (
-                f"All issues for {task.parent_id} are resolved. "
-                f"Consider marking {task.parent_id} as done."
-            )
+            if open_enhancements:
+                result["message"] = (
+                    f"All defect issues for {task.parent_id} are resolved; "
+                    f"{open_enhancements} enhancement issue(s) under it are still open and "
+                    f"stay as backlog. Consider marking {task.parent_id} as done."
+                )
+            else:
+                result["message"] = (
+                    f"All issues for {task.parent_id} are resolved. "
+                    f"Consider marking {task.parent_id} as done."
+                )
 
     return result
 
@@ -1586,13 +1814,8 @@ def pm_add_issue(
     priority: P0 (critical) | P1 (important) | P2 (nice-to-have) | P3 (someday)
     severity: defect | enhancement
     """
-    try:
-        severity_enum = IssueSeverity(severity)
-    except ValueError as e:
-        raise PmServerError(
-            f"Invalid severity {severity!r}. Must be one of: "
-            f"{', '.join(s.value for s in IssueSeverity)}"
-        ) from e
+    severity_enum = _enum_arg(IssueSeverity, severity, "severity", PmServerError)
+    priority_enum = _enum_arg(Priority, priority, "priority")
 
     pm_path = _get_pm_path(project_path)
     project = load_project(pm_path)
@@ -1617,7 +1840,7 @@ def pm_add_issue(
             id=task_id,
             title=title,
             phase=parent.phase,
-            priority=Priority(priority),
+            priority=priority_enum,
             description=description,
             tags=tags or [],
             parent_id=parent_id,
@@ -1692,6 +1915,7 @@ def pm_remember(
         looks like a bug. pm_remember stays the SSoT — the pointer is an index
         entry, not a duplicate memory (PMSERV-111 dual-write rule holds).
     """
+    memory_type = _enum_arg(MemoryType, type, "type")
     store = _get_memory_store(project_path)
     pm_path = _get_pm_path(project_path)
     project = load_project(pm_path)
@@ -1708,7 +1932,7 @@ def pm_remember(
 
     memory = Memory(
         session_id=_current_session_id,
-        type=MemoryType(type),
+        type=memory_type,
         content=content,
         task_id=task_id,
         decision_id=decision_id,
@@ -1720,7 +1944,7 @@ def pm_remember(
         "status": "saved",
         "memory_id": memory_id,
         "session_id": _current_session_id,
-        "type": type,
+        "type": memory_type.value,
     }
     if auto_linked:
         result["auto_linked_task"] = task_id
@@ -1731,7 +1955,7 @@ def pm_remember(
     if bridge_to_memory_md and not PM_LENS_ENABLED:
         result["memory_md_synced"] = sync_memory_md_pointer(
             memory_id=memory_id,
-            mtype=type,
+            mtype=memory_type.value,
             content=content,
             project_path=project_path,
             created_at=_dt.date.today().isoformat(),
@@ -2046,6 +2270,9 @@ def pm_recall(
     # no-track path (no track keys, no half-populated track_matched=None).
     track = track.strip() if track else None
     track = track or None
+    # Checked on every path, including the ones that do not filter by type:
+    # an unknown type must not look like "nothing stored".
+    type_filter = _enum_arg(MemoryType, type, "type") if type else None
 
     if cross_project:
         store = _get_memory_store(project_path)
@@ -2112,8 +2339,8 @@ def pm_recall(
                 store, _current_session_id, window_minutes=_get_ambiguity_window()
             )
         recent = store.get_recent(limit=limit)
-        if type:
-            recent = [m for m in recent if m.type.value == type]
+        if type_filter:
+            recent = [m for m in recent if m.type == type_filter]
 
         last_session_dict = (
             {
@@ -2171,7 +2398,9 @@ def pm_recall(
 
     # Search by query
     if query:
-        results, diag = store.search_full(query, type=type, limit=limit)
+        results, diag = store.search_full(
+            query, type=type_filter.value if type_filter else None, limit=limit
+        )
         response = _maybe_add_lens_note(
             {
                 "query": query,
@@ -2192,8 +2421,8 @@ def pm_recall(
     # Search by task_id
     if task_id:
         results = store.get_by_task(task_id)
-        if type:
-            results = [m for m in results if m.type.value == type]
+        if type_filter:
+            results = [m for m in results if m.type == type_filter]
         return _maybe_add_lens_note(
             {"task_id": task_id, "results": [_memory_dict(m) for m in results[:limit]]},
             store,
@@ -2202,12 +2431,67 @@ def pm_recall(
     return _maybe_add_lens_note({"results": []}, store)
 
 
+def _pending_items(pending: list[str] | str | None) -> list[str]:
+    """The pending items of a session summary, from a list or from one string.
+
+    A list is taken item by item. A string is one item unless it has a line
+    break, in which case every non-empty line is one. A comma separates
+    nothing: splitting on commas cut "Fix parser, which fails on tabs" in two,
+    and the next session read the halves as two open items.
+    """
+    if pending is None:
+        return []
+    lines = pending.split("\n") if isinstance(pending, str) else pending
+    return [line.strip() for line in lines if isinstance(line, str) and line.strip()]
+
+
+# The separators an item list written as one sentence uses.
+_PENDING_COMMA = re.compile("[,、]")
+
+
+def _pending_key(item: str) -> str:
+    """``item`` as compared between two saves: spacing and letter case ignored."""
+    return " ".join(item.split()).casefold()
+
+
+def _pending_parts(item: str) -> list[str]:
+    """The comma-delimited parts of ``item`` as comparison keys, empty parts left out."""
+    return [key for part in _PENDING_COMMA.split(item) if (key := _pending_key(part))]
+
+
+def _dropped_pending(previous: list[str], current: list[str]) -> list[str]:
+    """Items of ``previous`` that ``current`` no longer carries.
+
+    An item is carried over when the same text, spacing and case aside, is a
+    new item. So is one that was only split differently at commas: it is one
+    comma-delimited part of a new item, or each of its own parts is a new item
+    or a part of one. A caller that sends "A, B" as one string and then A and
+    B as a list has dropped nothing.
+
+    The comparison is between whole items and whole parts, never a search
+    inside the text: "CI" is not carried by "Write the specification". A
+    reworded item cannot be told from a dropped one and is listed.
+    """
+    carried = {_pending_key(item) for item in current}
+    for item in current:
+        carried.update(_pending_parts(item))
+    dropped = []
+    for item in previous:
+        if _pending_key(item) in carried:
+            continue
+        parts = _pending_parts(item)
+        if parts and all(part in carried for part in parts):
+            continue
+        dropped.append(item)
+    return dropped
+
+
 @_tool()
 def pm_session_summary(
     action: str = "save",
     summary: str | None = None,
     goals: str | None = None,
-    pending: str | None = None,
+    pending: list[str] | str | None = None,
     project_path: str | None = None,
 ) -> dict:
     """Manage session summaries for cross-session continuity.
@@ -2216,6 +2500,7 @@ def pm_session_summary(
       - save: Store a summary for the current session (summary required)
       - get: Retrieve the most recent session summary
       - list: Show all session summaries
+    pending: open items as a list; in a string, a newline separates items (a comma does not).
     """
     store = _get_memory_store(project_path)
 
@@ -2234,7 +2519,7 @@ def pm_session_summary(
             # hook), so .pm/ need not sit at the repo root. "" when not a git repo
             # / detached / worktree (those rely on per-directory .pm isolation).
             branch = read_git_branch(pm_path.parent) or ""
-            pending_list = [p.strip() for p in pending.split(",") if p.strip()] if pending else []
+            pending_list = _pending_items(pending)
             sess = SessionSummary(
                 session_id=_current_session_id,
                 summary=summary,
@@ -2246,26 +2531,30 @@ def pm_session_summary(
             # One summary per server connection, and a connection can outlive a
             # conversation (/clear, a new chat in the same window). Say so when
             # this save drops pending items the previous save still listed —
-            # otherwise they vanish silently.
+            # otherwise they vanish silently. Finishing an item drops it too,
+            # so this is a list to confirm (level info). Only a change of
+            # spacing, letter case or comma splitting is left out of it; a
+            # reworded item is listed like a dropped one.
             previous = store.get_summary(_current_session_id)
             summary_id = store.save_session_summary(sess)
             warnings: list[dict] = []
             if previous is not None:
-                dropped = [item for item in previous.pending if item not in pending_list]
+                dropped = _dropped_pending(previous.pending, pending_list)
                 if dropped:
                     warnings.append(
-                        {
-                            "code": "session_summary_pending_dropped",
-                            "message": (
+                        _build_warning(
+                            level="info",
+                            code="session_summary_pending_dropped",
+                            message=(
                                 "This save replaced the summary already stored for this "
-                                "pmlens connection, and these pending items from it are "
-                                f"not in the new one: {', '.join(dropped)}."
+                                "pmlens connection. Pending items it listed that the new "
+                                f"one does not: {'; '.join(dropped)}."
                             ),
-                            "remediation": (
-                                "If any of them is still open, save the summary again "
-                                "with it included in pending."
+                            remediation=(
+                                "Nothing to do for items that are finished. If one is still "
+                                "open, save the summary again with it included in pending."
                             ),
-                        }
+                        )
                     )
             return {
                 "status": "saved",
@@ -2344,6 +2633,8 @@ def pm_memory_search(
     task_id: Filter by associated task.
     cross_project: Search across all projects.
     """
+    # The canonical spelling from here on; "" and None stay "no filter".
+    type = _enum_arg(MemoryType, type, "type").value if type else type
     store = _get_memory_store(project_path)
 
     if cross_project:
@@ -2843,6 +3134,7 @@ def pm_log(
     category: progress | decision | blocker | note | milestone
     If task_id is omitted, auto-links to the active in-progress task.
     """
+    category_enum = _enum_arg(LogCategory, category, "category")
     pm_path = _get_pm_path(project_path)
 
     # Auto-infer task_id from active in-progress task
@@ -2859,7 +3151,7 @@ def pm_log(
     now = _dt.datetime.now()
     log_entry = DailyLogEntry(
         time=now.strftime("%H:%M"),
-        category=LogCategory(category),
+        category=category_enum,
         entry=log_text,
     )
     log = add_daily_log(pm_path, log_entry)
@@ -5419,7 +5711,8 @@ def pm_prompt_pack(
     Args:
         filter_tag: Only tasks carrying this tag.
         filter_phase: Only tasks in this phase id.
-        filter_priority: Only tasks at this priority (e.g. "P1").
+        filter_priority: Only tasks at this priority: P0, P1, P2 or P3. Any
+            other value is an error.
         task_ids: Explicit task-id selection. When given, it overrides the
             other filters and includes exactly those ids regardless of status.
         format: Output format — "md" (default) or "html".
@@ -5440,6 +5733,11 @@ def pm_prompt_pack(
     err = validate_prompt_pack_args(format, group_by, out_path)
     if err is not None:
         return err
+    # The selection compares the stored value, so a priority in another
+    # spelling ("p1") or an unknown one would select nothing and read as "no
+    # such tasks".
+    if filter_priority:
+        filter_priority = _enum_arg(Priority, filter_priority, "filter_priority").value
     pm_path = _get_pm_path(project_path)
     return run_prompt_pack(
         pm_path,
@@ -5759,8 +6057,8 @@ def pm_record(
     tags: comma-separated string (e.g. "auth,api,security")
     """
     pm_path = _get_pm_path(project_path)
-    category_enum = KnowledgeCategory(category)
-    confidence_enum = ConfidenceLevel(confidence)
+    category_enum = _enum_arg(KnowledgeCategory, category, "category")
+    confidence_enum = _enum_arg(ConfidenceLevel, confidence, "confidence")
 
     # Auto-infer task_id from active in-progress task
     auto_linked = False
@@ -5803,7 +6101,8 @@ def pm_record(
     result: dict = {
         "status": "recorded",
         "record_id": record.id,
-        "category": category,
+        # The value stored, not the spelling the caller sent.
+        "category": category_enum.value,
         "title": title,
     }
     if auto_linked:
@@ -5826,11 +6125,16 @@ def _query_knowledge(
     """Read-only knowledge query logic shared by ``pm_knowledge`` and ``pm_knowledge_query``."""
     match action:
         case "list":
+            # Unknown filter values are errors, not filters that match nothing.
+            category_filter = (
+                _enum_arg(KnowledgeCategory, category, "category") if category else None
+            )
+            status_filter = _enum_arg(KnowledgeStatus, status, "status") if status else None
             records = load_knowledge(pm_path)
-            if category:
-                records = [r for r in records if r.category.value == category]
-            if status:
-                records = [r for r in records if r.status.value == status]
+            if category_filter:
+                records = [r for r in records if r.category == category_filter]
+            if status_filter:
+                records = [r for r in records if r.status == status_filter]
             if tag:
                 records = [r for r in records if tag in r.tags]
             if task_id:
@@ -5904,9 +6208,9 @@ def pm_knowledge(
             return {"status": "error", "message": "record_id required for update"}
         updates: dict = {}
         if new_status:
-            updates["status"] = KnowledgeStatus(new_status)
+            updates["status"] = _enum_arg(KnowledgeStatus, new_status, "new_status")
         if confidence:
-            updates["confidence"] = ConfidenceLevel(confidence)
+            updates["confidence"] = _enum_arg(ConfidenceLevel, confidence, "confidence")
         if conclusion:
             updates["conclusion"] = conclusion
         record = update_knowledge(pm_path, record_id, **updates)
@@ -6037,7 +6341,7 @@ def pm_workflow_status(
 def pm_workflow_advance(
     workflow_id: str | None = None,
     proceed: bool = True,
-    artifacts: list[str] | None = None,
+    artifacts: list[str] | str | None = None,
     notes: str | None = None,
     skip: bool = False,
     project_path: str | None = None,
@@ -6049,10 +6353,15 @@ def pm_workflow_advance(
 
     workflow_id: Specific workflow. Auto-detects active workflow if omitted.
     proceed: For loop steps — True exits the loop, False loops back for another iteration.
-    artifacts: IDs of artifacts produced (ADR, task, KR IDs). Tracked per step.
+    artifacts: IDs of artifacts produced (ADR, task, KR IDs), as a list; a single
+        ID may be passed as a string. Tracked per step.
     notes: Free-text notes for this step.
     skip: Skip the current step (marks as SKIPPED instead of DONE).
     """
+    # One ID sent as a bare string is one artifact. It is never split: an ID
+    # list in a string is ambiguous, and a list is already accepted.
+    if isinstance(artifacts, str):
+        artifacts = [artifacts.strip()] if artifacts.strip() else None
     pm_path = _get_pm_path(project_path)
     return advance_step(pm_path, workflow_id, proceed, artifacts, notes, skip)
 
@@ -6096,7 +6405,7 @@ def pm_workflow_list(
     workflows = load_workflows(pm_path)
 
     if status:
-        wf_status = WorkflowStatus(status)
+        wf_status = _enum_arg(WorkflowStatus, status, "status")
         workflows = [w for w in workflows if w.status == wf_status]
 
     return {

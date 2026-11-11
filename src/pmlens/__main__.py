@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Callable
-from typing import NoReturn
+from typing import Any, NoReturn
 
 import click
 
@@ -12,11 +12,37 @@ from . import __version__
 from .rules import RULE_TARGET_CHOICES as _RULE_TARGET_CHOICES
 from .utils import TARGET_CHOICES
 
+_PRIORITY_CHOICES = ["P0", "P1", "P2", "P3"]
 
-@click.group()
+
+class _PriorityFilter(click.Choice):
+    """The priority choices, plus the empty string meaning "no filter".
+
+    `--priority "$PRIO"` with an unset variable has always produced the
+    unfiltered pack, and the pm_prompt_pack tool reads an empty filter the same
+    way, so the choice check must not turn that call into a usage error.
+    """
+
+    def convert(self, value: Any, param: click.Parameter | None, ctx: click.Context | None) -> Any:
+        if value == "":
+            return None
+        return super().convert(value, param, ctx)
+
+
+# invoke_without_command only lets the callback below see a bare invocation; the
+# metavar is spelled out so the usage line keeps saying a command is required.
+@click.group(invoke_without_command=True, subcommand_metavar="COMMAND [ARGS]...")
 @click.version_option(version=__version__, prog_name="pmlens")
-def cli():
+@click.pass_context
+def cli(ctx: click.Context) -> None:
     """PM Lens — Claude Code Project Management."""
+    # A launch entry that lost its `serve` argument has to fail, with the usage
+    # on stderr: stdout is the MCP channel. click 8.2+ does that for any group;
+    # click 8.1, which the declared floor allows, printed the help on stdout
+    # and exited 0. Handling it here gives every supported click the same exit.
+    if ctx.invoked_subcommand is None:
+        click.echo(ctx.get_help(), err=True, color=ctx.color)
+        ctx.exit(2)
 
 
 # Derived from the host registry (PMSERV-165) rather than restated. Nothing
@@ -262,7 +288,13 @@ def status():
 @click.option("--tag", "filter_tag", default=None, help="Only tasks carrying this tag.")
 @click.option("--phase", "filter_phase", default=None, help="Only tasks in this phase id.")
 @click.option(
-    "--priority", "filter_priority", default=None, help="Only tasks at this priority (P0-P3)."
+    "--priority",
+    "filter_priority",
+    # The Priority values, spelled out so that starting the CLI does not import
+    # the models. A value outside them used to select no task at all.
+    type=_PriorityFilter(_PRIORITY_CHOICES, case_sensitive=False),
+    default=None,
+    help="Only tasks at this priority.",
 )
 @click.option(
     "--task-id",

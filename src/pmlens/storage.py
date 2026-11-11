@@ -2284,6 +2284,17 @@ def _plain_template_name(name: object) -> bool:
     )
 
 
+def _template_name_of(file: Path) -> str:
+    """The template name of a file that ``glob("*.yaml")`` returned.
+
+    Not ``Path.stem``: for a name that starts with dots, such as "...yaml" (the
+    template ".."), Python 3.14 reports no suffix and returns the whole file
+    name, where 3.13 returned "..". The name has to be the one that, with
+    ".yaml" appended, is the listed file again, on every Python version.
+    """
+    return file.name[: -len(".yaml")]
+
+
 # A template file larger than this is not a template.
 _TEMPLATE_MAX_BYTES = 1024 * 1024
 
@@ -2386,7 +2397,7 @@ def list_workflow_templates(pm_path: Path | None = None) -> list[dict]:
     custom_dir = _custom_templates_dir(pm_path) if pm_path else None
     if custom_dir is not None:
         for f in sorted(custom_dir.glob("*.yaml")):
-            name = f.stem
+            name = _template_name_of(f)
             if not _plain_template_name(name):
                 continue
             file = f"workflow_templates/{f.name}"
@@ -2409,7 +2420,7 @@ def list_workflow_templates(pm_path: Path | None = None) -> list[dict]:
     # Built-in templates
     if BUILTIN_TEMPLATES_DIR.is_dir():
         for f in sorted(BUILTIN_TEMPLATES_DIR.glob("*.yaml")):
-            name = f.stem
+            name = _template_name_of(f)
             if name in seen:
                 continue  # custom overrides built-in
             data = _load_yaml(f)

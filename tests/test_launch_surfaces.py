@@ -125,11 +125,16 @@ def test_every_declarative_surface_is_covered():
 def test_bare_cli_invocation_cannot_start_a_server():
     """The property that makes a missing `serve` fatal rather than cosmetic.
 
-    `cli` is a plain click group. If someone later adds
-    `invoke_without_command=True` (defaulting to serve), this test fails
-    — which is the correct signal: the surfaces' hard `serve` requirement
-    would have changed, and the assertions above should be revisited
-    rather than silently kept.
+    Without a subcommand the group prints its usage and fails. If someone
+    later makes the bare invocation default to serve, this test fails — which
+    is the correct signal: the surfaces' hard `serve` requirement would have
+    changed, and the assertions above should be revisited rather than
+    silently kept.
+
+    The exit code and the stream are the group's own doing, not click's:
+    click 8.1 (the declared floor) prints a group's help on stdout and exits
+    0, click 8.2+ prints it on stderr and exits 2. The lowest-bounds CI job
+    is where a regression of that shows.
     """
     result = subprocess.run(
         [sys.executable, "-m", "pmlens"],
@@ -137,11 +142,29 @@ def test_bare_cli_invocation_cannot_start_a_server():
         text=True,
         timeout=60,
     )
-    assert result.returncode != 0, (
-        "bare `python -m pmlens` succeeded — the CLI group now runs without a "
-        "subcommand. Revisit whether every launch surface still needs `serve`."
+    assert result.returncode == 2, (
+        "bare `python -m pmlens` did not fail as a usage error — the CLI group "
+        "now runs without a subcommand, or the installed click decides the exit "
+        "code. Revisit whether every launch surface still needs `serve`."
     )
-    assert "Usage:" in (result.stdout + result.stderr)
+    # stdout is the MCP channel of a stdio launch: the usage must not land there.
+    assert result.stdout == ""
+    usage = [line for line in result.stderr.splitlines() if line.startswith("Usage:")]
+    # A command is still shown as required.
+    assert len(usage) == 1 and usage[0].endswith("[OPTIONS] COMMAND [ARGS]...")
+
+
+def test_help_and_version_still_succeed_on_stdout():
+    """Asking for help is not the usage error a bare invocation is."""
+    for flag, expected in (("--help", "Usage:"), ("--version", "pmlens, version ")):
+        result = subprocess.run(
+            [sys.executable, "-m", "pmlens", flag],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert result.returncode == 0
+        assert result.stdout.startswith(expected)
 
 
 # ─── Wire surface: `serve` really speaks MCP over stdio ───────────────────────
@@ -460,6 +483,67 @@ def test_decisions_round_trip_over_stdio(tmp_project: Path) -> None:
     assert got["lineage"]["derived"] is False
     assert got["lineage"]["declared"]["origin"] == "ai_auto"
     assert got["lineage"]["events"][0]["kind"] == "created"
+
+
+@pytest.mark.smoke
+def test_list_or_string_arguments_round_trip_over_stdio(tmp_path: Path) -> None:
+    """pending and artifacts take a list or a string over the wire.
+
+    Proves the schema a host is shown (array, string or null) and that both
+    shapes pass argument validation in a real server process: a list for
+    pending and a bare string for artifacts were both refused before.
+    """
+    project = str(tmp_path / "wire")
+    (tmp_path / "wire").mkdir()
+    pending = ["Fix parser, which fails on tabs", "Write docs"]
+    session = _mcp_session(
+        lens=False,
+        calls=[
+            {"name": "pm_init", "arguments": {"project_path": project, "project_name": "wire"}},
+            {
+                "name": "pm_session_summary",
+                "arguments": {"summary": "s", "pending": pending, "project_path": project},
+            },
+            {
+                "name": "pm_session_summary",
+                "arguments": {
+                    "summary": "s",
+                    "pending": "Fix parser, which fails on tabs\nWrite docs",
+                    "project_path": project,
+                },
+            },
+            {"name": "pm_session_summary", "arguments": {"action": "get", "project_path": project}},
+            {"name": "pm_workflow_start", "arguments": {"feature": "f", "project_path": project}},
+            {
+                "name": "pm_workflow_advance",
+                "arguments": {"artifacts": "ADR-001", "project_path": project},
+            },
+            {
+                "name": "pm_workflow_advance",
+                "arguments": {"artifacts": ["WIRE-001", "WIRE-002"], "project_path": project},
+            },
+        ],
+    )
+    list_or_string = [
+        {"items": {"type": "string"}, "type": "array"},
+        {"type": "string"},
+        {"type": "null"},
+    ]
+    for tool, argument in (("pm_session_summary", "pending"), ("pm_workflow_advance", "artifacts")):
+        schema = session.tool_definitions[tool]["inputSchema"]
+        branches = schema["properties"][argument]["anyOf"]
+        assert len(branches) == 3 and all(branch in branches for branch in list_or_string)
+        assert argument not in schema.get("required", [])
+
+    _, saved, resaved, got, _, first, second = (
+        json.loads(response["content"][0]["text"]) for response in session.responses
+    )
+    assert saved["status"] == "saved" and saved["warnings"] == []
+    # The same two items as one string, a line each: nothing was dropped.
+    assert resaved["warnings"] == []
+    assert got["pending"] == pending
+    assert first["completed_step"]["artifacts"] == ["ADR-001"]
+    assert second["completed_step"]["artifacts"] == ["WIRE-001", "WIRE-002"]
 
 
 def _object_of_string_lists(schema: dict[str, Any]) -> bool:

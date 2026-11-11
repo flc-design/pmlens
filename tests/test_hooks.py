@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import os
 from pathlib import Path
@@ -998,6 +999,104 @@ class TestBuildCommitReminder:
 
         # Nothing in progress means nothing this commit could have completed.
         assert _build_commit_reminder(pm_path) == ""
+
+
+def _in_progress(task_id: str, days: int) -> Task:
+    """An in_progress task last updated ``days`` days ago."""
+    return Task(
+        id=task_id,
+        title=f"Task {task_id}",
+        phase="phase-1",
+        status=TaskStatus.IN_PROGRESS,
+        updated=_dt.date.today() - _dt.timedelta(days=days),
+    )
+
+
+class TestCommitReminderLeavesOutStaleTasks:
+    """Tasks left in_progress for 30+ days are counted, not named, after a commit."""
+
+    def test_only_recent_tasks_are_named(self, pm_project: Path, monkeypatch):
+        monkeypatch.delenv("PM_LENS", raising=False)
+        pm_path = pm_project / ".pm"
+        _save_tasks(
+            pm_path,
+            [
+                _in_progress("HK-001", 0),
+                _in_progress("HK-002", 29),
+                _in_progress("HK-003", 30),
+                _in_progress("HK-004", 200),
+            ],
+        )
+
+        reminder = _build_commit_reminder(pm_path)
+
+        assert "In progress: HK-001, HK-002 (and 2 more not updated for 30+ days)." in reminder
+        assert "HK-003" not in reminder
+        assert "HK-004" not in reminder
+        assert "pm_update_task" in reminder
+
+    def test_recent_tasks_alone_keep_the_earlier_sentence(self, pm_project: Path, monkeypatch):
+        monkeypatch.delenv("PM_LENS", raising=False)
+        reminder = _build_commit_reminder(pm_project / ".pm")
+
+        assert reminder.startswith("[PM Lens] git commit recorded. In progress: HK-001. If this")
+        assert "more not updated" not in reminder
+
+    def test_only_stale_tasks_give_one_short_sentence(self, pm_project: Path, monkeypatch):
+        monkeypatch.delenv("PM_LENS", raising=False)
+        pm_path = pm_project / ".pm"
+        _save_tasks(pm_path, [_in_progress("HK-001", 71), _in_progress("HK-002", 41)])
+
+        reminder = _build_commit_reminder(pm_path)
+
+        assert reminder == (
+            "[PM Lens] git commit recorded; 2 in_progress task(s) not updated for 30+ days "
+            "(pm_status lists them)."
+        )
+
+    def test_only_stale_tasks_of_another_project_name_it(self, pm_project: Path, monkeypatch):
+        monkeypatch.delenv("PM_LENS", raising=False)
+        pm_path = pm_project / ".pm"
+        _save_tasks(pm_path, [_in_progress("HK-001", 71)])
+
+        reminder = _build_commit_reminder(pm_path, project_path=pm_project)
+
+        assert reminder == (
+            "[PM Lens] git commit recorded; 1 in_progress task(s) of the project at "
+            f'"{pm_project}" not updated for 30+ days (pm_status lists them).'
+        )
+
+    def test_stays_silent_where_it_was_silent(self, pm_project: Path, monkeypatch):
+        """No in_progress task, or a project path that cannot be quoted: still nothing."""
+        monkeypatch.delenv("PM_LENS", raising=False)
+        pm_path = pm_project / ".pm"
+        unsafe = Path('/tmp/a"b')
+
+        _save_tasks(pm_path, [_in_progress("HK-001", 71)])
+        assert _build_commit_reminder(pm_path, project_path=unsafe) == ""
+        _save_tasks(pm_path, [_in_progress("HK-001", 0), _in_progress("HK-002", 71)])
+        assert _build_commit_reminder(pm_path, project_path=unsafe) == ""
+
+        done = _in_progress("HK-001", 71)
+        done.status = TaskStatus.DONE
+        _save_tasks(pm_path, [done])
+        assert _build_commit_reminder(pm_path) == ""
+
+    def test_lens_mode_counts_stale_tasks_too(self, pm_project: Path, monkeypatch):
+        monkeypatch.setenv("PM_LENS", "1")
+        pm_path = pm_project / ".pm"
+
+        _save_tasks(pm_path, [_in_progress("HK-001", 3), _in_progress("HK-002", 71)])
+        mixed = _build_commit_reminder(pm_path)
+        assert "In progress: HK-001 (and 1 more not updated for 30+ days)." in mixed
+        assert "HK-002" not in mixed
+
+        _save_tasks(pm_path, [_in_progress("HK-002", 71)])
+        stale_only = _build_commit_reminder(pm_path)
+        assert "1 in_progress task(s) not updated for 30+ days." in stale_only
+        assert "HK-002" not in stale_only
+        assert "Read-only mode" in stale_only
+        assert "pm_update_task" not in stale_only
 
 
 class TestBuildCommitReminderLensMode:
