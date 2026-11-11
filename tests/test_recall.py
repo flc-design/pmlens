@@ -131,6 +131,24 @@ class TestContextBuilderLayer1:
         assert "Auth module complete" in result
         assert "Code review" in result
 
+    def test_pending_items_holding_a_comma_stay_two_items(
+        self, builder: ContextBuilder, ctx_store: MemoryStore
+    ):
+        """A comma inside an item must not read as the boundary between two."""
+        ctx_store.save_session_summary(
+            SessionSummary(
+                session_id="sess-prev",
+                summary="s",
+                pending=["Fix parser, which fails on tabs", "Write docs"],
+                project="ctxproj",
+            )
+        )
+
+        result = builder.build_session_context()
+
+        assert "**保留事項**: Fix parser, which fails on tabs; Write docs" in result
+        assert "tabs, Write docs" not in result
+
     def test_summary_only_when_exists(self, builder: ContextBuilder):
         result = builder.build_session_context()
         assert "前回のセッション" not in result

@@ -5,7 +5,7 @@ from __future__ import annotations
 import datetime as _dt
 from pathlib import Path
 
-from .models import PhaseStatus, TaskStatus
+from .models import PhaseStatus, Task, TaskStatus
 from .storage import load_project, load_tasks
 
 # ─── Thresholds ─────────────────────────────────────
@@ -14,6 +14,35 @@ TREND_IMPROVING_THRESHOLD = 1.2
 TREND_DECLINING_THRESHOLD = 0.8
 STALE_DAYS_THRESHOLD = 7
 ESTIMATE_OVERRUN_FACTOR = 1.5
+# pm_status and the post-commit reminder are shown in every session, so they
+# call an in_progress or review task stale only after a much longer silence
+# than pm_risks (STALE_DAYS_THRESHOLD), which is asked for on purpose.
+ATTENTION_STALE_DAYS = 30
+
+
+def days_since_update(task: Task, today: _dt.date) -> int | None:
+    """Whole days from the task's ``updated`` date to ``today``, or None without a usable date.
+
+    ``updated`` is the local date pmlens wrote, so ``today`` must be a local
+    date too. A date in the future (a clock that was wrong, a hand edit) counts
+    as updated today, not as a negative age.
+    """
+    updated = task.updated
+    # A datetime is a date subclass, and date - datetime raises.
+    if isinstance(updated, _dt.datetime):
+        updated = updated.date()
+    if not isinstance(updated, _dt.date):
+        return None
+    return max((today - updated).days, 0)
+
+
+def is_stale(task: Task, today: _dt.date) -> bool:
+    """Whether the task has gone ATTENTION_STALE_DAYS or more without an update.
+
+    A task without a usable date is not stale: there is nothing to measure.
+    """
+    days = days_since_update(task, today)
+    return days is not None and days >= ATTENTION_STALE_DAYS
 
 
 def calculate_velocity(pm_path: Path, weeks: int = 4) -> dict:

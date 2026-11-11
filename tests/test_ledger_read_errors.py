@@ -470,15 +470,16 @@ def test_the_safety_net_catches_an_error_raised_inside_pyyaml(
 
 
 def test_argument_errors_keep_their_text(tmp_project):
-    # The net is not a general filter: an enum lookup on a bad argument tells
-    # the caller what it sent.
+    # The net is not a general filter: a bad enum argument still tells the
+    # caller which argument it was and what the valid values are.
     _write(tmp_project / ".pm" / "project.yaml", {"name": "p"})
     is_error, text = _call(
         "pm_add_task",
         {"title": "t", "phase": "phase-1", "priority": "P9", "project_path": str(tmp_project)},
     )
     assert is_error is True
-    assert "'P9' is not a valid Priority" in text
+    assert "priority must be one of: P0, P1, P2, P3" in text
+    assert "P9" not in text
 
 
 @pytest.mark.parametrize(("tool", "extra"), _LENS_READS)

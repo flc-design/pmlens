@@ -8,9 +8,51 @@ from pathlib import Path
 
 import pytest
 
-import pmlens.server
-import pmlens.storage
-from pmlens.models import (
+# ─── A developer's shell must not aim the suite at a real project ─────────
+#
+# pmlens picks its project and its mode from the environment: PM_PROJECT_PATH
+# outranks the walk up from the working directory, so with it exported every
+# tool call that omits ``project_path`` acts on that project instead of the
+# test's tmp_path. The memory-cleanup tests then purge it, and a `.pm/` that
+# is not tracked by git cannot be restored. A host session that runs pytest
+# through its shell inherits exactly this variable.
+#
+# Every variable pmlens reads is therefore listed in one of the two names
+# below; tests/test_env_isolation.py fails when the source reads one that is
+# in neither. A test that needs a value sets it with ``monkeypatch.setenv``.
+PMLENS_ENV_CLEARED: tuple[str, ...] = (
+    "PM_PROJECT_PATH",  # which project a call without project_path acts on
+    "PM_LENS",  # read-only mode
+    "PM_DESKTOP_WRITE",  # outbox mode
+    "PM_LOCK_TIMEOUT_S",  # how long a writer waits for a lock
+    "PM_SERVER_RECALL_AMBIGUITY_WINDOW_MIN",  # which sessions count as concurrent
+    # Set by git while a hook runs. pmlens reads them to tell whether a project
+    # is in a work tree, and the suite's own git calls must not act on the
+    # repository the hook belongs to.
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+)
+
+# Read by pmlens but left as the shell has it, each with the reason.
+PMLENS_ENV_KEPT: dict[str, str] = {
+    "CLAUDECODE": (
+        "host detection only: it can add claude-code to the detected hosts but "
+        "never selects a project or a mode, and the tests that depend on it "
+        "use the clean_host_env fixture or set it themselves"
+    ),
+}
+
+# Cleared here, before pmlens is imported, because server.py freezes PM_LENS
+# and PM_DESKTOP_WRITE into module constants at import time: a per-test
+# fixture alone would run too late for those two. Removing them from
+# os.environ itself (rather than through monkeypatch) also covers
+# collection-time code and every subprocess a test starts.
+for _name in PMLENS_ENV_CLEARED:
+    os.environ.pop(_name, None)
+
+import pmlens.server  # noqa: E402
+import pmlens.storage  # noqa: E402
+from pmlens.models import (  # noqa: E402
     Consequences,
     Decision,
     Phase,
@@ -200,6 +242,20 @@ def isolated_home(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(sandbox))
     monkeypatch.setenv("USERPROFILE", str(sandbox))  # Windows equivalent
     return sandbox
+
+
+@pytest.fixture(autouse=True)
+def pmlens_env_cleared(monkeypatch):
+    """Start every test without the variables pmlens picks a project or mode from.
+
+    The import-time clearing at the top of this file handles what the
+    developer's shell exported. This fixture handles what an earlier test left
+    behind: several suites write ``os.environ`` directly to reload the server
+    in another mode, and a value that leaks from one of them would send the
+    next test's tool calls to the wrong project or the wrong tool surface.
+    """
+    for name in PMLENS_ENV_CLEARED:
+        monkeypatch.delenv(name, raising=False)
 
 
 @pytest.fixture(autouse=True)

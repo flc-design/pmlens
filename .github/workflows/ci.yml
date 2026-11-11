@@ -5,6 +5,17 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # The test jobs install unpinned, so a new fastmcp or click release changes
+  # what users get with no commit here. The weekly run (Mondays 03:00 UTC, on
+  # the default branch) shows that within a week instead of at the next push.
+  schedule:
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+
+# Every job here only checks out the repository and runs tests or checks on
+# it. The token gets no more than that, also on the scheduled run.
+permissions:
+  contents: read
 
 jobs:
   test:
@@ -12,7 +23,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12", "3.13"]
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
 
     steps:
       - name: Checkout
@@ -36,6 +47,41 @@ jobs:
 
       - name: Run tests with coverage
         run: pytest --cov
+
+  test-lowest:
+    # The matrix above resolves the newest release of every dependency, so the
+    # lower bounds in pyproject.toml were never installed by any job. This one
+    # installs each runtime dependency at its declared floor, on the oldest
+    # supported Python. Dependencies of dependencies stay at their newest.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        # Keep aligned with scripts/lockfiles.py and .devcontainer/Dockerfile.
+        run: pip install uv==0.11.25
+
+      - name: Install runtime dependencies at their lower bounds
+        # Without the dev extra: its entries have no lower bound, so
+        # lowest-direct would pick the first pytest ever published.
+        run: uv pip install --system --resolution lowest-direct -e .
+
+      - name: Install the test runner
+        run: uv pip install --system pytest
+
+      - name: Show the resolved versions
+        run: uv pip freeze --system
+
+      - name: Run tests against the lowest declared versions
+        run: pytest -q
 
   test-locked:
     # Runtime and dev dependencies are installed with hashes from uv.lock's

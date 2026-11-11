@@ -436,6 +436,25 @@ class TestWorkflowTemplates:
         assert load_workflow_template(name, tmp_pm_path).name == name
         assert name in [t["name"] for t in list_workflow_templates(tmp_pm_path)]
 
+    def test_names_that_start_with_dots_are_listed_under_the_name_that_loads(self, tmp_pm_path):
+        # Path.stem is "..", "." on Python 3.13 and the whole file name on 3.14
+        # for the first two files, so a list built from it offered names that
+        # pm_workflow_start could not load.
+        custom_dir = tmp_pm_path / "workflow_templates"
+        custom_dir.mkdir()
+        for file_name in ("...yaml", "..yaml", ".hidden.yaml", "a..yaml", ".yaml"):
+            (custom_dir / file_name).write_text(
+                yaml.safe_dump({"name": file_name, "steps": [{"id": "s", "name": "n"}]}),
+                encoding="utf-8",
+            )
+        listed = sorted(
+            t["name"] for t in list_workflow_templates(tmp_pm_path) if t["source"] == "custom"
+        )
+        # ".yaml" has no name left and is not offered.
+        assert listed == [".", "..", ".hidden", "a."]
+        for name in listed:
+            assert load_workflow_template(name, tmp_pm_path).name == f"{name}.yaml"
+
     def test_custom_overrides_builtin(self, tmp_pm_path):
         """Custom template with the same name should override built-in."""
         custom_dir = tmp_pm_path / "workflow_templates"
@@ -1177,6 +1196,61 @@ class TestWorkflowMcpTools:
         active = [w for w in workflows if w.status == WorkflowStatus.ACTIVE]
         assert len(active) == 1
         assert active[0].id == "WF-001"
+
+    @pytest.mark.parametrize(
+        ("artifacts", "stored"),
+        [
+            ("ADR-005", ["ADR-005"]),
+            ("  ADR-005 ", ["ADR-005"]),
+            # A string is one artifact, whatever it contains.
+            ("ADR-005, PROJ-001", ["ADR-005, PROJ-001"]),
+            (["ADR-005", "PROJ-001"], ["ADR-005", "PROJ-001"]),
+            ("", []),
+            (None, []),
+        ],
+    )
+    def test_advance_takes_one_artifact_as_a_string(self, tmp_project, artifacts, stored):
+        from pmlens.server import pm_workflow_advance
+
+        start_workflow(tmp_project / ".pm", "auth", "development")
+
+        result = pm_workflow_advance(artifacts=artifacts, project_path=str(tmp_project))
+
+        assert result["status"] == "advanced"
+        assert get_workflow(tmp_project / ".pm", "WF-001").steps[0].artifacts == stored
+        # The decision step asks for an ADR: no artifact still earns the hint.
+        assert ("warning" in result) is (not stored)
+
+    def test_a_string_artifact_passes_fastmcp_validation(self, tmp_project):
+        """The declared type decides what a host may send: a bare string was refused."""
+        import asyncio
+
+        from fastmcp import Client
+
+        from pmlens import server as srv
+
+        start_workflow(tmp_project / ".pm", "auth", "development")
+
+        async def call() -> tuple[bool, dict]:
+            async with Client(srv.mcp) as client:
+                result = await client.call_tool(
+                    "pm_workflow_advance",
+                    {"artifacts": "ADR-005", "project_path": str(tmp_project)},
+                    raise_on_error=False,
+                )
+                tools = {t.name: t for t in await client.list_tools()}
+                tool = tools["pm_workflow_advance"]
+                # input_schema in MCP SDK 2 (fastmcp 4), inputSchema before.
+                schema = getattr(tool, "input_schema", None) or tool.inputSchema
+                return result.is_error, schema["properties"]["artifacts"]
+
+        is_error, schema = asyncio.run(call())
+
+        assert is_error is False
+        assert get_workflow(tmp_project / ".pm", "WF-001").steps[0].artifacts == ["ADR-005"]
+        assert {"type": "array", "items": {"type": "string"}} in schema["anyOf"]
+        assert {"type": "string"} in schema["anyOf"]
+        assert {"type": "null"} in schema["anyOf"]
 
     def test_workflow_templates_tool(self):
         """Test pm_workflow_templates logic directly."""

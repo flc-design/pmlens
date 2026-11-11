@@ -310,6 +310,37 @@ class TestPmPromptPackTool:
         assert res["status"] == "error"
         assert "md" in res["message"] and "html" in res["message"]
 
+    @pytest.mark.parametrize("spelling", ["P1", "p1", " P1 "])
+    def test_filter_priority_matches_in_the_spellings_pm_tasks_accepts(self, tmp_path, spelling):
+        _seed(
+            tmp_path,
+            [_task(id="P-1", priority=Priority.P1), _task(id="P-2", priority=Priority.P2)],
+        )
+
+        res = srv.pm_prompt_pack(filter_priority=spelling, project_path=str(tmp_path))
+
+        assert res["task_ids"] == ["P-1"]
+
+    @pytest.mark.parametrize("task_ids", [None, ["P-1"]])
+    def test_filter_priority_unknown_is_an_error_not_an_empty_pack(self, tmp_path, task_ids):
+        """An unknown priority selected nothing, which read as "no such tasks"."""
+        _seed(tmp_path, [_task(id="P-1", priority=Priority.P1)])
+
+        with pytest.raises(ValueError) as raised:
+            srv.pm_prompt_pack(
+                filter_priority="zzurgent", task_ids=task_ids, project_path=str(tmp_path)
+            )
+
+        assert str(raised.value) == "filter_priority must be one of: P0, P1, P2, P3"
+        assert not (tmp_path / ".pm" / "exports").exists()
+
+    def test_no_filter_priority_is_no_filter(self, tmp_path):
+        _seed(tmp_path, [_task(id="P-1", priority=Priority.P1), _task(id="P-2")])
+
+        for nothing in (None, ""):
+            res = srv.pm_prompt_pack(filter_priority=nothing, project_path=str(tmp_path))
+            assert set(res["task_ids"]) == {"P-1", "P-2"}
+
     def test_group_by_unknown_is_error(self, tmp_path):
         _seed(tmp_path, [_task(tags=["x"])])
         res = srv.pm_prompt_pack(
@@ -1103,6 +1134,61 @@ class TestPromptPackCLI:
         )
         assert res.exit_code == 0, res.output
         assert "1 task(s)" in res.output  # only task A matches both
+
+    def test_priority_option_takes_the_priority_values_only(self, tmp_path):
+        from pmlens.__main__ import _PRIORITY_CHOICES
+
+        pm_path = init_pm_directory(tmp_path)
+        _save_tasks(
+            pm_path, [_task(id="A", priority=Priority.P0), _task(id="B", priority=Priority.P2)]
+        )
+
+        lower = self._runner().invoke(
+            self._cli(), ["prompt-pack", "--priority", "p0", "--project", str(tmp_path)]
+        )
+        unknown = self._runner().invoke(
+            self._cli(), ["prompt-pack", "--priority", "urgent", "--project", str(tmp_path)]
+        )
+
+        assert _PRIORITY_CHOICES == [p.value for p in Priority]
+        assert lower.exit_code == 0, lower.output
+        assert "1 task(s)" in lower.output
+        assert unknown.exit_code == 2
+        # click lists the choices in lower case when it compares without case.
+        assert "p0" in unknown.output.lower() and "p3" in unknown.output.lower()
+
+    def test_empty_priority_is_no_filter_as_in_the_tool(self, tmp_path):
+        """`--priority "$PRIO"` with an unset variable keeps giving the whole pack."""
+        pm_path = init_pm_directory(tmp_path)
+        _save_tasks(
+            pm_path, [_task(id="A", priority=Priority.P0), _task(id="B", priority=Priority.P2)]
+        )
+
+        alone = self._runner().invoke(
+            self._cli(), ["prompt-pack", "--priority", "", "--project", str(tmp_path)]
+        )
+        with_id = self._runner().invoke(
+            self._cli(),
+            ["prompt-pack", "--priority", "", "--task-id", "A", "--project", str(tmp_path)],
+        )
+
+        assert alone.exit_code == 0, alone.output
+        assert "2 task(s)" in alone.output
+        assert with_id.exit_code == 0, with_id.output
+        assert "1 task(s)" in with_id.output
+
+    def test_unknown_priority_is_rejected_next_to_task_id_too(self, tmp_path):
+        """Task ids override a filter, but not a value that is no priority at all."""
+        pm_path = init_pm_directory(tmp_path)
+        _save_tasks(pm_path, [_task(id="A", priority=Priority.P1)])
+
+        for value in ("urgent", " "):
+            res = self._runner().invoke(
+                self._cli(),
+                ["prompt-pack", "--priority", value, "--task-id", "A", "--project", str(tmp_path)],
+            )
+            assert res.exit_code == 2, (value, res.output)
+        assert not (pm_path / "exports").exists()
 
     def test_missing_task_id_warning_surfaces(self, tmp_path):
         pm_path = init_pm_directory(tmp_path)

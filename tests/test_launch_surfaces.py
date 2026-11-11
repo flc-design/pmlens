@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import subprocess
 import sys
 import threading
@@ -104,7 +105,15 @@ def test_every_declarative_surface_is_covered():
     be updated alongside it.
     """
     known = {PLUGIN_MCP, MCPB_MANIFEST}
-    found = {p for p in REPO_ROOT.glob("**/.mcp.json") if ".git" not in p.parts}
+    # Checkouts and environments kept inside the repository are not shipped: a
+    # Claude Code worktree under the gitignored .claude/ carries its own copy
+    # of plugin/.mcp.json, and a virtualenv can vendor one.
+    local_only = {".git", ".claude", ".venv", "node_modules"}
+    found = {
+        p
+        for p in REPO_ROOT.glob("**/.mcp.json")
+        if not local_only & set(p.relative_to(REPO_ROOT).parts)
+    }
     # manifest.json is the only non-".mcp.json" launch config we ship.
     unknown = sorted(str(p.relative_to(REPO_ROOT)) for p in found - known)
     assert not unknown, (
@@ -116,11 +125,16 @@ def test_every_declarative_surface_is_covered():
 def test_bare_cli_invocation_cannot_start_a_server():
     """The property that makes a missing `serve` fatal rather than cosmetic.
 
-    `cli` is a plain click group. If someone later adds
-    `invoke_without_command=True` (defaulting to serve), this test fails
-    — which is the correct signal: the surfaces' hard `serve` requirement
-    would have changed, and the assertions above should be revisited
-    rather than silently kept.
+    Without a subcommand the group prints its usage and fails. If someone
+    later makes the bare invocation default to serve, this test fails — which
+    is the correct signal: the surfaces' hard `serve` requirement would have
+    changed, and the assertions above should be revisited rather than
+    silently kept.
+
+    The exit code and the stream are the group's own doing, not click's:
+    click 8.1 (the declared floor) prints a group's help on stdout and exits
+    0, click 8.2+ prints it on stderr and exits 2. The lowest-bounds CI job
+    is where a regression of that shows.
     """
     result = subprocess.run(
         [sys.executable, "-m", "pmlens"],
@@ -128,11 +142,29 @@ def test_bare_cli_invocation_cannot_start_a_server():
         text=True,
         timeout=60,
     )
-    assert result.returncode != 0, (
-        "bare `python -m pmlens` succeeded — the CLI group now runs without a "
-        "subcommand. Revisit whether every launch surface still needs `serve`."
+    assert result.returncode == 2, (
+        "bare `python -m pmlens` did not fail as a usage error — the CLI group "
+        "now runs without a subcommand, or the installed click decides the exit "
+        "code. Revisit whether every launch surface still needs `serve`."
     )
-    assert "Usage:" in (result.stdout + result.stderr)
+    # stdout is the MCP channel of a stdio launch: the usage must not land there.
+    assert result.stdout == ""
+    usage = [line for line in result.stderr.splitlines() if line.startswith("Usage:")]
+    # A command is still shown as required.
+    assert len(usage) == 1 and usage[0].endswith("[OPTIONS] COMMAND [ARGS]...")
+
+
+def test_help_and_version_still_succeed_on_stdout():
+    """Asking for help is not the usage error a bare invocation is."""
+    for flag, expected in (("--help", "Usage:"), ("--version", "pmlens, version ")):
+        result = subprocess.run(
+            [sys.executable, "-m", "pmlens", flag],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert result.returncode == 0
+        assert result.stdout.startswith(expected)
 
 
 # ─── Wire surface: `serve` really speaks MCP over stdio ───────────────────────
@@ -150,6 +182,8 @@ class Session(NamedTuple):
     tools: list[str]
     tool_definitions: dict[str, dict[str, Any]]
     responses: list[dict[str, Any]]
+    # Everything the server wrote to stderr before it was stopped.
+    stderr: str = ""
 
 
 def _mcp_session(
@@ -158,6 +192,8 @@ def _mcp_session(
     desktop_write: bool = False,
     calls: list[dict[str, Any]] | None = None,
     timeout: float = 90.0,
+    extra_env: dict[str, str] | None = None,
+    cwd: Path | None = None,
 ) -> Session:
     """Launch `python -m pmlens serve`, handshake, and report what came back.
 
@@ -174,6 +210,7 @@ def _mcp_session(
     env["PM_LENS"] = "1" if lens else "0"
     env["PM_DESKTOP_WRITE"] = "1" if desktop_write else "0"
     env["PYTHONUNBUFFERED"] = "1"
+    env.update(extra_env or {})
 
     proc = subprocess.Popen(
         [sys.executable, "-m", "pmlens", SERVE],
@@ -182,6 +219,7 @@ def _mcp_session(
         stderr=subprocess.PIPE,
         text=True,
         env=env,
+        cwd=cwd,
     )
 
     # readline() blocks, so a watchdog is the only way to keep a wedged
@@ -225,7 +263,7 @@ def _mcp_session(
             assert "result" in response, f"tools/call failed: {response!r}"
             assert not response["result"].get("isError"), response
             responses.append(response["result"])
-        return Session(
+        session = Session(
             protocol_version=init["result"].get("protocolVersion", ""),
             server_info=init["result"].get("serverInfo", {}),
             tools=[t["name"] for t in listed["result"]["tools"]],
@@ -236,6 +274,10 @@ def _mcp_session(
         watchdog.cancel()
         proc.kill()
         proc.wait(timeout=30)
+    # Readable to the end now that the process is gone. Start-up output (a
+    # banner, a log line) was written before the first response.
+    assert proc.stderr is not None
+    return session._replace(stderr=proc.stderr.read())
 
 
 def _read_response(proc: subprocess.Popen[str], *, want_id: int) -> dict[str, Any]:
@@ -441,6 +483,67 @@ def test_decisions_round_trip_over_stdio(tmp_project: Path) -> None:
     assert got["lineage"]["derived"] is False
     assert got["lineage"]["declared"]["origin"] == "ai_auto"
     assert got["lineage"]["events"][0]["kind"] == "created"
+
+
+@pytest.mark.smoke
+def test_list_or_string_arguments_round_trip_over_stdio(tmp_path: Path) -> None:
+    """pending and artifacts take a list or a string over the wire.
+
+    Proves the schema a host is shown (array, string or null) and that both
+    shapes pass argument validation in a real server process: a list for
+    pending and a bare string for artifacts were both refused before.
+    """
+    project = str(tmp_path / "wire")
+    (tmp_path / "wire").mkdir()
+    pending = ["Fix parser, which fails on tabs", "Write docs"]
+    session = _mcp_session(
+        lens=False,
+        calls=[
+            {"name": "pm_init", "arguments": {"project_path": project, "project_name": "wire"}},
+            {
+                "name": "pm_session_summary",
+                "arguments": {"summary": "s", "pending": pending, "project_path": project},
+            },
+            {
+                "name": "pm_session_summary",
+                "arguments": {
+                    "summary": "s",
+                    "pending": "Fix parser, which fails on tabs\nWrite docs",
+                    "project_path": project,
+                },
+            },
+            {"name": "pm_session_summary", "arguments": {"action": "get", "project_path": project}},
+            {"name": "pm_workflow_start", "arguments": {"feature": "f", "project_path": project}},
+            {
+                "name": "pm_workflow_advance",
+                "arguments": {"artifacts": "ADR-001", "project_path": project},
+            },
+            {
+                "name": "pm_workflow_advance",
+                "arguments": {"artifacts": ["WIRE-001", "WIRE-002"], "project_path": project},
+            },
+        ],
+    )
+    list_or_string = [
+        {"items": {"type": "string"}, "type": "array"},
+        {"type": "string"},
+        {"type": "null"},
+    ]
+    for tool, argument in (("pm_session_summary", "pending"), ("pm_workflow_advance", "artifacts")):
+        schema = session.tool_definitions[tool]["inputSchema"]
+        branches = schema["properties"][argument]["anyOf"]
+        assert len(branches) == 3 and all(branch in branches for branch in list_or_string)
+        assert argument not in schema.get("required", [])
+
+    _, saved, resaved, got, _, first, second = (
+        json.loads(response["content"][0]["text"]) for response in session.responses
+    )
+    assert saved["status"] == "saved" and saved["warnings"] == []
+    # The same two items as one string, a line each: nothing was dropped.
+    assert resaved["warnings"] == []
+    assert got["pending"] == pending
+    assert first["completed_step"]["artifacts"] == ["ADR-001"]
+    assert second["completed_step"]["artifacts"] == ["WIRE-001", "WIRE-002"]
 
 
 def _object_of_string_lists(schema: dict[str, Any]) -> bool:
@@ -885,3 +988,199 @@ def test_handshake_reports_a_protocol_version(record_property):
     )
     record_property("mcp_protocol_version", version)
     record_property("mcp_server_info", json.dumps(session.server_info, sort_keys=True))
+
+
+# ─── Start-up side effects: nothing printed, requested or written ─────────────
+#
+# FastMCP's default start printed a banner on stderr and, to say whether a
+# newer FastMCP exists, asked pypi.org and cached the answer under HOME. Every
+# host starts `pmlens serve` for every session, Lens hosts included.
+
+# Text that only FastMCP's banner prints (its title, its links, its frame).
+_BANNER_MARKERS = ("FastMCP", "Update available", "horizon.prefect.io", "gofastmcp.com", "╭")
+
+
+class _RequestSink:
+    """A local listener that stands in for every proxy and records what connects.
+
+    A child started with :meth:`env` sends any HTTP(S) request to this socket
+    instead of the network, so a test can assert that none was made without
+    one ever leaving the machine.
+    """
+
+    def __init__(self) -> None:
+        self.requests: list[str] = []
+        self._socket = socket.socket()
+        self._socket.bind(("127.0.0.1", 0))
+        self._socket.listen(8)
+        self._socket.settimeout(0.1)
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._accept, daemon=True)
+
+    def _accept(self) -> None:
+        while not self._stop.is_set():
+            try:
+                conn, _ = self._socket.accept()
+            except OSError:
+                continue
+            with conn:
+                conn.settimeout(2)
+                try:
+                    first_line = conn.recv(200).decode("latin-1").splitlines()[0]
+                except (OSError, IndexError):
+                    first_line = "<connection without a request line>"
+                self.requests.append(first_line)
+
+    def env(self) -> dict[str, str]:
+        proxy = f"http://127.0.0.1:{self._socket.getsockname()[1]}"
+        names = ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY")
+        routed = {name: proxy for upper in names for name in (upper, upper.lower())}
+        # An inherited NO_PROXY could exempt the host the test is watching for.
+        return {**routed, "NO_PROXY": "", "no_proxy": ""}
+
+    def __enter__(self) -> _RequestSink:
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self._stop.set()
+        self._thread.join(timeout=5)
+        self._socket.close()
+
+
+def _tree(root: Path) -> list[str]:
+    return sorted(str(path.relative_to(root)) for path in root.rglob("*"))
+
+
+@pytest.mark.smoke
+def test_request_sink_sees_a_request_made_by_a_child() -> None:
+    """The sink must catch a real request, or the start-up test below proves nothing."""
+    with _RequestSink() as sink:
+        subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import urllib.request, sys\n"
+                "try:\n"
+                "    urllib.request.urlopen('https://pypi.org/pypi/fastmcp/json', timeout=5)\n"
+                "except OSError:\n"
+                "    sys.exit(0)\n",
+            ],
+            env={**os.environ, **sink.env()},
+            capture_output=True,
+            timeout=60,
+        )
+    # What a proxy receives for an HTTPS URL: "CONNECT host:port HTTP/1.1".
+    assert sink.requests, "the sink saw no request"
+    method, authority = sink.requests[0].split()[:2]
+    assert (method, authority) == ("CONNECT", "pypi.org:443")
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("lens", [False, True], ids=["full", "lens"])
+def test_serve_start_prints_no_banner_asks_no_server_and_writes_nothing(
+    lens: bool, isolated_home: Path, tmp_path: Path
+) -> None:
+    """Starting the server, the handshake and ``tools/list`` have no side effect.
+
+    Neither mode creates anything under HOME by starting. What full mode does
+    write there (``~/.pm`` with the project registry, the hook in
+    ``~/.claude/settings.json``) is written by tool calls such as ``pm_init``
+    and ``pm_status``, and this test makes none. So the listing of HOME must be
+    the same after as before, in full mode as well as in Lens.
+    """
+    (isolated_home / "kept.txt").write_text("here before the server started", encoding="utf-8")
+    before = _tree(isolated_home)
+    cwd = tmp_path / "not_a_project"
+    cwd.mkdir()
+    # Where platformdirs puts per-user data when these are set: keep them
+    # inside the HOME this test lists, whatever the developer's shell exports.
+    xdg = {
+        "XDG_DATA_HOME": str(isolated_home / ".local" / "share"),
+        "XDG_CACHE_HOME": str(isolated_home / ".cache"),
+        "XDG_CONFIG_HOME": str(isolated_home / ".config"),
+        "XDG_STATE_HOME": str(isolated_home / ".local" / "state"),
+    }
+
+    with _RequestSink() as sink:
+        session = _mcp_session(lens=lens, cwd=cwd, extra_env={**sink.env(), **xdg})
+
+    assert "pm_status" in session.tools
+    printed = [marker for marker in _BANNER_MARKERS if marker in session.stderr]
+    assert not printed, f"the server printed a banner at start: {session.stderr!r}"
+    assert sink.requests == [], "the server made a network request at start"
+    assert _tree(isolated_home) == before
+    assert _tree(cwd) == []
+
+
+def _keep_fastmcp_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Have monkeypatch put back the FastMCP settings that ``serve`` changes."""
+    import fastmcp
+
+    for name in ("check_for_updates", "show_server_banner"):
+        if hasattr(fastmcp.settings, name):
+            monkeypatch.setattr(fastmcp.settings, name, getattr(fastmcp.settings, name))
+
+
+def test_serve_switches_the_banner_and_the_update_check_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import fastmcp
+    from click.testing import CliRunner
+
+    import pmlens.server
+    from pmlens.__main__ import cli
+
+    _keep_fastmcp_settings(monkeypatch)
+    seen: dict[str, Any] = {}
+
+    def run(transport: str | None = None, show_banner: bool | None = None, **kwargs: Any) -> None:
+        seen.update(transport=transport, show_banner=show_banner, kwargs=kwargs)
+        seen["check_for_updates"] = getattr(fastmcp.settings, "check_for_updates", "off")
+        seen["show_server_banner"] = getattr(fastmcp.settings, "show_server_banner", False)
+
+    monkeypatch.setattr(pmlens.server.mcp, "run", run)
+    result = CliRunner().invoke(cli, [SERVE])
+
+    assert result.exit_code == 0, result.output
+    assert seen == {
+        "transport": "stdio",
+        "show_banner": False,
+        "kwargs": {},
+        "check_for_updates": "off",
+        "show_server_banner": False,
+    }
+
+
+@pytest.mark.parametrize("settings_kind", ["no_such_settings", "settings_refuse_the_value"])
+def test_serve_starts_on_a_fastmcp_without_these_switches(
+    monkeypatch: pytest.MonkeyPatch, settings_kind: str
+) -> None:
+    """The supported FastMCP range is wide: a missing switch must not stop the server."""
+    import types
+
+    import fastmcp
+    from click.testing import CliRunner
+
+    import pmlens.server
+    from pmlens.__main__ import cli
+
+    class Refusing:
+        check_for_updates = "stable"
+        show_server_banner = True
+
+        def __setattr__(self, name: str, value: object) -> None:
+            raise ValueError("this release does not take that value")
+
+    settings = types.SimpleNamespace() if settings_kind == "no_such_settings" else Refusing()
+    monkeypatch.setattr(fastmcp, "settings", settings)
+    started: list[str | None] = []
+
+    def run(transport: str | None = None) -> None:  # no show_banner parameter
+        started.append(transport)
+
+    monkeypatch.setattr(pmlens.server.mcp, "run", run)
+    result = CliRunner().invoke(cli, [SERVE])
+
+    assert result.exit_code == 0, result.output
+    assert started == ["stdio"]

@@ -1,5 +1,122 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- **The hook install no longer replaces a `~/.claude/settings.json` it cannot
+  read (PMSERV-290)**: a file that exists but cannot be read, is not valid
+  JSON, or is not a JSON object is never written to. `pm_status` returns a
+  `hooks_settings_unreadable` warning and `pmlens install-hooks` / `pmlens
+  uninstall-hooks` exit non-zero until the file is fixed by hand; before, one
+  trailing comma made `pm_status` replace the whole file (deny rules, env,
+  other hooks) with the pmlens hook alone. When pmlens does write the file it
+  replaces it atomically, keeps its mode and keeps a symlink a symlink. A
+  read-only `settings.json`, one in a directory that is not writable, one that
+  has a second hard link (replacing it would leave the other name with the old
+  content), and one that is a link to a directory that does not exist are left
+  as they are:
+  `pm_status` returns a `hooks_settings_not_writable` warning instead of
+  raising, as it does for any other failed write of that file, and the two
+  commands exit non-zero without a traceback. The file is never written in
+  place, so in a directory that is not writable the hook is no longer installed
+  automatically (0.18.0 wrote the file there). Settings that parse but cannot
+  be written back as UTF-8 (a string holding half of a surrogate pair, such as
+  `"\ud83d"`) get the same warning and exit code, and the file is not opened
+  for writing. The temporary copy is written next to the file itself (for a
+  link: next to its target) and named after it, `.settings.json.pmlens-*.tmp`;
+  one that a killed write left behind is removed once it is an hour old, by
+  the next write or by `pm_status` outside Lens.
+- **Listing drafts no longer creates a draft database (PMSERV-294)**:
+  `pm_drafts_pending` and `pm_x_drafts_pending` return an empty page on a
+  project that never staged a draft, instead of creating `.pm/drafts.db` and
+  its sidecars.
+- **Tasks in review and work left untouched are visible again (PMSERV-293)**:
+  `pm_status` returns an always-present `attention` key (review tasks with
+  their age and open defect count, and in_progress / review tasks not updated
+  for 30+ days) and adds up to two lines to `next_pm_actions`;
+  `pm_update_task` returns `all_issues_resolved` when the last open defect
+  child is done even if enhancement children are still open; the post-commit
+  reminder names only in_progress tasks updated in the last 30 days and counts
+  the rest.
+- **`pm_session_summary` no longer splits `pending` on commas (PMSERV-296)**:
+  `pending` takes a list, or a string in which a newline separates items, so
+  "Fix parser, which fails on tabs" stays one item (a comma-separated string
+  is now stored as one item); `session_summary_pending_dropped` has level
+  `info` and leaves out items that differ only in spacing, letter case or
+  where they were split at commas (a reworded item is still listed).
+  `pmlens context-inject` separates pending items with "; ".
+  `pm_workflow_advance(artifacts=...)` also accepts a single string.
+- **Tool descriptions are complete again with fastmcp 4.1 (PMSERV-299)**:
+  an install of 0.18.0 made today with pipx or uvx resolves fastmcp 4.1, and
+  fastmcp 4.1 keeps only the part of a docstring that comes before the first
+  thing it reads as a section, and reads `name: text` with an indented
+  continuation as one. Nine tools (`pm_add_issue`, `pm_session_summary`,
+  `pm_memory_search`, `pm_memory_ingest`, `pm_memory_cleanup`, `pm_record`,
+  `pm_knowledge`, `pm_workflow_abandon`, `pm_workflow_list`) reached the model
+  with their first lines only, without their valid values and warnings. A
+  docstring without an `Args:` section is now registered as the description
+  itself. Descriptions are unchanged with fastmcp 3.2 to 4.0.
+- **`pmlens` without a subcommand fails the same way on every supported click
+  (PMSERV-297)**: with click 8.1, the declared lower bound, it printed its help
+  on stdout and exited 0, so a launch entry that had lost `serve` wrote the
+  help onto the MCP channel and reported success. It now prints the usage on
+  stderr and exits 2 there too, as it already did with click 8.2 and later.
+- **Custom workflow templates whose file name starts with dots are listed on
+  Python 3.14 (PMSERV-297)**: `pm_workflow_templates` took the name from
+  `Path.stem`, which Python 3.14 changed for such names, so a template stored
+  as `...yaml` loaded by its name `..` but was missing from the list.
+
+### Changed
+
+- **`pmlens serve` starts without FastMCP's banner or update check
+  (PMSERV-292)**: no banner on stderr, no request to pypi.org and no cache file
+  under the home directory at start, in full mode and in Lens.
+- **A wrong enum value is an error that lists the valid ones, on filters too
+  (PMSERV-295)**: the task, issue, log, memory, knowledge and workflow tools
+  answer `status must be one of: todo, in_progress, review, done, blocked`
+  (the argument's name and its values, without the value sent) and accept
+  another letter case and `-` or a space for `_` (`In-Progress`). An unknown
+  filter value in `pm_tasks`, `pm_recall`, `pm_memory_search`, `pm_knowledge`
+  and `pm_knowledge_query` now raises that error instead of returning an empty
+  result. So does `filter_priority` of `pm_prompt_pack`, and
+  `pmlens prompt-pack --priority` takes P0-P3 only, in either letter case; an
+  empty value still means no filter. Any other value, and a lowercase `p1`,
+  used to match no task when it was the filter (the command said that nothing
+  matched, wrote no file and exited 0) and was ignored next to `--task-id`; it
+  is now a usage error in both cases.
+
+### Security
+
+- **`pm_init` writes `.pm/.gitignore` (PMSERV-294)**: `git add` in a user's
+  repository no longer stages the draft databases (text before redaction), the
+  memory database, the SQLite `-wal` / `-shm` sidecars or `.locks/`. An
+  existing `.gitignore` is never changed; running `pm_init` again adds the file
+  to an older project, and `pm_status` returns a `pm_gitignore_missing` notice
+  for a `.pm` that holds a database and no `.gitignore`, unless the project is
+  outside git or its own `.gitignore` ignores all of `.pm`. That file is read
+  the way git reads it, and what pmlens can see but not judge keeps the
+  notice: a later `!` line, a `.pm` that is a link or a repository of its own,
+  `GIT_DIR` or `GIT_WORK_TREE` in the environment. A database git already
+  tracks stays tracked whatever is ignored (`git rm --cached`). Remove the
+  `memory.db*` line to track the memory database.
+
+### Tests
+
+- **The test suite can no longer act on a real project (PMSERV-291)**:
+  `tests/conftest.py` clears `PM_PROJECT_PATH`, `PM_LENS`, `PM_DESKTOP_WRITE`
+  and the other variables pmlens reads, before pmlens is imported and before
+  each test. With `PM_PROJECT_PATH` exported, `pytest` used to run its
+  memory-cleanup tests against that project and delete its memories.
+- **CI runs weekly, on Python 3.14 and at the declared lower bounds
+  (PMSERV-297)**: `ci.yml` also runs every Monday and on demand, so a new
+  release of an unpinned dependency is tested without waiting for a push; the
+  test matrix and the classifiers gain Python 3.14; and a `test-lowest` job on
+  Python 3.11 installs the runtime dependencies with uv's
+  `--resolution lowest-direct` and runs the suite. The workflow's token is
+  limited to reading the repository (`permissions: contents: read`).
+
+
 ## [0.18.0] - 2026-11-05
 
 Decision Lineage v1, second half (ADR-056 / ADR-058): one decision can now go

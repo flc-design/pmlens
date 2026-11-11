@@ -6,13 +6,19 @@ and functions to install/uninstall hooks in Claude Code settings.
 
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import os
 import re
 import shlex
 import shutil
+import stat
 import sys
+import tempfile
+import time
 from pathlib import Path
+
+from .models import PmServerError
 
 # Hook command that Claude Code will call. New installs emit the ``pmlens``
 # binary; the legacy ``pm-server hook`` form is still RECOGNIZED on detection
@@ -27,23 +33,330 @@ def _settings_path() -> Path:
     return Path.home() / ".claude" / "settings.json"
 
 
+# Why a settings file could not be used. Fixed texts: a parser's own message
+# repeats text from the file, and these end up in tool responses.
+_PROBLEM_IO = "it could not be read"
+_PROBLEM_JSON = "it is not valid JSON"
+_PROBLEM_TOP_LEVEL = "its top level is not a JSON object"
+_PROBLEM_HOOKS_SHAPE = (
+    "its `hooks` entry is not an object, or the `PostToolUse` entry in it is not a list"
+)
+
+
+def _settings_unreadable_warning(path: Path, problem: str) -> dict:
+    """The ``warnings[]`` entry for a settings file pmlens will not write to."""
+    return {
+        "level": "warning",
+        "code": "hooks_settings_unreadable",
+        "message": (
+            f"pmlens could not use {path} as Claude Code settings: {problem}. "
+            "It cannot tell whether its PostToolUse hook (the reminder after a "
+            "git commit) is installed there."
+        ),
+        "remediation": (
+            "Fix the JSON in that file by hand; a trailing comma or a missing "
+            "bracket is the usual cause. pmlens did not change the file and will "
+            "not write to it until it parses as a JSON object. After that, "
+            "`pmlens install-hooks` installs the hook."
+        ),
+    }
+
+
+class SettingsUnreadableError(PmServerError):
+    """The settings file exists, but pmlens cannot read it as Claude Code settings.
+
+    Raised instead of treating the file as empty. The callers write the file
+    back, and "empty plus the pmlens hook" used to replace a user's whole
+    configuration (deny rules, env, their own hooks) when the file merely had
+    a trailing comma.
+
+    ``str()`` of the error is the message and remediation of
+    :attr:`warning`, built from the path and a fixed reason only.
+    """
+
+    def __init__(self, path: Path, problem: str) -> None:
+        self.path = path
+        self.problem = problem
+        self.warning = _settings_unreadable_warning(path, problem)
+        super().__init__(f"{self.warning['message']} {self.warning['remediation']}")
+
+
+# Why a settings file was not written. Fixed texts, for the same reason.
+_PROBLEM_READ_ONLY = "the file is read-only"
+_PROBLEM_DANGLING_LINK = "it is a link to a location that does not exist"
+_PROBLEM_DIRECTORY = "its directory is not writable, so it cannot be replaced safely"
+_PROBLEM_HARD_LINK = (
+    "the file has another hard link, and replacing it would leave that other name with the old "
+    "content"
+)
+_PROBLEM_WRITE_FAILED = "writing it failed"
+_PROBLEM_NOT_UTF8 = "it holds text that cannot be written back as UTF-8"
+
+_REMEDY_NOT_WRITABLE = (
+    "Make that file and its directory writable (for a link: create the "
+    "directory it points into), then run the command again; `pmlens "
+    "install-hooks` installs the hook. pm_status tries the hook install "
+    "again on each call and reports this until it succeeds."
+)
+# Permissions are not the cause here either.
+_REMEDY_HARD_LINK = (
+    "pmlens replaces this file as a whole and never writes into it, so it did "
+    "not change it. Make the file a symbolic link instead of a hard link (or "
+    "remove the other name), then run the command again; `pmlens "
+    "install-hooks` installs the hook. pm_status tries the hook install "
+    "again on each call and reports this until it succeeds."
+)
+# Permissions are not the cause here, so the advice above would mislead.
+_REMEDY_NOT_UTF8 = (
+    "A string in that file holds half of a character pair, written as an "
+    "escape in the range \\ud800 to \\udfff without its other half (an emoji "
+    "cut in the middle is the usual cause). pmlens did not change the file. "
+    "Fix or remove that escape by hand, then run the command again; `pmlens "
+    "install-hooks` installs the hook. pm_status tries the hook install "
+    "again on each call and reports this until it succeeds."
+)
+
+
+def _settings_not_writable_warning(path: Path, problem: str) -> dict:
+    """The ``warnings[]`` entry for a settings file pmlens could not write."""
+    remediation = {
+        _PROBLEM_NOT_UTF8: _REMEDY_NOT_UTF8,
+        _PROBLEM_HARD_LINK: _REMEDY_HARD_LINK,
+    }.get(problem, _REMEDY_NOT_WRITABLE)
+    return {
+        "level": "warning",
+        "code": "hooks_settings_not_writable",
+        "message": (
+            f"pmlens could not write Claude Code settings at {path}: {problem}. "
+            "It did not complete the change it was making there (its PostToolUse "
+            "hook, the reminder after a git commit, or a permission migration)."
+        ),
+        "remediation": remediation,
+    }
+
+
+class SettingsNotWritableError(PmServerError):
+    """pmlens will not, or could not, write the settings file.
+
+    Raised by :func:`_save_settings` before anything is written when the file
+    is read-only, has another hard link, sits in a directory that is not
+    writable, or is a link to a location that does not exist: replacing a file
+    only needs a writable directory, so without these checks a status read
+    would rewrite a file its owner had write-protected. Also raised, equally
+    before anything is written, when the settings cannot be encoded as UTF-8.
+
+    ``str()`` of the error is the message and remediation of
+    :attr:`warning`, built from the path and a fixed reason only.
+    """
+
+    def __init__(self, path: Path, problem: str) -> None:
+        self.path = path
+        self.problem = problem
+        self.warning = _settings_not_writable_warning(path, problem)
+        super().__init__(f"{self.warning['message']} {self.warning['remediation']}")
+
+
+def hooks_settings_write_failed_warning() -> dict:
+    """The ``warnings[]`` entry for a settings write that ended in an ``OSError``.
+
+    For the callers that must not pass the error on (``pm_status`` is a status
+    read; the CLI prints one line instead of a traceback). The operating
+    system's own message is left out: it is not a fixed text.
+    """
+    return _settings_not_writable_warning(_settings_path(), _PROBLEM_WRITE_FAILED)
+
+
 def _load_settings(path: Path) -> dict:
-    """Load Claude Code settings, returning empty dict if missing."""
-    if not path.exists():
-        return {}
+    """Load Claude Code settings; an empty dict only when the file does not exist.
+
+    Raises:
+        SettingsUnreadableError: The file exists but cannot be read, is not
+            valid JSON, or does not hold a JSON object at the top level.
+    """
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
+        # utf-8-sig: a byte-order mark is not a reason to refuse the file.
+        raw = path.read_text(encoding="utf-8-sig")
+    except FileNotFoundError:
+        # Also a dangling symlink: there is nothing a write could destroy.
         return {}
+    except (OSError, UnicodeDecodeError):
+        raise SettingsUnreadableError(path, _PROBLEM_IO) from None
+    try:
+        settings = json.loads(raw)
+    except (ValueError, RecursionError):
+        raise SettingsUnreadableError(path, _PROBLEM_JSON) from None
+    if not isinstance(settings, dict):
+        raise SettingsUnreadableError(path, _PROBLEM_TOP_LEVEL)
+    return settings
+
+
+def _post_tool_use_groups(path: Path, settings: dict) -> list:
+    """The ``hooks.PostToolUse`` list of ``settings``; an empty list when absent.
+
+    Raises:
+        SettingsUnreadableError: ``hooks`` or ``hooks.PostToolUse`` is present
+            with another type. pmlens did not write that value and does not
+            know what it means, so it will not replace it.
+    """
+    if "hooks" not in settings:
+        return []
+    hooks = settings["hooks"]
+    if not isinstance(hooks, dict):
+        raise SettingsUnreadableError(path, _PROBLEM_HOOKS_SHAPE)
+    if "PostToolUse" not in hooks:
+        return []
+    groups = hooks["PostToolUse"]
+    if not isinstance(groups, list):
+        raise SettingsUnreadableError(path, _PROBLEM_HOOKS_SHAPE)
+    return groups
 
 
 def _save_settings(path: Path, settings: dict) -> None:
-    """Write settings back, preserving all existing keys."""
+    """Write settings back atomically, keeping every key and the file's mode.
+
+    Claude Code reads and writes this file too, so a crash or a concurrent
+    reader must never see half of it: the text goes to a temporary file in the
+    same directory, is flushed to disk, and then replaces the target. The
+    target is the resolved path, so a ``settings.json`` that is a symlink into
+    a dotfiles checkout stays a symlink and the file it points at is the one
+    replaced.
+
+    Not ``utils._atomic_write_text``: that helper is how pmlens writes its own
+    ledgers, and the static check of the read-only tool surface counts every
+    caller of it as a ledger writer. This file is not a ledger, and the one
+    read tool that reaches this function (``pm_status``) does so only outside
+    Lens, which that check cannot see.
+
+    The file is never written in place. Where no temporary file can be created
+    next to it (a writable file in a directory that is not), the write is
+    refused: an in-place write that fails partway leaves the user's settings
+    truncated, and the callers include a status read.
+
+    A file with a second hard link is refused as well: the replacement gives
+    this name a new inode, and the other name (a dotfiles checkout) would keep
+    the old content without anyone being told. Extended attributes of the old
+    file are not carried over.
+
+    Raises:
+        SettingsNotWritableError: The file is read-only, has another hard
+            link, its directory is not writable, it is a link whose
+            destination directory does not exist, or the settings hold text
+            that is not valid UTF-8. Nothing is written.
+        OSError: The write itself failed. The old file is still in place.
+    """
+    target = path.resolve()
+    # Only the directory of the settings path itself (~/.claude) is created.
+    # Where a link points is the user's: a dangling link into a dotfiles
+    # checkout that is not there yet must not make pmlens create that tree.
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(settings, indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
+    if not target.parent.is_dir():
+        raise SettingsNotWritableError(path, _PROBLEM_DANGLING_LINK)
+    # os.replace only needs a writable directory, so the file's own write
+    # protection has to be checked here or it would be bypassed.
+    if target.exists() and not os.access(target, os.W_OK):
+        raise SettingsNotWritableError(path, _PROBLEM_READ_ONLY)
+    if target.exists() and os.stat(target).st_nlink > 1:
+        raise SettingsNotWritableError(path, _PROBLEM_HARD_LINK)
+    text = json.dumps(settings, indent=2, ensure_ascii=False) + "\n"
+    # Encoded before any file is opened. JSON may hold half of a surrogate
+    # pair as an escape (a writer that cut a string in the middle of an emoji
+    # leaves one); it loads, but it is not UTF-8.
+    try:
+        data = text.encode("utf-8")
+    except UnicodeEncodeError:
+        # Not chained: the codec's message quotes the file's text.
+        raise SettingsNotWritableError(path, _PROBLEM_NOT_UTF8) from None
+    try:
+        fd, tmp_name = tempfile.mkstemp(
+            dir=str(target.parent), prefix=_temp_prefix(target), suffix=_TEMP_SUFFIX
+        )
+    except PermissionError:
+        raise SettingsNotWritableError(path, _PROBLEM_DIRECTORY) from None
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if target.exists():
+            shutil.copymode(target, tmp_name)
+        else:
+            # mkstemp creates 0600; a new settings file gets the mode a plain
+            # open() would have given it, as before.
+            current_umask = os.umask(0)
+            os.umask(current_umask)
+            os.chmod(tmp_name, 0o666 & ~current_umask)
+        os.replace(tmp_name, target)
+    except BaseException:
+        Path(tmp_name).unlink(missing_ok=True)
+        raise
+    _remove_stale_temp_files(target)
+
+
+_TEMP_SUFFIX = ".tmp"
+# A temporary copy older than this belongs to a write that was killed, not to
+# one that is still running in another process.
+_STALE_TEMP_SECONDS = 3600
+
+
+# How much of the target's name the temporary file's name repeats: enough to
+# tell whose copy it is, short enough that a long name still fits the file
+# system's limit for one name. That limit is in bytes (255 on most), and a
+# character can take four: 48 * 4, plus the 21 bytes pmlens adds, is 213.
+_TEMP_NAME_CHARS = 48
+
+
+def _temp_prefix(target: Path) -> str:
+    """The name prefix of the temporary copies pmlens writes next to ``target``."""
+    return f".{target.name[:_TEMP_NAME_CHARS]}.pmlens-"
+
+
+def _remove_stale_temp_files(target: Path) -> None:
+    """Remove temporary copies that a killed write left next to ``target``.
+
+    A process killed between writing its temporary file and the replace leaves
+    a full copy of the user's settings behind. Only regular files that carry
+    pmlens's own prefix and are older than _STALE_TEMP_SECONDS are removed, so
+    a write in progress in another process keeps its file. Best effort: a
+    failure here must not fail a write that has already succeeded, or a
+    status read.
+    """
+    prefix = _temp_prefix(target)
+    cutoff = time.time() - _STALE_TEMP_SECONDS
+    try:
+        names = os.listdir(target.parent)
+    except OSError:
+        return
+    for name in names:
+        if not (name.startswith(prefix) and name.endswith(_TEMP_SUFFIX)):
+            continue
+        candidate = target.parent / name
+        try:
+            info = os.lstat(candidate)
+            if stat.S_ISREG(info.st_mode) and info.st_mtime < cutoff:
+                os.unlink(candidate)
+        except OSError:
+            continue
+
+
+def remove_stale_settings_temp_files() -> None:
+    """Remove pmlens's own stale temporary copies of the Claude Code settings.
+
+    For the status read outside Lens. The sweep after a successful write is
+    not enough on its own: a killed write is usually followed, within the
+    hour, by one that succeeds, and after that nothing writes the file again,
+    so the copy would never be looked at once it is old enough to remove.
+
+    Both the settings path's own directory and, for a link, the directory of
+    its target are swept: a copy can be left in either, depending on what the
+    path was when the write was killed.
+    """
+    path = _settings_path()
+    try:
+        target = path.resolve()
+    except (OSError, RuntimeError):  # a link loop, on the Pythons that raise for one
+        target = path
+    for settings_file in {path, target}:
+        _remove_stale_temp_files(settings_file)
 
 
 def _pm_server_command() -> str:
@@ -98,9 +411,30 @@ def _is_pm_hook_command(cmd: str) -> bool:
     return bool(_PM_HOOK_COMMAND_RE.search(cmd))
 
 
+def _group_hooks(group: object) -> list:
+    """The hook entries of one PostToolUse group, or ``[]`` for an unknown shape.
+
+    The file belongs to Claude Code and to the user. An entry pmlens does not
+    recognise is never a pmlens hook, so it is skipped here and kept as it is
+    on a write.
+    """
+    if not isinstance(group, dict):
+        return []
+    entries = group.get("hooks")
+    return entries if isinstance(entries, list) else []
+
+
+def _hook_command(hook: object) -> str:
+    """The command of one hook entry, or ``""`` when it has none."""
+    if not isinstance(hook, dict):
+        return ""
+    command = hook.get("command")
+    return command if isinstance(command, str) else ""
+
+
 def _is_pm_hook(hook_group: dict) -> bool:
     """Check if a hook group contains at least one PM Lens hook command."""
-    return any(_is_pm_hook_command(hook.get("command", "")) for hook in hook_group.get("hooks", []))
+    return any(_is_pm_hook_command(_hook_command(hook)) for hook in _group_hooks(hook_group))
 
 
 def _hook_binary_exists(command: str) -> bool:
@@ -141,10 +475,10 @@ def _pm_hook_commands(post_tool_use: list[dict]) -> list[str]:
     registration (the same command appearing twice runs twice per event).
     """
     return [
-        hook.get("command", "")
+        _hook_command(hook)
         for group in post_tool_use
-        for hook in group.get("hooks", [])
-        if _is_pm_hook_command(hook.get("command", ""))
+        for hook in _group_hooks(group)
+        if _is_pm_hook_command(_hook_command(hook))
     ]
 
 
@@ -152,8 +486,9 @@ def _strip_pm_hooks(post_tool_use: list[dict]) -> tuple[list[dict], int]:
     """Drop PM Lens hook commands from ``post_tool_use``, keeping everything else.
 
     Works at the COMMAND level, not the group level: a group that mixes a PM
-    Lens hook with a user's own hook keeps the user's hook. Groups left empty
-    are removed.
+    Lens hook with a user's own hook keeps the user's hook. A group is removed
+    only when removing PM Lens commands left it empty; every other group,
+    including one whose shape pmlens does not recognise, is kept as it is.
 
     Returns:
         ``(remaining_groups, removed_count)``.
@@ -161,12 +496,12 @@ def _strip_pm_hooks(post_tool_use: list[dict]) -> tuple[list[dict], int]:
     remaining: list[dict] = []
     removed = 0
     for group in post_tool_use:
-        kept = []
-        for hook in group.get("hooks", []):
-            if _is_pm_hook_command(hook.get("command", "")):
-                removed += 1
-            else:
-                kept.append(hook)
+        entries = _group_hooks(group)
+        kept = [hook for hook in entries if not _is_pm_hook_command(_hook_command(hook))]
+        if len(kept) == len(entries):
+            remaining.append(group)
+            continue
+        removed += len(entries) - len(kept)
         if kept:
             new_group = dict(group)
             new_group["hooks"] = kept
@@ -211,6 +546,19 @@ def stale_pm_hook_warning(status: dict) -> dict | None:
     }
 
 
+def hooks_settings_unreadable_warning(status: dict) -> dict | None:
+    """Build the ``warnings[]`` entry for a settings file pmlens could not use.
+
+    Returns ``None`` when ``status`` (from :func:`get_hooks_status`) read the
+    file, or found none.
+    """
+    if status.get("readable", True):
+        return None
+    return _settings_unreadable_warning(
+        Path(str(status.get("path", ""))), str(status.get("problem") or _PROBLEM_IO)
+    )
+
+
 # ─── Hook status ──────────────────────────────────
 
 
@@ -227,14 +575,28 @@ def get_hooks_status() -> dict:
                 (ADR-053) — e.g. left behind by an uninstalled distribution.
             duplicates (list[str]): commands registered more than once.
             healthy (bool): installed with no stale or duplicate entries.
+            readable (bool): False when the settings file exists but could not
+                be read as Claude Code settings. Nothing is known about the
+                hooks then (``installed`` is False, the lists are empty), and
+                ``problem`` (str) says why in a fixed text.
 
         ``installed``/``path`` are the v0.4.x-compatible keys; the rest are
         additive (ADR-053) and read-only to compute.
     """
     path = _settings_path()
-    settings = _load_settings(path)
-    hooks = settings.get("hooks", {})
-    post_tool_use = hooks.get("PostToolUse", [])
+    try:
+        post_tool_use = _post_tool_use_groups(path, _load_settings(path))
+    except SettingsUnreadableError as exc:
+        return {
+            "installed": False,
+            "path": str(path),
+            "commands": [],
+            "stale": [],
+            "duplicates": [],
+            "healthy": False,
+            "readable": False,
+            "problem": exc.problem,
+        }
 
     commands = _pm_hook_commands(post_tool_use)
     stale = [cmd for cmd in commands if not _hook_binary_exists(cmd)]
@@ -247,6 +609,7 @@ def get_hooks_status() -> dict:
         "stale": stale,
         "duplicates": duplicates,
         "healthy": installed and not stale and not duplicates,
+        "readable": True,
     }
 
 
@@ -264,17 +627,18 @@ def install_hooks() -> str:
 
     Returns:
         Status message.
+
+    Raises:
+        SettingsUnreadableError: The settings file exists but cannot be read
+            as Claude Code settings. Nothing is written.
+        SettingsNotWritableError: The settings file cannot be replaced safely
+            (read-only, another hard link, a directory that is not writable,
+            a link to a location that does not exist). Nothing is written.
+        OSError: Writing the file failed.
     """
     path = _settings_path()
     settings = _load_settings(path)
-
-    # Ensure hooks structure exists
-    if "hooks" not in settings:
-        settings["hooks"] = {}
-    if "PostToolUse" not in settings["hooks"]:
-        settings["hooks"]["PostToolUse"] = []
-
-    post_tool_use = settings["hooks"]["PostToolUse"]
+    post_tool_use = _post_tool_use_groups(path, settings)
 
     commands = _pm_hook_commands(post_tool_use)
     stale = [cmd for cmd in commands if not _hook_binary_exists(cmd)]
@@ -289,11 +653,13 @@ def install_hooks() -> str:
         # Unhealthy: strip every PM Lens command (and only those), then fall
         # through to append one fresh entry.
         post_tool_use, repaired = _strip_pm_hooks(post_tool_use)
-        settings["hooks"]["PostToolUse"] = post_tool_use
 
     # Append pm-server hook group
     config = _build_hook_config()
-    post_tool_use.extend(config["hooks"]["PostToolUse"])
+    settings.setdefault("hooks", {})["PostToolUse"] = [
+        *post_tool_use,
+        *config["hooks"]["PostToolUse"],
+    ]
 
     _save_settings(path, settings)
     if repaired:
@@ -309,12 +675,18 @@ def uninstall_hooks() -> str:
 
     Returns:
         Status message.
+
+    Raises:
+        SettingsUnreadableError: The settings file exists but cannot be read
+            as Claude Code settings. Nothing is written.
+        SettingsNotWritableError: The settings file cannot be replaced safely
+            (read-only, another hard link, a directory that is not writable,
+            a link to a location that does not exist). Nothing is written.
+        OSError: Writing the file failed.
     """
     path = _settings_path()
     settings = _load_settings(path)
-
-    hooks = settings.get("hooks", {})
-    post_tool_use = hooks.get("PostToolUse", [])
+    post_tool_use = _post_tool_use_groups(path, settings)
 
     if not post_tool_use:
         return "no pm-server hooks found (skipped)"
@@ -562,20 +934,35 @@ def _build_commit_reminder(pm_path: Path, project_path: Path | None = None) -> s
     only the RO_ALLOWLIST tools, so suggesting ``pm_update_task`` / ``pm_log``
     would produce a confusing ``tool not found`` for the user. Switch to a
     read-only suggestion set when Lens is active.
+
+    Only in_progress tasks updated in the last ATTENTION_STALE_DAYS days are
+    named. A task left in_progress for months is almost never what a commit
+    completed, and naming the same forgotten ids after every commit teaches
+    the reader to skip the reminder; those are only counted, and pm_status
+    shows them with their age.
     """
     from .models import TaskStatus
     from .storage import load_tasks
+    from .velocity import ATTENTION_STALE_DAYS, is_stale
 
     lens_mode = os.environ.get("PM_LENS", "").lower() in {"1", "true", "yes", "on"}
 
     tasks = load_tasks(pm_path)
     active = [t for t in tasks if t.status == TaskStatus.IN_PROGRESS and _TASK_ID.match(t.id)]
-    task_ids = ", ".join(t.id for t in active)
+    today = _dt.date.today()
+    recent = [t for t in active if not is_stale(t, today)]
+    stale_count = len(active) - len(recent)
+    quiet_for = f"not updated for {ATTENTION_STALE_DAYS}+ days"
+    task_ids = ", ".join(t.id for t in recent)
+    if recent and stale_count:
+        task_ids += f" (and {stale_count} more {quiet_for})"
 
     if lens_mode:
         lines = ["[PM Lens] git commit recorded. (Read-only mode)"]
-        if active:
+        if recent:
             lines.append(f"In progress: {task_ids}.")
+        elif stale_count:
+            lines.append(f"{stale_count} in_progress task(s) {quiet_for}.")
         lines.append("pm_next, pm_status and pm_tasks show the current progress.")
         lines.append(
             "Recording task updates needs a full-mode pmlens host "
@@ -593,6 +980,13 @@ def _build_commit_reminder(pm_path: Path, project_path: Path | None = None) -> s
             # without a safe way to name it, say nothing.
             return ""
         where = f' These tasks belong to the project at "{project_path}"; pass it as project_path.'
+    if not recent:
+        # Nothing this commit is likely to have completed: one sentence, no ids.
+        of_project = f' of the project at "{project_path}"' if project_path is not None else ""
+        return (
+            f"[PM Lens] git commit recorded; {stale_count} in_progress task(s){of_project} "
+            f"{quiet_for} (pm_status lists them)."
+        )
     return (
         f"[PM Lens] git commit recorded. In progress: {task_ids}. "
         "If this commit completed one of them and it is not yet marked done, "
