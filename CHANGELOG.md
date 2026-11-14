@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+### Security
+
+- **Locks: fastmcp 4.1.6 and seven other updates**: `uv.lock` and
+  `requirements.lock` move fastmcp from 4.0.10 to 4.1.6. The locked 4.0.10 was
+  in the range of two FastMCP advisories published on 2026-10-23
+  (GHSA-7xgj-8392-5q4r and GHSA-vqqp-x5qm-5qp4, both fixed in 4.1.2). pmlens
+  uses neither of the affected features (component authorization after a
+  transform, and OAuth in the MCP client wrappers), and an install with pipx or
+  uvx already resolved a fixed release; the locks are what the hash-verified
+  install and CI use. Also updated: pydantic 2.14.3, click 8.5.1, tomlkit
+  0.15.2, filelock 4.2.9 and, for development, pytest 9.2.0, ruff 0.17.4 and
+  pip-tools 7.6.2, with the releases they require (mcp 2.3.0, pydantic-core
+  2.50.4, beartype 0.23.1, openapi-pydantic 0.6.0). fastmcp 4.1 adds certifi
+  and no longer depends on keyring, so keyring and ten packages only it needed
+  leave the locks. The declared ranges in `pyproject.toml` are unchanged.
+
 ## [0.18.1] - 2026-11-11
 
 ### Fixed
